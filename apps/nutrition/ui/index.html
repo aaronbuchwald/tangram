@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tangram · Nutrition</title>
+  <style>
+    /* Visual design ported from Chamber's nutrition app (apps/nutrition). */
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel-2: #1e222b;
+      --border: #2a2f3a;
+      --text: #e6e8ec;
+      --muted: #8b93a1;
+      --accent: #6ea8fe;
+      --macro: #6ea8fe;
+      --micro: #7ee0b8;
+      --danger: #ff7a7a;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 28px 24px 12px;
+      max-width: 880px;
+      margin: 0 auto;
+    }
+    h1 { margin: 0; font-size: 22px; letter-spacing: .2px; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    main { max-width: 880px; margin: 0 auto; padding: 12px 24px 60px; }
+
+    .toolbar { display: flex; gap: 10px; align-items: center; margin: 16px 0; flex-wrap: wrap; }
+    .date-nav { display: flex; gap: 6px; align-items: center; }
+    .date-nav button { padding: 8px 12px; line-height: 1; }
+    #datePicker {
+      width: auto; font: inherit; padding: 7px 10px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+      color-scheme: dark;
+    }
+    #datePicker.not-today { border-color: var(--accent); }
+    button {
+      font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--panel-2); color: var(--text); padding: 8px 14px;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #07101f; font-weight: 600; }
+    button:hover { filter: brightness(1.1); }
+    button:disabled { opacity: .5; cursor: default; }
+
+    .live { font-size: 12px; color: var(--muted); }
+    .live .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #58c08a; margin-right: 5px; }
+    .live.off .dot { background: var(--muted); }
+
+    .meals { display: flex; flex-direction: column; gap: 10px; }
+    .meal {
+      background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .meal-head {
+      display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer;
+      user-select: none;
+    }
+    .meal-head:hover { background: var(--panel-2); }
+    .meal-name { font-weight: 600; }
+    .meal-time { color: var(--muted); font-size: 13px; }
+    .spacer { flex: 1; }
+    .chev { color: var(--muted); transition: transform .15s ease; }
+    .meal.open .chev { transform: rotate(90deg); }
+    .del-btn {
+      background: none; border: none; color: var(--muted); padding: 2px 6px; font-size: 14px;
+    }
+    .del-btn:hover { color: var(--danger); }
+
+    .meal-body { padding: 0 16px 16px; display: none; }
+    .meal.open .meal-body { display: block; }
+    .comps { color: var(--muted); font-size: 13px; margin: 6px 0 2px; }
+
+    .nut-group-label {
+      font-size: 11px; text-transform: uppercase; letter-spacing: .8px;
+      color: var(--muted); margin: 10px 0 6px;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    td { padding: 6px 0; border-bottom: 1px solid var(--border); }
+    td.val { text-align: right; font-variant-numeric: tabular-nums; }
+    .pill { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
+    .pill.macro { background: var(--macro); }
+    .pill.micro { background: var(--micro); }
+
+    .empty, .loading { color: var(--muted); padding: 24px 0; text-align: center; }
+    .empty strong { color: var(--text); }
+    .err { color: var(--danger); padding: 10px 0; }
+
+    /* form */
+    dialog {
+      border: 1px solid var(--border); background: var(--panel); color: var(--text);
+      border-radius: var(--radius); padding: 0; width: min(480px, 92vw);
+    }
+    dialog::backdrop { background: rgba(0,0,0,.55); }
+    .form-inner { padding: 20px; }
+    .form-inner h2 { margin: 0 0 14px; font-size: 17px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+    input {
+      width: 100%; font: inherit; padding: 9px 10px; border-radius: 8px;
+      border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    }
+    .comp-row { display: flex; gap: 8px; margin-top: 8px; }
+    .comp-row input.cname { flex: 1; }
+    .comp-row input.cqty { width: 110px; }
+    .comp-row button { padding: 8px 10px; }
+    .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .link-btn {
+      background: none; border: none; padding: 0;
+      color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; text-decoration: underline;
+    }
+    .link-btn:hover { filter: brightness(1.15); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Nutrition</h1>
+    <div class="sub">Tangram · a local-first replicated meal log</div>
+  </header>
+  <main>
+    <div class="toolbar">
+      <button class="primary" id="logBtn">+ Log a meal</button>
+      <div class="date-nav">
+        <button id="prevDay" title="Previous day" aria-label="Previous day">‹</button>
+        <input type="date" id="datePicker" />
+        <button id="nextDay" title="Next day" aria-label="Next day">›</button>
+        <button id="todayBtn">Today</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></span>
+      <span class="sub" id="count"></span>
+    </div>
+    <div id="error" class="err" hidden></div>
+    <div id="meals" class="meals"><div class="loading">Waiting for state…</div></div>
+  </main>
+
+  <dialog id="logDialog">
+    <form method="dialog" class="form-inner" id="logForm">
+      <h2>Log a meal · <span id="logDayLabel">Today</span></h2>
+      <label for="mealName">Meal name</label>
+      <input id="mealName" placeholder="Chicken burrito bowl" autocomplete="off" />
+      <label>Components (grams)</label>
+      <div id="compRows"></div>
+      <button type="button" class="link-btn" id="addCompBtn">+ add component</button>
+      <div class="hint">
+        Known components resolve to nutrition automatically; unknown ones can be
+        registered later (e.g. by an agent via the <code>add_ingredient</code> MCP tool)
+        and past meals resolve retroactively.
+      </div>
+      <datalist id="knownComponents"></datalist>
+      <div class="form-actions">
+        <button type="button" id="cancelBtn">Cancel</button>
+        <button type="submit" class="primary" id="saveBtn">Log meal</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    // ── tiny action client (unwraps the { result } / { error } envelope) ──
+    async function act(name, args) {
+      const r = await fetch(`api/actions/${name}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(args ?? {}),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      return data.result;
+    }
+
+    const fmtTime = (ms) => new Date(ms).toLocaleTimeString(undefined, { timeStyle: "short" });
+    const round = (n) => (Math.round(n * 10) / 10).toLocaleString();
+
+    // ── day selection (local-calendar based, as in Chamber) ───────────────
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const localDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    const todayStr = () => localDateStr(new Date());
+    const msToDateStr = (ms) => localDateStr(new Date(ms));
+    function shiftDay(dateStr, delta) {
+      const [y, m, d] = dateStr.split("-").map(Number);
+      return localDateStr(new Date(y, m - 1, d + delta));
+    }
+    function fmtDay(dateStr) {
+      const [y, m, d] = dateStr.split("-").map(Number);
+      const date = new Date(y, m - 1, d);
+      if (dateStr === todayStr()) return "Today";
+      if (dateStr === shiftDay(todayStr(), -1)) return "Yesterday";
+      return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+    }
+    // Timestamp for a meal logged on the selected day: now if today, else local noon.
+    function eatenAtForDay(dateStr) {
+      if (dateStr === todayStr()) return Date.now();
+      const [y, m, d] = dateStr.split("-").map(Number);
+      return new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
+    }
+
+    let selectedDate = todayStr();
+    let state = null;            // latest replicated state, pushed over SSE
+    const openMeals = new Set(); // ids of expanded cards, preserved across re-renders
+
+    const el = (id) => document.getElementById(id);
+    const mealsEl = el("meals");
+    const errEl = el("error");
+    function showError(msg) { errEl.textContent = msg; errEl.hidden = false; }
+    function clearError() { errEl.hidden = true; }
+
+    function syncDatePicker() {
+      const picker = el("datePicker");
+      picker.value = selectedDate;
+      picker.classList.toggle("not-today", selectedDate !== todayStr());
+    }
+
+    // ── gold view, computed client-side from the replicated tables ────────
+    function nutritionFor(meal) {
+      const totals = new Map(); // nutrient_id → amount
+      for (const comp of meal.components ?? []) {
+        const mapping = (state.component_mappings ?? []).find(
+          (m) => m.component.toLowerCase() === comp.component.toLowerCase()
+        );
+        if (!mapping) continue;
+        for (const inu of state.ingredient_nutrients ?? []) {
+          if (inu.ingredient_id !== mapping.ingredient_id) continue;
+          const amount = inu.amount_per_100g * (comp.qty_g / 100) * mapping.fraction;
+          totals.set(inu.nutrient_id, (totals.get(inu.nutrient_id) ?? 0) + amount);
+        }
+      }
+      const rows = [];
+      for (const [nutrientId, amount] of totals) {
+        const n = (state.nutrients ?? []).find((n) => n.id === nutrientId);
+        if (n) rows.push({ nutrient: n.name, nutrient_kind: n.kind, unit: n.unit, amount });
+      }
+      rows.sort((a, b) =>
+        (a.nutrient_kind === "macro" ? 0 : 1) - (b.nutrient_kind === "macro" ? 0 : 1) ||
+        a.nutrient.localeCompare(b.nutrient)
+      );
+      return rows;
+    }
+
+    // ── render the meal list for the selected day ─────────────────────────
+    function render() {
+      if (!state) return;
+      clearError();
+      syncDatePicker();
+      const dayMeals = (state.meals ?? [])
+        .filter((m) => msToDateStr(m.eaten_at_ms) === selectedDate)
+        .sort((a, b) => b.eaten_at_ms - a.eaten_at_ms);
+      const n = dayMeals.length;
+      el("count").textContent = `${n} meal${n === 1 ? "" : "s"} · ${fmtDay(selectedDate)}`;
+      if (!n) {
+        mealsEl.innerHTML = `<div class="empty">No meals logged for <strong>${fmtDay(selectedDate)}</strong>. Click “+ Log a meal”.</div>`;
+        return;
+      }
+      mealsEl.replaceChildren(...dayMeals.map(mealCard));
+
+      // Refresh the known-components datalist for the log form.
+      el("knownComponents").replaceChildren(
+        ...(state.component_mappings ?? []).map((m) => {
+          const opt = document.createElement("option");
+          opt.value = m.component;
+          return opt;
+        })
+      );
+    }
+
+    function mealCard(m) {
+      const card = document.createElement("div");
+      card.className = "meal";
+      if (openMeals.has(m.id)) card.classList.add("open");
+      card.innerHTML = `
+        <div class="meal-head">
+          <span class="meal-name"></span>
+          <span class="spacer"></span>
+          <span class="meal-time"></span>
+          <button class="del-btn" title="Delete meal">✕</button>
+          <span class="chev">›</span>
+        </div>
+        <div class="meal-body"></div>`;
+      card.querySelector(".meal-name").textContent = m.name;
+      card.querySelector(".meal-time").textContent = fmtTime(m.eaten_at_ms);
+
+      const body = card.querySelector(".meal-body");
+      const comps = document.createElement("div");
+      comps.className = "comps";
+      comps.textContent = (m.components ?? [])
+        .map((c) => `${c.component} ${round(c.qty_g)}g`)
+        .join(" · ");
+      body.appendChild(comps);
+      body.appendChild(nutritionTable(nutritionFor(m)));
+
+      card.querySelector(".meal-head").addEventListener("click", () => {
+        card.classList.toggle("open");
+        if (card.classList.contains("open")) openMeals.add(m.id);
+        else openMeals.delete(m.id);
+      });
+      card.querySelector(".del-btn").addEventListener("click", (e) => {
+        e.stopPropagation();
+        act("delete_meal", { id: m.id }).catch((err) => showError(err.message));
+      });
+      return card;
+    }
+
+    function nutritionTable(rows) {
+      const frag = document.createDocumentFragment();
+      if (!rows.length) {
+        const d = document.createElement("div");
+        d.className = "empty";
+        d.textContent =
+          "No nutrient data for this meal — its components aren't registered with any nutrition data yet.";
+        frag.appendChild(d);
+        return frag;
+      }
+      for (const kind of ["macro", "micro"]) {
+        const group = rows.filter((r) => r.nutrient_kind === kind);
+        if (!group.length) continue;
+        const label = document.createElement("div");
+        label.className = "nut-group-label";
+        label.textContent = kind === "macro" ? "Macronutrients" : "Micronutrients";
+        frag.appendChild(label);
+        const table = document.createElement("table");
+        for (const r of group) {
+          const tr = document.createElement("tr");
+          const name = document.createElement("td");
+          name.innerHTML = `<span class="pill ${kind}"></span>`;
+          name.append(r.nutrient);
+          const val = document.createElement("td");
+          val.className = "val";
+          val.textContent = `${round(r.amount)} ${r.unit}`;
+          tr.append(name, val);
+          table.appendChild(tr);
+        }
+        frag.appendChild(table);
+      }
+      return frag;
+    }
+
+    // ── date navigation ───────────────────────────────────────────────────
+    function setSelectedDate(dateStr) {
+      selectedDate = dateStr || todayStr();
+      render();
+    }
+    el("prevDay").addEventListener("click", () => setSelectedDate(shiftDay(selectedDate, -1)));
+    el("nextDay").addEventListener("click", () => setSelectedDate(shiftDay(selectedDate, 1)));
+    el("todayBtn").addEventListener("click", () => setSelectedDate(todayStr()));
+    el("datePicker").addEventListener("change", (e) => setSelectedDate(e.target.value));
+
+    // ── log-meal dialog ───────────────────────────────────────────────────
+    const dialog = el("logDialog");
+
+    function compRow(name = "", qty = "") {
+      const row = document.createElement("div");
+      row.className = "comp-row";
+      row.innerHTML = `
+        <input class="cname" placeholder="grilled chicken" list="knownComponents" autocomplete="off" />
+        <input class="cqty" type="number" min="1" step="1" placeholder="grams" />
+        <button type="button" title="Remove">✕</button>`;
+      row.querySelector(".cname").value = name;
+      row.querySelector(".cqty").value = qty;
+      row.querySelector("button").addEventListener("click", () => row.remove());
+      return row;
+    }
+
+    el("addCompBtn").addEventListener("click", () => el("compRows").appendChild(compRow()));
+
+    el("logBtn").addEventListener("click", () => {
+      el("mealName").value = "";
+      el("compRows").replaceChildren(compRow());
+      el("logDayLabel").textContent = fmtDay(selectedDate);
+      dialog.showModal();
+    });
+    el("cancelBtn").addEventListener("click", () => dialog.close());
+
+    el("logForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const name = el("mealName").value.trim();
+      const components = [...el("compRows").querySelectorAll(".comp-row")]
+        .map((row) => ({
+          component: row.querySelector(".cname").value.trim(),
+          qty_g: Number(row.querySelector(".cqty").value),
+        }))
+        .filter((c) => c.component && c.qty_g > 0);
+      if (!name || !components.length) {
+        showError("Give the meal a name and at least one component with grams.");
+        return;
+      }
+      const saveBtn = el("saveBtn");
+      saveBtn.disabled = true;
+      try {
+        await act("log_meal", { name, components, eaten_at_ms: eatenAtForDay(selectedDate) });
+        dialog.close();
+      } catch (err) {
+        showError("Could not log meal: " + err.message);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    // ── live updates ──────────────────────────────────────────────────────
+    // The server pushes the full replicated state over SSE on connect and on
+    // every change — local writes, MCP tool calls, and changes synced in from
+    // OTHER INSTANCES — so this view re-renders live with no polling.
+    const live = el("live");
+    const liveText = el("liveText");
+    const events = new EventSource("api/events");
+    events.addEventListener("state", (e) => {
+      state = JSON.parse(e.data);
+      live.classList.remove("off");
+      liveText.textContent = "live";
+      render();
+    });
+    events.onerror = () => {
+      live.classList.add("off");
+      liveText.textContent = "reconnecting…";
+    };
+  </script>
+</body>
+</html>

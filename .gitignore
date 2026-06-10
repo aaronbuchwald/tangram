@@ -42,3 +42,7 @@ coverage/
 # Added by cargo
 
 /target
+
+# Tangram runtime data (replicated document files)
+data/
+data-*/

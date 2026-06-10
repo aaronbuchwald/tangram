@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Notes</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fdfdfc;
+      --fg: #1c1c1a;
+      --muted: #77756e;
+      --border: #e3e1da;
+      --accent: #c2552b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1e1e1c;
+        --fg: #e8e6e0;
+        --muted: #8f8d85;
+        --border: #38362f;
+        --accent: #e07a4f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 1rem;
+      background: var(--bg); color: var(--fg);
+      font: 15px/1.5 system-ui, sans-serif;
+      max-width: 640px; margin-inline: auto;
+    }
+    h1 { font-size: 1.05rem; margin: 0 0 0.25rem; }
+    .live { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.75rem; }
+    .live .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #5aa869; margin-right: 4px; }
+    .live.off .dot { background: var(--muted); }
+    form { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+    input {
+      flex: 1; padding: 0.45rem 0.6rem; border: 1px solid var(--border);
+      border-radius: 6px; background: transparent; color: inherit; font: inherit;
+    }
+    button {
+      padding: 0.45rem 0.8rem; border: none; border-radius: 6px;
+      background: var(--accent); color: #fff; font: inherit; cursor: pointer;
+    }
+    button.ghost { background: transparent; color: var(--muted); padding: 0.2rem 0.4rem; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li {
+      padding: 0.45rem 0.1rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: baseline; gap: 0.75rem;
+    }
+    li span.text { flex: 1; overflow-wrap: anywhere; }
+    li time { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+    .empty { color: var(--muted); padding: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Notes</h1>
+  <div class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></div>
+  <form id="add-form">
+    <input id="note-input" placeholder="Add a note…" autocomplete="off" required />
+    <button type="submit">Add</button>
+  </form>
+  <ul id="notes"></ul>
+  <div class="empty" id="empty" hidden>No notes yet. Add one here, from a synced device, or via an MCP tool call.</div>
+
+  <script>
+    const list = document.getElementById("notes");
+    const empty = document.getElementById("empty");
+    const input = document.getElementById("note-input");
+
+    async function act(name, args) {
+      const res = await fetch(`api/actions/${name}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args ?? {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data.result;
+    }
+
+    function render(state) {
+      const notes = [...(state.notes ?? [])].sort((a, b) => b.created_at_ms - a.created_at_ms);
+      list.replaceChildren(...notes.map((note) => {
+        const li = document.createElement("li");
+        const text = document.createElement("span");
+        text.className = "text";
+        text.textContent = note.text;
+        const time = document.createElement("time");
+        time.textContent = new Date(note.created_at_ms).toLocaleTimeString();
+        const del = document.createElement("button");
+        del.className = "ghost";
+        del.textContent = "✕";
+        del.title = "Delete note";
+        del.addEventListener("click", () => act("delete_note", { id: note.id }).catch(console.error));
+        li.append(text, time, del);
+        return li;
+      }));
+      empty.hidden = notes.length > 0;
+    }
+
+    document.getElementById("add-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      try { await act("add_note", { text }); } catch (err) { console.error(err); }
+    });
+
+    // The server pushes the full state over SSE on connect and on every
+    // change — including changes that arrive from a *different instance* via
+    // CRDT sync — so this UI re-renders live with no polling.
+    const live = document.getElementById("live");
+    const liveText = document.getElementById("liveText");
+    const events = new EventSource("api/events");
+    events.addEventListener("state", (e) => {
+      render(JSON.parse(e.data));
+      live.classList.remove("off");
+      liveText.textContent = "live";
+    });
+    events.onerror = () => {
+      live.classList.add("off");
+      liveText.textContent = "reconnecting…";
+    };
+  </script>
+</body>
+</html>

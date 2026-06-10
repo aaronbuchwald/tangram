@@ -1,0 +1,25 @@
+[package]
+name = "tangram"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tangram-macros.workspace = true
+
+anyhow.workspace = true
+automerge.workspace = true
+autosurgeon.workspace = true
+axum.workspace = true
+dotenvy.workspace = true
+futures-util.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

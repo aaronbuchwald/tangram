@@ -1,102 +1,129 @@
-# Tangram App Template
+# Tangram
 
-A cookie-cutter for building small Rust servers in the **Tangram** style: one
-backend, multiple frontends. Each app is a single binary that exposes its
-capabilities three ways at once:
+Build small, local-first apps whose state replicates across devices and whose
+capabilities are exposed to both humans and AI — from one plain-Rust
+definition.
+
+A Tangram app is a single binary serving three surfaces over one shared,
+CRDT-replicated state:
 
 | Surface | Endpoint | Consumed by |
 |---|---|---|
 | **MCP** (streamable HTTP) | `/mcp` | AI agents — Claude Code, Claude Desktop, any MCP client |
-| **Web UI** | `/` | Humans in a browser |
-| **Embeddable Web UI** | `/` in an `<iframe>` | Note-taking apps (Obsidian), the Tangram shell, dashboards |
+| **Web UI + JSON API** | `/`, `/api/*` | Humans (standalone or iframed into Obsidian / a Tangram shell) |
+| **Sync** (Automerge protocol over WebSocket) | `/sync` | Other instances of the same app — your other devices, a shared relay, a collaborator |
 
-Tangram is about running and arranging small apps into a cohesive whole —
-making it as easy as possible to securely run, connect, and share small apps
-for AI. The pattern this template enforces: keep the domain logic in a shared
-backend state, and treat MCP and the web UI as thin, parallel frontends over
-it. AI and humans see the same live data.
+State lives in an [Automerge](https://automerge.org) document persisted to
+disk: the app is fully functional offline, and when a peer is reachable,
+changes merge from both sides automatically. Every connected UI re-renders
+live (SSE push) when a change lands — whether it came from the local UI, an
+MCP tool call, or another instance. Cross-instance UI updates land in tens of
+milliseconds on a LAN.
 
-The included example is a shared **scratchpad**: an agent can add notes via
-MCP tools while a human watches them appear in the UI (and vice versa).
+## What an app looks like
 
-## Quickstart
+```rust
+use tangram::prelude::*;
+
+#[model]                       // replicated, persisted, schema'd
+#[derive(Default)]
+struct Notes { notes: Vec<Note> }
+
+#[model]
+struct Note { id: String, text: String, created_at_ms: i64 }
+
+#[actions]                     // each method → MCP tool + HTTP endpoint
+impl Notes {
+    /// Add a note. Returns the new note's id.
+    pub fn add_note(&mut self, text: String) -> String { /* … */ }
+
+    /// List all notes, newest first.
+    pub fn list_notes(&self) -> Vec<Note> { /* … */ }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    App::<Notes>::new("notes").serve().await
+}
+```
+
+`&mut self` methods are mutating actions (each becomes one attributed CRDT
+change); `&self` methods are read-only actions. Doc comments become MCP tool
+descriptions; parameters become JSON-schema'd arguments.
+
+## Workspace layout
+
+```
+crates/tangram          the SDK: CRDT store, sync, web + MCP surfaces, App builder
+crates/tangram-macros   #[model] and #[actions] proc macros
+apps/notes              minimal example: a replicated notes list
+apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
+docs/SDK_DESIGN.md      architecture & roadmap
+```
+
+## Run the examples
 
 ```sh
-cp .env.example .env   # optional; defaults work for local dev
-cargo run
+cargo run -p tangram-notes        # http://127.0.0.1:8080
+cargo run -p tangram-nutrition
 ```
 
-Then:
+### See replication live
 
-- Web UI: <http://127.0.0.1:8080/>
-- Health: <http://127.0.0.1:8080/healthz>
-- Connect an MCP client:
+Run two instances of the same app and point the second at the first:
 
-  ```sh
-  claude mcp add --transport http scratchpad http://127.0.0.1:8080/mcp
-  ```
+```sh
+cargo run -p tangram-nutrition    # instance A on :8080
 
-  Ask Claude to "add a note to the scratchpad" and watch it appear in the UI.
-
-### Embedding in Obsidian
-
-Paste an iframe into any note (or use it in Canvas):
-
-```html
-<iframe src="http://127.0.0.1:8080/" style="width:100%;height:300px;border:none;"></iframe>
+BIND_ADDR=127.0.0.1:8081 \
+TANGRAM_DATA_DIR=data-b \
+TANGRAM_REMOTE=ws://127.0.0.1:8080/sync \
+cargo run -p tangram-nutrition    # instance B, replicating with A
 ```
 
-The server sends a `Content-Security-Policy: frame-ancestors` header instead
-of `X-Frame-Options`, so embedding works anywhere by default and can be
-restricted per deployment via `FRAME_ANCESTORS` in `.env`.
+Open both UIs; log a meal in either and watch it appear in the other
+immediately. Kill A, keep using B offline, restart A — they reconverge.
 
-## Using this template
+### Connect an agent
 
-1. Clone, then rename the package in `Cargo.toml` (and `TangramMcp` if you like).
-2. Replace the scratchpad in `src/state.rs` with your domain logic.
-3. Expose it to AI: add `#[tool]` methods in `src/mcp.rs`.
-4. Expose it to humans: add routes in `src/web.rs` and build out `ui/`.
-
-### Layout
-
-```
-src/
-  main.rs    server assembly: config, logging, CSP, MCP mount, graceful shutdown
-  state.rs   shared backend state — your app's actual logic lives here
-  mcp.rs     MCP frontend (rmcp tools over streamable HTTP)
-  web.rs     web frontend (JSON API + static files from ui/)
-ui/
-  index.html dependency-free UI; theme-aware so it looks right embedded or standalone
+```sh
+claude mcp add --transport http nutrition http://127.0.0.1:8080/mcp
 ```
 
-### Configuration (`.env`)
+Ask Claude to log a meal or register nutrition data for a new ingredient
+(`add_ingredient`) — the change lands in the same document and pushes to every
+UI and synced instance.
+
+## Configuration (env / `.env`)
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BIND_ADDR` | `127.0.0.1:8080` | Listen address; `0.0.0.0:…` to expose |
-| `FRAME_ANCESTORS` | `*` | Who may iframe the UI (CSP `frame-ancestors`) |
+| `BIND_ADDR` | `127.0.0.1:8080` | Listen address |
+| `TANGRAM_REMOTE` | — | `ws://host:port/sync` of a peer to replicate with |
+| `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
+| `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
 
-`.env` is gitignored; commit `.env.example` instead.
+## How it works
 
-## Security notes
+- **Model**: `#[model]` structs are mapped to an Automerge document with
+  [autosurgeon](https://github.com/automerge/autosurgeon); the genesis state
+  (`Default`) is committed deterministically (fixed actor, zero timestamp) so
+  independently-started instances share a document root and merge cleanly.
+  Keep `Default` deterministic (use `Vec`, not `HashMap`).
+- **Actions**: run once on the receiving instance under the store lock —
+  hydrate model → run method → reconcile back as one commit (named after the
+  action, so history is attributable). Results are returned to the caller;
+  the resulting *data* (not the action) replicates.
+- **Sync**: Automerge's sync protocol over WebSocket; every instance serves
+  `/sync` and can dial one `TANGRAM_REMOTE`. Topology is symmetric — a
+  "server" is just a reachable peer.
+- **Live UIs**: a watch channel fires on every document change; `/api/events`
+  (SSE) pushes the full state JSON to UIs, and sync peers are woken to
+  forward the change on.
 
-The defaults favor local development and easy embedding. Before sharing an
-app beyond your machine:
-
-- **Bind**: keep `127.0.0.1` unless you mean to expose it; put TLS/auth in
-  front (e.g. a reverse proxy or tailnet) if you do.
-- **Framing**: set `FRAME_ANCESTORS` to the specific hosts that should embed
-  the UI, e.g. `'self' app://obsidian.md`.
-- **CORS**: `src/web.rs` uses `CorsLayer::permissive()` so embedding hosts can
-  call the API; tighten it for apps holding sensitive data.
-- **MCP**: `/mcp` is unauthenticated by default. rmcp has an `auth` feature
-  (OAuth 2.0) when you need it.
-
-## Stack
-
-- [axum](https://docs.rs/axum) — HTTP server and routing
-- [rmcp](https://docs.rs/rmcp) — official Rust MCP SDK (streamable HTTP server transport)
-- [tower-http](https://docs.rs/tower-http) — static files, CORS, headers, tracing
-- `ui/` is served from disk for fast iteration; for single-binary distribution,
-  embed it with [rust-embed](https://docs.rs/rust-embed) or `include_str!`.
+See [docs/SDK_DESIGN.md](docs/SDK_DESIGN.md) for the full architecture and
+roadmap (browser replicas, access control, presence). Current implementation
+notes: sync uses raw automerge sync (not samod) and there is no auth on
+`/sync` or `/mcp` yet — bind to localhost or front with TLS/auth before
+exposing.
