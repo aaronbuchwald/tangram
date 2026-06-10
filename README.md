@@ -126,6 +126,36 @@ Ask Claude to log a meal or register nutrition data for a new ingredient
 (`add_ingredient`) — the change lands in the same document and pushes to every
 UI and synced instance.
 
+## Run an app sandboxed (gVisor)
+
+Each app also ships as a tiny OCI image — a static musl binary plus its
+`ui/` dir on `FROM scratch` (~10–15 MB) — meant to run under
+[gVisor](https://gvisor.dev)'s `runsc` runtime (Phase 0 of
+[docs/RUNTIME_PLAN.md](docs/RUNTIME_PLAN.md)). Build both images:
+
+```sh
+rustup target add x86_64-unknown-linux-musl   # once
+sudo apt-get install -y musl-tools            # once (Debian/Ubuntu)
+scripts/build-images.sh                       # → tangram/notes:dev, tangram/nutrition:dev
+```
+
+With Docker and runsc installed (gvisor.dev/docs → apt repo, then
+`sudo runsc install && sudo systemctl restart docker`), run an app:
+
+```sh
+docker run -d --name notes --runtime=runsc --read-only \
+  -p 127.0.0.1:19080:8080 -v notes-data:/data tangram/notes:dev
+curl http://127.0.0.1:19080/healthz   # all surfaces: / /api/* /sync /mcp
+```
+
+Inside the image the app binds `0.0.0.0:8080` (required for port mapping;
+keep the host publish on loopback), writes only to the `/data` volume, and
+serves its UI from `/ui` via the `TANGRAM_UI_DIR` override — the
+compile-time UI path apps pin with `.ui_dir(...)` doesn't exist in the
+image. The nutrition app resolves meal descriptions from inside the sandbox
+too: pass the key with `--env-file .env` (gVisor's netstack handles the
+egress). Cold start to a serving `/healthz` is ~240 ms.
+
 ## Getting started: a persistent remote + a local replica
 
 The day-to-day setup: a remote box runs the apps permanently; your laptop
@@ -239,6 +269,7 @@ internet does not.
 | `TANGRAM_REMOTE` | — | `ws://host:port/sync` of a peer to replicate with (single-app mode) |
 | `TANGRAM_REMOTE_<NAME>` | — | Per-app remote, e.g. `TANGRAM_REMOTE_NOTES` (required form in a shell) |
 | `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
+| `TANGRAM_UI_DIR` | builder value | Static UI directory; overrides the app's compiled-in path (set in container images, where that path doesn't exist) |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
 | `NUTRITION_STRATEGY` | auto | Nutrition app: how novel components resolve (`offline` \| `calorieninjas` \| `llm`); unset → `calorieninjas` if `CALORIENINJAS_API_KEY` is set, else `offline` |

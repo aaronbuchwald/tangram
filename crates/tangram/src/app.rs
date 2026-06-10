@@ -27,6 +27,9 @@ use crate::{Model, mcp, sync, web};
 ///   (single-app mode only; see [`App::remote`] for multi-app hosts)
 /// - `TANGRAM_REMOTE_<NAME>` — per-app remote, e.g. `TANGRAM_REMOTE_NOTES`
 /// - `TANGRAM_DATA_DIR` — where the document lives (default `./data`)
+/// - `TANGRAM_UI_DIR` — static UI directory; when set it overrides the
+///   builder's [`ui_dir`](App::ui_dir) (containers set this because the
+///   compile-time path baked in by the app doesn't exist in their filesystem)
 /// - `FRAME_ANCESTORS` — CSP frame-ancestors for iframe embedding (default `*`)
 /// - `RUST_LOG` — log filter (default `info`)
 pub struct App<M> {
@@ -48,7 +51,10 @@ impl<M: Model + Actions> App<M> {
         }
     }
 
-    /// Directory of static UI files (default `ui/`).
+    /// Directory of static UI files (default `ui/`). The `TANGRAM_UI_DIR`
+    /// environment variable, when set, overrides this value at build time —
+    /// apps typically pin an absolute compile-time path here, which doesn't
+    /// exist inside a container image.
     pub fn ui_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.ui_dir = dir.into();
         self
@@ -88,6 +94,11 @@ impl<M: Model + Actions> App<M> {
     pub fn build_parts(self) -> anyhow::Result<(axum::Router, Ctx<M>)> {
         let data_dir =
             PathBuf::from(std::env::var("TANGRAM_DATA_DIR").unwrap_or_else(|_| "data".into()));
+        // The env override wins over the builder value: apps bake in an
+        // absolute compile-time UI path that doesn't exist inside containers.
+        let ui_dir = std::env::var("TANGRAM_UI_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.ui_dir.clone());
         let frame_ancestors = std::env::var("FRAME_ANCESTORS").unwrap_or_else(|_| "*".into());
         let csp = HeaderValue::from_str(&format!("frame-ancestors {frame_ancestors}"))
             .context("FRAME_ANCESTORS contains characters not valid in a header value")?;
@@ -111,7 +122,7 @@ impl<M: Model + Actions> App<M> {
             StreamableHttpServerConfig::default(),
         );
 
-        let router = web::router(store.clone(), self.ui_dir.clone())
+        let router = web::router(store.clone(), ui_dir)
             .nest_service("/mcp", mcp_service)
             .layer(SetResponseHeaderLayer::overriding(
                 header::CONTENT_SECURITY_POLICY,
