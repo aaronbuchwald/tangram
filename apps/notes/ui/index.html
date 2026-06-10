@@ -11,7 +11,11 @@
        saturated signature color per surface. Notes is the memo pad of the
        family — its single accent is the strain blue; red appears only on
        the destructive affordance. Committed dark theme: `color-scheme:
-       dark` keeps form controls and scrollbars coherent for everyone. */
+       dark` keeps form controls and scrollbars coherent for everyone.
+
+       Layout: a two-pane editor at ≥700px (note list | borderless writing
+       surface); below that the panes become two screens with a back
+       chevron, tuned for the 420px tile. */
     :root {
       color-scheme: dark;
       --bg: #0c0d0f;
@@ -21,9 +25,10 @@
       --text: #f2f4f7;
       --dim: #8d95a2;
       --faint: #5d6470;
-      --blue: #0093e7;
+      --blue: #009eee;
       --red: #ff4554;
       --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       /* numerals want a true light weight; head with light-capable system
          faces, then fall through to the platform default */
       --num: "Ubuntu Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -32,12 +37,10 @@
     html, body { height: 100%; }
     body {
       margin: 0;
-      padding: 22px 20px 56px;
       background: var(--bg);
       color: var(--text);
       font: 14px/1.5 var(--sans);
-      max-width: 600px;
-      margin-inline: auto;
+      overflow: hidden;
     }
 
     /* micro-label: the compact uppercase letterspaced voice of the system */
@@ -49,6 +52,18 @@
       color: var(--dim);
     }
 
+    .app { display: flex; height: 100dvh; }
+
+    /* ── left pane: the record of notes ───────────────────────────────────── */
+    .sidebar {
+      width: 320px;
+      flex: none;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line);
+      min-height: 0;
+    }
+    .side-head { padding: 22px 20px 0; }
     .topbar {
       display: flex;
       align-items: center;
@@ -89,15 +104,24 @@
       .live:not(.off) .dot { animation: pulse 2.4s ease-in-out infinite; }
       @keyframes pulse { 50% { opacity: .35; } }
     }
+    /* the editor topbar owns the live dot in wide mode; the list screen
+       shows its own only when it is the whole UI */
+    .sidebar .live { display: none; }
 
     /* glanceable tier: one big thin numeral readable at arm's length */
     .stat {
-      padding: 22px 0 20px;
+      padding: 18px 0 16px;
       border-bottom: 1px solid var(--line);
+    }
+    .statrow {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
     }
     .stat .num {
       font-family: var(--num);
-      font-size: clamp(44px, 12vw, 56px);
+      font-size: 44px;
       font-weight: 200;
       line-height: 1;
       letter-spacing: -.01em;
@@ -106,101 +130,240 @@
     }
     .stat .micro { display: block; margin-top: 8px; }
 
-    form { display: flex; gap: 10px; margin: 18px 0 8px; align-items: stretch; }
-    input {
-      flex: 1;
-      min-width: 0;
-      padding: 11px 14px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--panel);
-      color: var(--text);
-      font: inherit;
-      caret-color: var(--blue);
-    }
-    input::placeholder { color: var(--faint); }
-    input:focus { outline: none; border-color: var(--blue); }
-    button[type="submit"] {
-      font: 700 11px/1 var(--sans);
+    button { font-family: var(--sans); cursor: pointer; }
+    .btn {
+      font-size: 11px;
+      font-weight: 700;
       letter-spacing: .14em;
       text-transform: uppercase;
-      padding: 0 20px;
-      border: none;
+      padding: 9px 18px;
+      border: 1px solid var(--line);
       border-radius: 999px;
-      background: var(--blue);
-      color: #fff;
-      cursor: pointer;
+      background: transparent;
+      color: var(--dim);
+      white-space: nowrap;
     }
-    button[type="submit"]:hover { background: color-mix(in srgb, var(--blue) 85%, #fff); }
+    .btn:hover { color: var(--text); border-color: var(--faint); }
+    .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .btn.primary:hover { background: color-mix(in srgb, var(--blue) 85%, #fff); }
     :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
-    /* deep tier: the record itself, thin-ruled rows */
-    ul { list-style: none; margin: 6px 0 0; padding: 0; }
-    li {
-      display: grid;
-      grid-template-columns: 58px 1fr auto;
-      align-items: baseline;
-      border-bottom: 1px solid var(--line);
+    /* deep tier: the notes themselves, thin-ruled rows */
+    .notelist {
+      list-style: none;
+      margin: 0;
+      padding: 0 12px 28px;
+      overflow-y: auto;
+      flex: 1;
+      min-height: 0;
     }
-    li time {
-      font-size: 11px;
-      font-weight: 500;
-      font-variant-numeric: tabular-nums;
-      color: var(--faint);
-      padding: 13px 10px 13px 0;
+    .row {
+      position: relative;
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+    }
+    .row-main {
+      flex: 1;
+      min-width: 0;
+      display: block;
+      text-align: left;
+      background: none;
+      border: none;
+      color: inherit;
+      font: inherit;
+      padding: 12px 4px 12px 10px;
+    }
+    .row .title {
+      display: block;
+      font-weight: 600;
+      font-size: 13.5px;
+      color: var(--text);
       white-space: nowrap;
       overflow: hidden;
+      text-overflow: ellipsis;
     }
-    li .text {
-      padding: 12px 8px 12px 0;
-      overflow-wrap: anywhere;
-      color: var(--text);
+    .row .title.untitled { color: var(--faint); font-weight: 500; }
+    .row .meta {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--faint);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    li .del {
+    .row .meta time {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: .04em;
+      color: var(--dim);
+    }
+    .row:hover { background: var(--panel); }
+    .row.sel { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--blue); }
+    .row.sel .title { color: var(--text); }
+    .row .del {
+      flex: none;
       background: none;
       border: none;
       color: var(--faint);
-      padding: 12px 4px 12px 10px;
+      padding: 0 8px;
       font: 600 13px/1 var(--sans);
-      cursor: pointer;
+      opacity: 0;
     }
-    li .del:hover { color: var(--red); }
+    .row:hover .del, .row:focus-within .del { opacity: 1; }
+    .row .del:hover { color: var(--red); }
+    @media (hover: none) { .row .del { opacity: .55; } }
 
     .empty {
       color: var(--dim);
-      padding: 18px 0;
-      border-bottom: 1px solid var(--line);
+      padding: 18px 10px;
       font-size: 13px;
     }
 
-    @media (max-width: 460px) {
-      body { padding: 18px 14px 44px; }
-      li { grid-template-columns: 52px 1fr auto; }
-      li time { font-size: 10px; padding-right: 8px; }
+    /* ── right pane: the writing surface ──────────────────────────────────── */
+    .editor {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .ed-top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 22px 24px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .back {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--dim);
+      font: 600 17px/1 var(--sans);
+      padding: 2px 8px 4px 0;
+    }
+    .back:hover { color: var(--text); }
+    .spacer { flex: 1; }
+    /* the save stamp: same micro voice, blue while a write is pending */
+    #stamp { visibility: hidden; }
+    #stamp.saving { visibility: visible; color: var(--blue); }
+    #stamp.saved { visibility: visible; color: var(--faint); }
+    #stamp.unsaved { visibility: visible; color: var(--red); }
+
+    .ed-body { flex: 1; min-height: 0; display: flex; }
+    textarea {
+      flex: 1;
+      width: 100%;
+      max-width: 680px;
+      margin-inline: auto;
+      padding: 26px 28px 40px;
+      border: none;
+      resize: none;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.7 var(--sans);
+      caret-color: var(--blue);
+    }
+    textarea::placeholder { color: var(--faint); }
+    textarea:focus { outline: none; }
+
+    .ed-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      color: var(--faint);
+      padding: 0 24px 60px;
+      text-align: center;
+    }
+    .ed-empty .micro { color: var(--faint); }
+    .app.open .ed-empty { display: none; }
+    .app:not(.open) #note-text, .app:not(.open) #stamp { display: none; }
+
+    /* transient notice (e.g. the open note was deleted on another device) */
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 20px;
+      transform: translateX(-50%);
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--dim);
+      white-space: nowrap;
+      z-index: 10;
+    }
+    .toast[hidden] { display: none; }
+
+    /* ── compact: one screen at a time (the 420px tile) ───────────────────── */
+    @media (max-width: 699px) {
+      .sidebar { width: 100%; border-right: none; }
+      .sidebar .live { display: inline-flex; }
+      .app.open .sidebar { display: none; }
+      .app:not(.open) .editor { display: none; }
+      .back { display: block; }
+      .ed-top { padding: 18px 16px 12px; }
+      textarea { padding: 20px 16px 36px; }
+      .side-head { padding: 18px 14px 0; }
+      .notelist { padding: 0 6px 24px; }
     }
   </style>
 </head>
 <body>
-  <header class="topbar">
-    <h1>Notes</h1>
-    <div class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></div>
-  </header>
-  <section class="stat">
-    <div class="num" id="noteCount">–</div>
-    <span class="micro">Notes on record</span>
-  </section>
-  <form id="add-form">
-    <input id="note-input" placeholder="Write a note…" autocomplete="off" required />
-    <button type="submit">Add</button>
-  </form>
-  <ul id="notes"></ul>
-  <div class="empty" id="empty" hidden>No notes yet. Add one here, from a synced device, or via an MCP tool call.</div>
+  <div class="app" id="app">
+    <aside class="sidebar">
+      <div class="side-head">
+        <header class="topbar">
+          <h1>Notes</h1>
+          <span class="live off" data-live><span class="dot"></span><span data-livetext>connecting…</span></span>
+        </header>
+        <section class="stat">
+          <div class="statrow">
+            <div class="num" id="noteCount">–</div>
+            <button class="btn primary" id="newBtn">+ New note</button>
+          </div>
+          <span class="micro">Notes on record</span>
+        </section>
+      </div>
+      <ul class="notelist" id="notes"></ul>
+    </aside>
+
+    <section class="editor">
+      <div class="ed-top">
+        <button class="back" id="backBtn" title="Back to notes" aria-label="Back to notes">‹</button>
+        <span class="spacer"></span>
+        <span class="micro" id="stamp">Saved</span>
+        <span class="live off" data-live><span class="dot"></span><span data-livetext>connecting…</span></span>
+      </div>
+      <div class="ed-body">
+        <textarea id="note-text" placeholder="Start writing…" spellcheck="true" aria-label="Note text"></textarea>
+        <div class="ed-empty">
+          <span class="micro">No note open</span>
+          <span>Select a note on the left, or press “+ New note”.</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
 
   <script>
-    const list = document.getElementById("notes");
-    const empty = document.getElementById("empty");
-    const input = document.getElementById("note-input");
-    const noteCount = document.getElementById("noteCount");
+    const $ = (id) => document.getElementById(id);
+    const app = $("app");
+    const listEl = $("notes");
+    const ta = $("note-text");
+    const stamp = $("stamp");
 
     async function act(name, args) {
       const res = await fetch(`api/actions/${name}`, {
@@ -213,50 +376,230 @@
       return data.result;
     }
 
-    function render(state) {
-      const notes = [...(state.notes ?? [])].sort((a, b) => b.created_at_ms - a.created_at_ms);
-      noteCount.textContent = notes.length;
-      list.replaceChildren(...notes.map((note) => {
+    // ── note presentation: Apple-Notes title trick ────────────────────────
+    // No title field; a note's first non-empty line is its title and the
+    // rest collapses into the muted snippet line.
+    const editedAt = (n) => n.updated_at_ms ?? n.created_at_ms;
+    const sorted = (notes) => [...(notes ?? [])].sort((a, b) => editedAt(b) - editedAt(a));
+    function titleOf(n) {
+      const line = (n.text ?? "").split("\n").find((l) => l.trim());
+      return line ? line.trim() : null;
+    }
+    function snippetOf(n) {
+      const lines = (n.text ?? "").split("\n");
+      const i = lines.findIndex((l) => l.trim());
+      const rest = i < 0 ? "" : lines.slice(i + 1).join(" ").replace(/\s+/g, " ").trim();
+      return rest || "No additional text";
+    }
+    function fmtEdited(ms) {
+      const d = new Date(ms), now = new Date();
+      if (d.toDateString() === now.toDateString())
+        return d.toLocaleTimeString(undefined, { timeStyle: "short" });
+      const opts = { month: "short", day: "numeric" };
+      if (d.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+      return d.toLocaleDateString(undefined, opts);
+    }
+
+    // ── editor session state ──────────────────────────────────────────────
+    // The textarea is the source of truth for the open note while the user
+    // is "editing" (focused, dirty, debounce pending, or a save in flight);
+    // remote state never overwrites it in that window. The sidebar, by
+    // contrast, always re-renders from the latest replicated state.
+    let state = null;     // latest full state from SSE
+    let openId = null;    // id of the note in the editor
+    let dirty = false;    // textarea differs from last successful save
+    let saveTimer = null; // debounce handle
+    let inFlight = 0;     // update_note POSTs not yet resolved
+
+    const isEditing = () =>
+      dirty || inFlight > 0 || saveTimer !== null || document.activeElement === ta;
+
+    function setStamp(kind) {
+      stamp.className = `micro ${kind}`;
+      stamp.textContent = kind === "saving" ? "Saving" : kind === "unsaved" ? "Unsaved" : "Saved";
+    }
+
+    ta.addEventListener("input", () => {
+      if (!openId) return;
+      dirty = true;
+      setStamp("saving");
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(flush, 600);
+    });
+    // leaving the field flushes immediately — no keystroke outlives focus
+    ta.addEventListener("blur", flush);
+
+    // Push the current textarea contents for the currently open note.
+    // Captures id+text synchronously, so callers may flush right before
+    // switching notes without losing anything.
+    function flush() {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+      if (!openId || !dirty) return;
+      const id = openId, text = ta.value;
+      dirty = false;
+      inFlight++;
+      setStamp("saving");
+      act("update_note", { id, text })
+        .then(() => { if (openId === id && !dirty) setStamp("saved"); })
+        .catch((err) => {
+          console.error(err);
+          if (openId === id) { dirty = true; setStamp("unsaved"); }
+        })
+        .finally(() => { inFlight--; });
+    }
+
+    function openNote(id, { focus = true } = {}) {
+      if (id === openId) { app.classList.add("open"); if (focus) ta.focus(); return; }
+      flush(); // commit pending edits of the previous note first
+      const note = (state?.notes ?? []).find((n) => n.id === id);
+      if (!note) return;
+      openId = id;
+      dirty = false;
+      ta.value = note.text;
+      setStamp("saved");
+      app.classList.add("open");
+      renderList();
+      if (focus) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    }
+
+    function closeEditor() {
+      flush();
+      openId = null;
+      dirty = false;
+      ta.value = "";
+      stamp.className = "micro";
+      app.classList.remove("open");
+      renderList();
+    }
+
+    async function newNote() {
+      flush();
+      try {
+        const id = await act("create_note");
+        openId = id;
+        dirty = false;
+        ta.value = "";
+        setStamp("saved");
+        app.classList.add("open");
+        renderList();
+        ta.focus();
+      } catch (err) { console.error(err); showToast("Could not create note"); }
+    }
+
+    let toastTimer = null;
+    function showToast(msg) {
+      const t = $("toast");
+      t.textContent = msg;
+      t.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
+    }
+
+    // ── rendering ─────────────────────────────────────────────────────────
+    function renderList() {
+      if (!state) return;
+      const notes = sorted(state.notes);
+      $("noteCount").textContent = notes.length;
+      listEl.replaceChildren(...notes.map((note) => {
         const li = document.createElement("li");
+        li.className = "row" + (note.id === openId ? " sel" : "");
+        const main = document.createElement("button");
+        main.className = "row-main";
+        const title = document.createElement("span");
+        title.className = "title";
+        const t = titleOf(note);
+        title.textContent = t ?? "New note";
+        if (!t) title.classList.add("untitled");
+        const meta = document.createElement("span");
+        meta.className = "meta";
         const time = document.createElement("time");
-        time.textContent = new Date(note.created_at_ms).toLocaleTimeString(undefined, { timeStyle: "short" });
-        const text = document.createElement("span");
-        text.className = "text";
-        text.textContent = note.text;
+        time.textContent = fmtEdited(editedAt(note));
+        meta.append(time, document.createTextNode("  ·  " + snippetOf(note)));
+        main.append(title, meta);
+        main.addEventListener("click", () => openNote(note.id));
         const del = document.createElement("button");
         del.className = "del";
         del.textContent = "✕";
         del.title = "Delete note";
-        del.addEventListener("click", () => act("delete_note", { id: note.id }).catch(console.error));
-        li.append(time, text, del);
+        del.setAttribute("aria-label", "Delete note");
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (note.id === openId) {
+            // deleting the open note: drop any pending save and close
+            clearTimeout(saveTimer); saveTimer = null; dirty = false;
+            closeEditor();
+          }
+          act("delete_note", { id: note.id }).catch(console.error);
+        });
+        li.append(main, del);
         return li;
       }));
-      empty.hidden = notes.length > 0;
+      if (!notes.length) {
+        const d = document.createElement("li");
+        d.className = "empty";
+        d.textContent = "No notes yet. Press “+ New note” here, on a synced device, or via an MCP tool call.";
+        listEl.appendChild(d);
+      }
     }
 
-    document.getElementById("add-form").addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = "";
-      try { await act("add_note", { text }); } catch (err) { console.error(err); }
+    // Reconcile the open editor against fresh replicated state. The sidebar
+    // always updates; the textarea is only touched when the user is not
+    // editing (so our own autosave echo never moves the cursor, and remote
+    // edits to OTHER notes never disturb typing). A remote delete of the
+    // open note closes the editor gracefully.
+    function render() {
+      renderList();
+      if (!openId) return;
+      const note = (state.notes ?? []).find((n) => n.id === openId);
+      if (!note) {
+        clearTimeout(saveTimer); saveTimer = null; dirty = false;
+        closeEditor();
+        showToast("Note deleted on another device");
+        return;
+      }
+      if (!isEditing() && ta.value !== note.text) ta.value = note.text;
+    }
+
+    // ── controls ──────────────────────────────────────────────────────────
+    $("newBtn").addEventListener("click", newNote);
+    $("backBtn").addEventListener("click", closeEditor);
+    document.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        newNote();
+      } else if (e.key === "Escape" && openId && !window.matchMedia("(min-width: 700px)").matches) {
+        closeEditor();
+      }
     });
 
+    // ── live updates ──────────────────────────────────────────────────────
     // The server pushes the full state over SSE on connect and on every
     // change — including changes that arrive from a *different instance* via
     // CRDT sync — so this UI re-renders live with no polling.
-    const live = document.getElementById("live");
-    const liveText = document.getElementById("liveText");
+    function setLive(on, text) {
+      for (const el of document.querySelectorAll("[data-live]")) {
+        el.classList.toggle("off", !on);
+        el.querySelector("[data-livetext]").textContent = text;
+      }
+    }
+    let firstState = true;
     const events = new EventSource("api/events");
     events.addEventListener("state", (e) => {
-      render(JSON.parse(e.data));
-      live.classList.remove("off");
-      liveText.textContent = "live";
+      state = JSON.parse(e.data);
+      setLive(true, "live");
+      render();
+      if (firstState) {
+        firstState = false;
+        // wide mode starts with the latest note open, Apple-Notes style;
+        // compact starts on the list screen
+        if (window.matchMedia("(min-width: 700px)").matches) {
+          const notes = sorted(state.notes);
+          if (notes.length) openNote(notes[0].id, { focus: false });
+        }
+      }
     });
-    events.onerror = () => {
-      live.classList.add("off");
-      liveText.textContent = "reconnecting…";
-    };
+    events.onerror = () => setLive(false, "reconnecting…");
   </script>
 </body>
 </html>
