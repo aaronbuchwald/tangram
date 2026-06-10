@@ -5,354 +5,410 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Tangram · Nutrition</title>
   <style>
-    /* ── "The Duplicator": two-pass risograph print language ───────────────
-       Same paper stock as the sibling notes app, printed in hunter-green
-       ink with an orange second pass. Macros are the green pass, micros the
-       orange pass; meals sit on a ruled day-ledger with dotted leaders. */
+    /* ── Dark performance-console language ─────────────────────────────────
+       Near-black ground, dark cards, thin dividers, white primary text,
+       cool-gray secondary. Color carries data meaning only: each metric
+       owns one saturated signature color that reads instantly on black —
+       calories green, protein blue, carbs periwinkle, fat amber — and red
+       is reserved for destructive affordances. Disclosure runs in three
+       tiers: the day band (big thin numerals at arm's length), the meal
+       rows (name, time, mini macro split), and the expanded nutrient
+       table. Committed dark theme: `color-scheme: dark` keeps form
+       controls and scrollbars coherent for everyone. */
     :root {
-      color-scheme: light dark;
-      --paper: #f2f1ec;
-      --ink: #156b45;          /* hunter green, deepened for body contrast */
-      --ink-2: #bc3f18;        /* riso orange, second pass */
-      --muted: color-mix(in srgb, var(--ink) 62%, var(--paper));
-      --rule: color-mix(in srgb, var(--ink) 26%, var(--paper));
-      --faint: color-mix(in srgb, var(--ink) 8%, var(--paper));
-      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --paper: #0e1612;      /* night master: green-black stock */
-        --ink: #82cda6;
-        --ink-2: #ff9166;
-      }
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --panel: #15171b;
+      --panel-2: #1b1e23;
+      --line: #23262b;
+      --text: #f2f4f7;
+      --dim: #8d95a2;
+      --faint: #5d6470;
+      --kcal: #21e063;      /* recovery-green family */
+      --protein: #009eee;   /* strain blue */
+      --carbs: #8e86f0;     /* sleep periwinkle */
+      --fat: #ffb224;       /* warm amber */
+      --red: #ff4554;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      /* numerals want a true light weight; head with light-capable system
+         faces, then fall through to the platform default */
+      --num: "Ubuntu Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      background: var(--paper);
-      color: var(--ink);
-      font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
-    }
-    /* paper grain — a faint fractal-noise pass baked into the stock */
-    body::after {
-      content: "";
-      position: fixed; inset: 0;
-      pointer-events: none;
-      z-index: 60;
-      background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.45 0"/></filter><rect width="180" height="180" filter="url(%23n)"/></svg>');
-      opacity: .35;
-      mix-blend-mode: multiply;
-    }
-    @media (prefers-color-scheme: dark) {
-      body::after { filter: invert(1); opacity: .14; mix-blend-mode: screen; }
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 var(--sans);
     }
 
-    header, main { max-width: 720px; margin: 0 auto; padding-inline: 24px; }
-    header { padding-top: 26px; }
-    .masthead {
+    header, main { max-width: 760px; margin: 0 auto; padding-inline: 22px; }
+    header { padding-top: 22px; }
+    main { padding-bottom: 64px; }
+
+    /* micro-label: the compact uppercase letterspaced voice of the system */
+    .micro {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .topbar {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
-      gap: 1rem;
-      padding-bottom: .65rem;
-      border-bottom: 3px solid var(--ink);
+      gap: 12px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
     }
     h1 {
       margin: 0;
-      font-size: clamp(1.7rem, 6vw, 2.1rem);
-      font-weight: 800;
-      letter-spacing: .045em;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .3em;
       text-transform: uppercase;
-      line-height: 1;
-      /* the duplicator's second pass, slightly off-register */
-      text-shadow: .085em .07em 0 color-mix(in srgb, var(--ink-2) 65%, transparent);
+      color: var(--text);
     }
-    .sub { color: var(--muted); font-size: 12.5px; margin-top: 7px; }
-    main { padding-bottom: 64px; }
 
-    /* live indicator as an inspection stamp */
+    /* live indicator as a sensor status readout */
     .live {
-      font: 600 10px/1 var(--mono);
-      letter-spacing: .14em;
-      text-transform: uppercase;
-      color: var(--ink);
-      border: 1.5px solid var(--ink);
-      padding: 5px 8px 4px;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      gap: 7px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--dim);
       white-space: nowrap;
-      margin-bottom: .15rem;
     }
-    .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
-    .live.off { border-style: dashed; color: var(--muted); border-color: var(--muted); }
-    .live.off .dot { background: var(--muted); }
+    .live .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--kcal);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--kcal) 70%, transparent);
+    }
+    .live.off .dot { background: var(--faint); box-shadow: none; }
     @media (prefers-reduced-motion: no-preference) {
-      .live:not(.off) .dot { animation: breathe 2.4s ease-in-out infinite; }
-      @keyframes breathe { 50% { opacity: .35; } }
+      .live:not(.off) .dot { animation: pulse 2.4s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .35; } }
     }
 
-    button {
-      font: 700 .8rem/1 system-ui, sans-serif;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      padding: .55rem .8rem;
-      border: 1.5px solid var(--ink);
-      background: transparent;
-      color: var(--ink);
-      cursor: pointer;
-      border-radius: 0;
-    }
-    button.primary { background: var(--ink); color: var(--paper); }
-    button:hover { box-shadow: 2px 2px 0 color-mix(in srgb, var(--ink-2) 75%, transparent); }
-    button:active { translate: 1px 1px; box-shadow: none; }
-    button:disabled { opacity: .5; cursor: default; box-shadow: none; }
-    :focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
-
-    /* the day plate: which page of the ledger is open */
-    .dayplate {
-      display: flex;
-      align-items: stretch;
-      border: 2px solid var(--ink);
-      margin-top: 18px;
-      background: var(--faint);
-    }
-    .dayplate button {
-      border: none;
-      border-right: 2px solid var(--ink);
-      font-size: 1.05rem;
-      padding: .4rem .9rem;
+    /* ── calendar strip: prev/next plus a 7-day window, selected-day emphasis */
+    .daynav { display: flex; align-items: stretch; gap: 4px; margin-top: 16px; }
+    .daynav .arrow {
       flex: none;
+      width: 38px;
+      border: none;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--dim);
+      font-size: 17px;
+      cursor: pointer;
     }
-    .dayplate button:last-child { border-right: none; border-left: 2px solid var(--ink); }
-    .day-center {
-      flex: 1;
-      min-width: 0;
-      text-align: center;
-      padding: 9px 8px 8px;
+    .daynav .arrow:hover { background: var(--panel); color: var(--text); }
+    .strip { flex: 1; display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; min-width: 0; }
+    .daycell {
+      border: none;
+      background: transparent;
+      border-radius: 10px;
+      padding: 7px 0 8px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      color: var(--faint);
+      font-family: var(--sans);
     }
-    .day-title {
-      font-weight: 800;
-      font-size: 1.15rem;
-      letter-spacing: .03em;
-      text-transform: uppercase;
-      line-height: 1.15;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    .daycell:hover { background: var(--panel); }
+    .daycell .dow { font-size: 9px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+    .daycell .dom {
+      font-size: 15px;
+      font-weight: 400;
+      font-variant-numeric: tabular-nums;
+      color: var(--dim);
+      line-height: 1;
     }
-    .day-meta {
-      font: 500 10.5px/1 var(--mono);
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-top: 4px;
-    }
+    .daycell .tick { width: 14px; height: 2px; border-radius: 1px; background: transparent; }
+    .daycell.today .dom { color: var(--text); }
+    .daycell.sel { background: var(--panel-2); }
+    .daycell.sel .dom { color: var(--text); font-weight: 600; }
+    .daycell.sel .dow { color: var(--dim); }
+    .daycell.sel .tick { background: var(--protein); }
+
     .daytools {
       display: flex;
       gap: 10px;
       align-items: center;
       flex-wrap: wrap;
-      margin: 12px 0 22px;
+      margin: 18px 0 24px;
     }
     .spacer { flex: 1; }
+    #dayTitle { color: var(--text); }
+    #count { margin-left: 10px; color: var(--faint); }
     #datePicker {
-      font: 500 12px/1 var(--mono);
+      font: 500 11.5px/1 var(--sans);
+      font-variant-numeric: tabular-nums;
       letter-spacing: .04em;
-      padding: 8px 9px;
-      border: 1.5px solid var(--rule);
-      border-radius: 0;
-      background: transparent;
-      color: var(--ink);
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--dim);
       width: auto;
     }
-    #datePicker.not-today { border-color: var(--ink-2); color: var(--ink-2); }
+    #datePicker.not-today { border-color: var(--protein); color: var(--text); }
 
-    /* the ledger: ruled meal entries with the time in the margin */
-    .meals { border-top: 3px solid var(--ink); position: relative; }
-    .meals::before {
-      /* the orange margin rule, running the full page */
-      content: "";
-      position: absolute;
-      left: 72px; top: 0; bottom: 0;
-      width: 1px;
-      background: color-mix(in srgb, var(--ink-2) 55%, transparent);
+    button { font-family: var(--sans); cursor: pointer; }
+    .btn {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      padding: 9px 18px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--dim);
     }
-    /* the rest of the day's page stays ruled and ready */
-    .meals::after {
-      content: "";
-      display: block;
-      height: 132px;
-      background: repeating-linear-gradient(
-        to bottom,
-        transparent 0 43px,
-        var(--rule) 43px 44px
-      );
+    .btn:hover { color: var(--text); border-color: var(--faint); }
+    .btn.primary { background: var(--protein); border-color: var(--protein); color: #fff; }
+    .btn.primary:hover { background: color-mix(in srgb, var(--protein) 85%, #fff); }
+    .btn:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--protein); outline-offset: 2px; }
+
+    /* ── glanceable tier: the day summary band ───────────────────────────── */
+    .dayband {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      padding: 22px 0 16px;
     }
-    .meal { border-bottom: 1px solid var(--rule); }
+    .bandstat .num {
+      font-family: var(--num);
+      font-size: clamp(26px, 7.4vw, 44px);
+      font-weight: 200;
+      line-height: 1;
+      letter-spacing: -.01em;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .bandstat .unit { font-size: .42em; font-weight: 400; opacity: .55; margin-left: 2px; letter-spacing: 0; }
+    .bandstat .micro { display: block; margin-top: 7px; font-size: 9px; }
+    .bandstat.kcal .num { color: var(--kcal); }
+    .bandstat.protein .num { color: var(--protein); }
+    .bandstat.carbs .num { color: var(--carbs); }
+    .bandstat.fat .num { color: var(--fat); }
+
+    /* macro split: thin stacked bar, protein/carbs/fat share of calories */
+    .splitbar {
+      display: flex;
+      height: 3px;
+      border-radius: 2px;
+      overflow: hidden;
+      gap: 2px;
+      background: var(--line);
+      margin-bottom: 4px;
+    }
+    .splitbar i { display: block; height: 100%; }
+    .splitbar .p { background: var(--protein); }
+    .splitbar .c { background: var(--carbs); }
+    .splitbar .f { background: var(--fat); }
+    .splitbar.none { background: var(--line); }
+
+    /* ── mid tier: meal rows as dark cards ───────────────────────────────── */
+    .meals-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-bottom: 10px;
+    }
+    .meal {
+      background: var(--panel);
+      border-radius: 12px;
+      margin-bottom: 8px;
+      overflow: hidden;
+    }
     .meal-head {
       display: grid;
-      grid-template-columns: 72px 1fr auto auto;
+      grid-template-columns: 80px 1fr auto auto;
       align-items: center;
       cursor: pointer;
       user-select: none;
     }
-    .meal-head:hover { background: var(--faint); }
+    .meal-head:hover { background: var(--panel-2); }
     .meal-time {
-      font: 500 10.5px/1 var(--mono);
-      letter-spacing: .03em;
-      color: var(--muted);
-      padding: 14px 10px 14px 0;
-      text-align: right;
+      font-size: 11px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      color: var(--faint);
+      padding: 16px 8px 16px 14px;
       white-space: nowrap;
       overflow: hidden;
     }
-    .meal-name {
-      font-weight: 700;
-      padding: 10px 8px 10px 14px;
-      overflow-wrap: anywhere;
+    .meal-main { padding: 12px 8px 12px 8px; min-width: 0; }
+    .meal-name { font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+    .minibar {
+      display: flex;
+      width: 88px;
+      max-width: 100%;
+      height: 3px;
+      border-radius: 2px;
+      overflow: hidden;
+      gap: 2px;
+      margin-top: 7px;
     }
+    .minibar i { display: block; height: 100%; }
+    .minibar .p { background: var(--protein); }
+    .minibar .c { background: var(--carbs); }
+    .minibar .f { background: var(--fat); }
     .del-btn {
       background: none;
       border: none;
-      color: var(--muted);
-      padding: 10px 8px;
-      font: 600 .85rem/1 var(--mono);
-      letter-spacing: 0;
+      color: var(--faint);
+      padding: 16px 6px;
+      font: 600 13px/1 var(--sans);
     }
-    .del-btn:hover { color: var(--ink-2); box-shadow: none; }
-    .del-btn:active { translate: none; }
+    .del-btn:hover { color: var(--red); }
     .chev {
-      color: var(--muted);
-      padding: 10px 12px 10px 2px;
+      color: var(--faint);
+      padding: 16px 16px 16px 6px;
       transition: rotate .15s ease;
-      font-weight: 700;
+      font-weight: 600;
       pointer-events: none; /* decorative — clicks fall through to the row */
     }
     @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
     .meal.open .chev { rotate: 90deg; }
 
-    .meal-body { display: none; padding: 2px 16px 18px 86px; }
+    /* ── deep tier: the expanded nutrient table ──────────────────────────── */
+    .meal-body { display: none; padding: 0 16px 16px 80px; border-top: 1px solid var(--line); }
     .meal.open .meal-body { display: block; }
-    .comps { color: var(--muted); font-size: 12.5px; margin: 2px 0 4px; }
+    .comps { color: var(--faint); font-size: 12px; margin: 12px 0 2px; }
 
-    .nut-group-label {
-      font: 700 10px/1 var(--mono);
-      text-transform: uppercase;
-      letter-spacing: .16em;
-      margin: 14px 0 4px;
-    }
-    .nut-group-label.micro { color: var(--ink-2); }
-    table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
-    td { padding: 5px 0; border-bottom: 1px dotted var(--rule); }
+    .nut-group-label { margin: 16px 0 2px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td { padding: 8px 0; border-bottom: 1px solid var(--line); color: var(--dim); }
+    tr:last-child td { border-bottom: none; }
     td.val {
       text-align: right;
-      font-family: var(--mono);
-      font-size: 12.5px;
       font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      color: var(--text);
     }
-    .pill { display: inline-block; width: 8px; height: 8px; margin-right: 9px; vertical-align: 1px; }
-    .pill.macro { background: var(--ink); }
-    .pill.micro { background: var(--ink-2); }
+    td.val .u { font-weight: 400; font-size: 11px; color: var(--faint); margin-left: 3px; }
+    tr.m-kcal td.val { color: var(--kcal); }
+    tr.m-protein td.val { color: var(--protein); }
+    tr.m-carbs td.val { color: var(--carbs); }
+    tr.m-fat td.val { color: var(--fat); }
+    tr.m-kcal td.val .u, tr.m-protein td.val .u, tr.m-carbs td.val .u, tr.m-fat td.val .u { color: inherit; opacity: .55; }
 
-    .empty, .loading { color: var(--muted); padding: 1.1rem .15rem; border-bottom: 1px solid var(--rule); }
-    .empty::before, .loading::before { content: "—"; color: var(--ink-2); margin-right: .5rem; }
-    .empty strong { color: var(--ink); }
-    .err { color: var(--ink-2); font-weight: 600; padding: 10px 0; }
+    .empty, .loading { color: var(--dim); padding: 18px 0; font-size: 13px; }
+    .empty strong { color: var(--text); font-weight: 600; }
+    .meal-body .empty { padding: 12px 0 0; border: none; }
+    .err { color: var(--red); font-weight: 600; padding: 10px 0; font-size: 13px; }
 
-    /* the slip: a printed form to fill in */
+    /* ── the log dialog ───────────────────────────────────────────────────── */
     dialog {
-      border: 2px solid var(--ink);
-      background: var(--paper);
-      color: var(--ink);
-      border-radius: 0;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 16px;
       padding: 0;
       width: min(480px, 92vw);
-      box-shadow: 8px 8px 0 color-mix(in srgb, var(--ink-2) 30%, transparent);
     }
-    dialog::backdrop { background: rgba(10, 26, 18, .45); }
+    dialog::backdrop { background: rgba(0, 0, 0, .65); }
     .form-inner { padding: 22px; }
     .form-inner h2 {
-      margin: 0 0 16px;
-      font-size: 1rem;
-      font-weight: 800;
-      letter-spacing: .06em;
+      margin: 0 0 18px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .22em;
       text-transform: uppercase;
-      padding-bottom: 10px;
-      border-bottom: 2px solid var(--ink);
+      color: var(--text);
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
     }
+    .form-inner h2 span { color: var(--dim); }
     label {
       display: block;
-      font: 700 10px/1 var(--mono);
-      letter-spacing: .14em;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .18em;
       text-transform: uppercase;
-      color: var(--muted);
-      margin: 16px 0 5px;
+      color: var(--dim);
+      margin: 16px 0 7px;
     }
     input, textarea {
       width: 100%;
       font: inherit;
-      padding: 8px 2px;
-      border: none;
-      border-bottom: 2px solid var(--rule);
-      border-radius: 0;
-      background: transparent;
-      color: var(--ink);
-      caret-color: var(--ink-2);
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg);
+      color: var(--text);
+      caret-color: var(--protein);
     }
-    input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--ink) 42%, var(--paper)); }
-    input:focus, textarea:focus { outline: none; border-bottom-color: var(--ink); }
+    input::placeholder, textarea::placeholder { color: var(--faint); }
+    input:focus, textarea:focus { outline: none; border-color: var(--protein); }
     textarea { resize: vertical; min-height: 64px; line-height: 1.5; }
-    .comp-row { display: flex; gap: 10px; margin-top: 8px; align-items: center; }
+    .comp-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
     .comp-row input.cname { flex: 1; min-width: 0; }
-    .comp-row input.cqty { width: 90px; font-family: var(--mono); font-size: 13px; }
-    .comp-row button { border: none; padding: 6px 4px; color: var(--muted); background: none; }
-    .comp-row button:hover { color: var(--ink-2); box-shadow: none; }
+    .comp-row input.cqty { width: 92px; font-variant-numeric: tabular-nums; font-size: 13px; }
+    .comp-row button { border: none; padding: 6px 4px; color: var(--faint); background: none; font-size: 13px; }
+    .comp-row button:hover { color: var(--red); }
     .form-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
-    .hint { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
-    .hint code { font-family: var(--mono); font-size: 11px; }
+    .hint { font-size: 12px; color: var(--faint); margin-top: 10px; line-height: 1.5; }
+    .hint code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; color: var(--dim); }
     .link-btn {
-      background: none; border: none; padding: 0; margin-top: 12px;
-      color: var(--ink); font: 600 12.5px/1.4 system-ui, sans-serif;
-      letter-spacing: 0; text-transform: none;
-      cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
-      text-decoration-color: color-mix(in srgb, var(--ink-2) 70%, transparent);
-      text-decoration-thickness: 1.5px;
+      background: none; border: none; padding: 0; margin-top: 14px;
+      color: var(--protein); font: 600 12px/1.4 var(--sans);
+      cursor: pointer;
     }
-    .link-btn:hover { color: var(--ink-2); box-shadow: none; }
+    .link-btn:hover { color: color-mix(in srgb, var(--protein) 75%, #fff); }
 
     @media (max-width: 480px) {
       header, main { padding-inline: 14px; }
-      .meal-head { grid-template-columns: 56px 1fr auto auto; }
-      .meals::before { left: 56px; }
-      .meal-time { padding-right: 8px; font-size: 10px; }
-      .meal-body { padding-left: 70px; padding-right: 8px; }
-      .daytools button, .daytools #datePicker { padding-inline: 8px; }
+      .meal-head { grid-template-columns: 64px 1fr auto auto; }
+      .meal-time { padding: 16px 6px 16px 12px; font-size: 10px; }
+      .meal-body { padding-left: 16px; }
+      .daynav .arrow { width: 30px; }
+      .dayband { gap: 8px; }
     }
   </style>
 </head>
 <body>
   <header>
-    <div class="masthead">
+    <div class="topbar">
       <h1>Nutrition</h1>
       <span class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></span>
     </div>
-    <div class="sub">Tangram · a local-first replicated meal log</div>
   </header>
   <main>
-    <div class="dayplate">
-      <button id="prevDay" title="Previous day" aria-label="Previous day">‹</button>
-      <div class="day-center">
-        <div class="day-title" id="dayTitle">…</div>
-        <div class="day-meta" id="count"></div>
-      </div>
-      <button id="nextDay" title="Next day" aria-label="Next day">›</button>
+    <div class="daynav">
+      <button class="arrow" id="prevDay" title="Previous day" aria-label="Previous day">‹</button>
+      <div class="strip" id="dayStrip"></div>
+      <button class="arrow" id="nextDay" title="Next day" aria-label="Next day">›</button>
     </div>
+    <section class="dayband" id="dayBand" aria-label="Day totals">
+      <div class="bandstat kcal"><div class="num"><span id="bandKcal">0</span><span class="unit">kcal</span></div><span class="micro">Calories</span></div>
+      <div class="bandstat protein"><div class="num"><span id="bandProtein">0</span><span class="unit">g</span></div><span class="micro">Protein</span></div>
+      <div class="bandstat carbs"><div class="num"><span id="bandCarbs">0</span><span class="unit">g</span></div><span class="micro">Carbs</span></div>
+      <div class="bandstat fat"><div class="num"><span id="bandFat">0</span><span class="unit">g</span></div><span class="micro">Fat</span></div>
+    </section>
+    <div class="splitbar" id="splitBar" aria-hidden="true"></div>
+
     <div class="daytools">
-      <button class="primary" id="logBtn">＋ Log a meal</button>
+      <button class="btn primary" id="logBtn">+ Log meal</button>
       <span class="spacer"></span>
       <input type="date" id="datePicker" />
-      <button id="todayBtn">Today</button>
+      <button class="btn" id="todayBtn">Today</button>
+    </div>
+
+    <div class="meals-head">
+      <span class="micro"><span id="dayTitle">…</span><span id="count"></span></span>
     </div>
     <div id="error" class="err" hidden></div>
     <div id="meals" class="meals"><div class="loading">Waiting for state…</div></div>
@@ -360,7 +416,7 @@
 
   <dialog id="logDialog">
     <form method="dialog" class="form-inner" id="logForm">
-      <h2>Log a meal · <span id="logDayLabel">Today</span></h2>
+      <h2>Log meal <span id="logDayLabel">Today</span></h2>
       <div id="descSection" hidden>
         <label for="mealDesc">What did you eat?</label>
         <textarea id="mealDesc" rows="3" placeholder="1 cup brown rice and 200g grilled chicken"></textarea>
@@ -385,8 +441,8 @@
       <button type="button" class="link-btn" id="modeToggle" hidden></button>
       <datalist id="knownComponents"></datalist>
       <div class="form-actions">
-        <button type="button" id="cancelBtn">Cancel</button>
-        <button type="submit" class="primary" id="saveBtn">Log meal</button>
+        <button type="button" class="btn" id="cancelBtn">Cancel</button>
+        <button type="submit" class="btn primary" id="saveBtn">Log meal</button>
       </div>
     </form>
   </dialog>
@@ -446,6 +502,30 @@
       picker.classList.toggle("not-today", selectedDate !== todayStr());
     }
 
+    // ── calendar strip: a 7-day window ending on the selected day ─────────
+    function renderStrip() {
+      const cells = [];
+      for (let i = -5; i <= 1; i++) {
+        const ds = shiftDay(selectedDate, i);
+        const [y, m, d] = ds.split("-").map(Number);
+        const date = new Date(y, m - 1, d);
+        const cell = document.createElement("button");
+        cell.type = "button";
+        cell.className = "daycell";
+        if (ds === selectedDate) cell.classList.add("sel");
+        if (ds === todayStr()) cell.classList.add("today");
+        cell.setAttribute("aria-label", date.toDateString());
+        if (ds === selectedDate) cell.setAttribute("aria-current", "date");
+        cell.innerHTML = `<span class="dow"></span><span class="dom"></span><span class="tick"></span>`;
+        cell.querySelector(".dow").textContent =
+          date.toLocaleDateString(undefined, { weekday: "short" }).slice(0, 3);
+        cell.querySelector(".dom").textContent = date.getDate();
+        cell.addEventListener("click", () => setSelectedDate(ds));
+        cells.push(cell);
+      }
+      el("dayStrip").replaceChildren(...cells);
+    }
+
     // ── gold view, computed client-side from the replicated tables ────────
     function nutritionFor(meal) {
       const totals = new Map(); // nutrient_id → amount
@@ -472,19 +552,69 @@
       return rows;
     }
 
+    // ── presentation-layer aggregation over nutritionFor ──────────────────
+    // The four signature metrics, extracted from a meal's gold-view rows.
+    // Calories prefers a real kcal nutrient (CalorieNinjas / LLM data); with
+    // macro-only data it falls back to the Atwater 4/4/9 estimate.
+    const metricOf = (row) => {
+      const name = row.nutrient.toLowerCase();
+      if (row.unit === "kcal" || name === "calories" || name === "energy") return "kcal";
+      if (name === "protein") return "protein";
+      if (name === "carbs" || name === "carbohydrates") return "carbs";
+      if (name === "fat" || name === "total fat") return "fat";
+      return null;
+    };
+    function macroSummary(rowsList) {
+      const t = { kcal: 0, protein: 0, carbs: 0, fat: 0, kcalDirect: false };
+      for (const rows of rowsList) {
+        for (const r of rows) {
+          const m = metricOf(r);
+          if (!m) continue;
+          t[m] += r.amount;
+          if (m === "kcal") t.kcalDirect = true;
+        }
+      }
+      if (!t.kcalDirect) t.kcal = 4 * t.protein + 4 * t.carbs + 9 * t.fat;
+      return t;
+    }
+    function fillSplit(bar, t) {
+      const pk = 4 * t.protein, ck = 4 * t.carbs, fk = 9 * t.fat;
+      const total = pk + ck + fk;
+      bar.replaceChildren();
+      bar.classList.toggle("none", total <= 0);
+      if (total <= 0) return;
+      for (const [cls, v] of [["p", pk], ["c", ck], ["f", fk]]) {
+        if (v <= 0) continue;
+        const seg = document.createElement("i");
+        seg.className = cls;
+        seg.style.width = `${(v / total) * 100}%`;
+        bar.appendChild(seg);
+      }
+    }
+    function renderDayBand(dayMeals) {
+      const t = macroSummary(dayMeals.map(nutritionFor));
+      el("bandKcal").textContent = Math.round(t.kcal).toLocaleString();
+      el("bandProtein").textContent = Math.round(t.protein).toLocaleString();
+      el("bandCarbs").textContent = Math.round(t.carbs).toLocaleString();
+      el("bandFat").textContent = Math.round(t.fat).toLocaleString();
+      fillSplit(el("splitBar"), t);
+    }
+
     // ── render the meal list for the selected day ─────────────────────────
     function render() {
       if (!state) return;
       clearError();
       syncDatePicker();
+      renderStrip();
       const dayMeals = (state.meals ?? [])
         .filter((m) => msToDateStr(m.eaten_at_ms) === selectedDate)
         .sort((a, b) => b.eaten_at_ms - a.eaten_at_ms);
       const n = dayMeals.length;
       el("dayTitle").textContent = fmtDay(selectedDate);
-      el("count").textContent = `${n} meal${n === 1 ? "" : "s"} logged`;
+      el("count").textContent = `· ${n} meal${n === 1 ? "" : "s"} logged`;
+      renderDayBand(dayMeals);
       if (!n) {
-        mealsEl.innerHTML = `<div class="empty">No meals logged for <strong>${fmtDay(selectedDate)}</strong>. Click “＋ Log a meal”.</div>`;
+        mealsEl.innerHTML = `<div class="empty">No meals logged for <strong>${fmtDay(selectedDate)}</strong>. Click “+ Log meal”.</div>`;
         return;
       }
       mealsEl.replaceChildren(...dayMeals.map(mealCard));
@@ -506,13 +636,24 @@
       card.innerHTML = `
         <div class="meal-head">
           <span class="meal-time"></span>
-          <span class="meal-name"></span>
+          <span class="meal-main"><span class="meal-name"></span></span>
           <button class="del-btn" title="Delete meal">✕</button>
           <span class="chev">›</span>
         </div>
         <div class="meal-body"></div>`;
       card.querySelector(".meal-name").textContent = m.name;
       card.querySelector(".meal-time").textContent = fmtTime(m.eaten_at_ms);
+
+      const rows = nutritionFor(m);
+
+      // mini macro bar: the row's glanceable split
+      const t = macroSummary([rows]);
+      if (4 * t.protein + 4 * t.carbs + 9 * t.fat > 0) {
+        const bar = document.createElement("span");
+        bar.className = "minibar";
+        fillSplit(bar, t);
+        card.querySelector(".meal-main").appendChild(bar);
+      }
 
       const body = card.querySelector(".meal-body");
       const comps = document.createElement("div");
@@ -521,7 +662,7 @@
         .map((c) => `${c.component} ${round(c.qty_g)}g`)
         .join(" · ");
       body.appendChild(comps);
-      body.appendChild(nutritionTable(nutritionFor(m)));
+      body.appendChild(nutritionTable(rows));
 
       card.querySelector(".meal-head").addEventListener("click", () => {
         card.classList.toggle("open");
@@ -549,18 +690,23 @@
         const group = rows.filter((r) => r.nutrient_kind === kind);
         if (!group.length) continue;
         const label = document.createElement("div");
-        label.className = `nut-group-label ${kind}`;
+        label.className = `nut-group-label micro ${kind}`;
         label.textContent = kind === "macro" ? "Macronutrients" : "Micronutrients";
         frag.appendChild(label);
         const table = document.createElement("table");
         for (const r of group) {
           const tr = document.createElement("tr");
+          const metric = metricOf(r);
+          if (metric) tr.className = `m-${metric}`;
           const name = document.createElement("td");
-          name.innerHTML = `<span class="pill ${kind}"></span>`;
-          name.append(r.nutrient);
+          name.textContent = r.nutrient;
           const val = document.createElement("td");
           val.className = "val";
-          val.textContent = `${round(r.amount)} ${r.unit}`;
+          val.textContent = round(r.amount);
+          const unit = document.createElement("span");
+          unit.className = "u";
+          unit.textContent = r.unit;
+          val.appendChild(unit);
           tr.append(name, val);
           table.appendChild(tr);
         }
