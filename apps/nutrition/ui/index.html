@@ -104,10 +104,11 @@
     .form-inner { padding: 20px; }
     .form-inner h2 { margin: 0 0 14px; font-size: 17px; }
     label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
-    input {
+    input, textarea {
       width: 100%; font: inherit; padding: 9px 10px; border-radius: 8px;
       border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
     }
+    textarea { resize: vertical; min-height: 64px; }
     .comp-row { display: flex; gap: 8px; margin-top: 8px; }
     .comp-row input.cname { flex: 1; }
     .comp-row input.cqty { width: 110px; }
@@ -146,16 +147,28 @@
   <dialog id="logDialog">
     <form method="dialog" class="form-inner" id="logForm">
       <h2>Log a meal · <span id="logDayLabel">Today</span></h2>
-      <label for="mealName">Meal name</label>
-      <input id="mealName" placeholder="Chicken burrito bowl" autocomplete="off" />
-      <label>Components (grams)</label>
-      <div id="compRows"></div>
-      <button type="button" class="link-btn" id="addCompBtn">+ add component</button>
-      <div class="hint">
-        Known components resolve to nutrition automatically; unknown ones can be
-        registered later (e.g. by an agent via the <code>add_ingredient</code> MCP tool)
-        and past meals resolve retroactively.
+      <div id="descSection" hidden>
+        <label for="mealDesc">What did you eat?</label>
+        <textarea id="mealDesc" rows="3" placeholder="1 cup brown rice and 200g grilled chicken"></textarea>
+        <div class="hint">
+          Describe your meal in plain language, quantities included. Nutrition is
+          looked up via the <code id="strategyName"></code> strategy and the result
+          replicates to every synced device.
+        </div>
       </div>
+      <div id="compSection">
+        <label for="mealName">Meal name</label>
+        <input id="mealName" placeholder="Chicken burrito bowl" autocomplete="off" />
+        <label>Components (grams)</label>
+        <div id="compRows"></div>
+        <button type="button" class="link-btn" id="addCompBtn">+ add component</button>
+        <div class="hint" id="compHint">
+          Known components resolve to nutrition automatically; unknown ones can be
+          registered later (e.g. by an agent via the <code>add_ingredient</code> MCP tool)
+          and past meals resolve retroactively.
+        </div>
+      </div>
+      <button type="button" class="link-btn" id="modeToggle" hidden></button>
       <datalist id="knownComponents"></datalist>
       <div class="form-actions">
         <button type="button" id="cancelBtn">Cancel</button>
@@ -355,6 +368,35 @@
     // ── log-meal dialog ───────────────────────────────────────────────────
     const dialog = el("logDialog");
 
+    // Capabilities gate the description path: with the offline strategy the
+    // server cannot resolve free text, so the dialog stays components-only.
+    let caps = { strategy: "offline", description_input: false };
+    let descMode = false; // which input the dialog currently shows
+
+    fetch("api/capabilities")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((c) => {
+        caps = c;
+        descMode = !!c.description_input; // description-first when available
+        el("strategyName").textContent = c.strategy;
+        syncMode();
+      })
+      .catch(() => syncMode());
+
+    function syncMode() {
+      el("descSection").hidden = !descMode;
+      el("compSection").hidden = descMode;
+      const toggle = el("modeToggle");
+      toggle.hidden = !caps.description_input;
+      toggle.textContent = descMode
+        ? "+ add components manually instead"
+        : "← describe the meal instead";
+    }
+    el("modeToggle").addEventListener("click", () => {
+      descMode = !descMode;
+      syncMode();
+    });
+
     function compRow(name = "", qty = "") {
       const row = document.createElement("div");
       row.className = "comp-row";
@@ -372,29 +414,58 @@
 
     el("logBtn").addEventListener("click", () => {
       el("mealName").value = "";
+      el("mealDesc").value = "";
       el("compRows").replaceChildren(compRow());
       el("logDayLabel").textContent = fmtDay(selectedDate);
+      descMode = !!caps.description_input;
+      syncMode();
       dialog.showModal();
     });
     el("cancelBtn").addEventListener("click", () => dialog.close());
 
+    // POST /api/log — the strategy-backed logging endpoint. Explicit
+    // components win; a bare description is resolved server-side via the
+    // active strategy (CalorieNinjas / LLM) before the meal is logged.
+    async function apiLog(body) {
+      const r = await fetch("api/log", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      return data;
+    }
+
     el("logForm").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const name = el("mealName").value.trim();
-      const components = [...el("compRows").querySelectorAll(".comp-row")]
-        .map((row) => ({
-          component: row.querySelector(".cname").value.trim(),
-          qty_g: Number(row.querySelector(".cqty").value),
-        }))
-        .filter((c) => c.component && c.qty_g > 0);
-      if (!name || !components.length) {
-        showError("Give the meal a name and at least one component with grams.");
-        return;
+      const body = { eaten_at_ms: eatenAtForDay(selectedDate) };
+      if (descMode) {
+        const description = el("mealDesc").value.trim();
+        if (!description) {
+          showError("Describe what you ate (e.g. “1 cup brown rice and 200g grilled chicken”).");
+          return;
+        }
+        body.description = description;
+      } else {
+        const name = el("mealName").value.trim();
+        const components = [...el("compRows").querySelectorAll(".comp-row")]
+          .map((row) => ({
+            component: row.querySelector(".cname").value.trim(),
+            qty_g: Number(row.querySelector(".cqty").value),
+          }))
+          .filter((c) => c.component && c.qty_g > 0);
+        if (!name || !components.length) {
+          showError("Give the meal a name and at least one component with grams.");
+          return;
+        }
+        body.name = name;
+        body.components = components;
       }
       const saveBtn = el("saveBtn");
       saveBtn.disabled = true;
       try {
-        await act("log_meal", { name, components, eaten_at_ms: eatenAtForDay(selectedDate) });
+        await apiLog(body);
         dialog.close();
       } catch (err) {
         showError("Could not log meal: " + err.message);

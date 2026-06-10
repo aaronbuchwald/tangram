@@ -132,6 +132,41 @@ UI and synced instance.
 | `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
+| `NUTRITION_STRATEGY` | `offline` | Nutrition app: how novel components resolve (`offline` \| `calorieninjas` \| `llm`) |
+| `CALORIENINJAS_API_KEY` | — | Required for `NUTRITION_STRATEGY=calorieninjas` |
+| `ANTHROPIC_API_KEY` | — | Required for `NUTRITION_STRATEGY=llm` (or `ANTHROPIC_AUTH_TOKEN`) |
+
+## Nutrition strategies
+
+The nutrition app ports Chamber's pluggable nutrition-resolution seam: a
+*strategy* decides how a novel meal component gets its per-100g nutrient
+values. Select one with `NUTRITION_STRATEGY`:
+
+- **`offline`** (default) — deterministic and keyless. The reference dataset
+  ships in the replicated genesis document; meals must be logged with
+  explicit gram-quantified components, and unknown components contribute
+  nothing until registered (`add_component_nutrition` / `add_ingredient`).
+- **`calorieninjas`** — resolves free text via the CalorieNinjas API
+  (`CALORIENINJAS_API_KEY`), mapping every nutrient field the API returns
+  (calories, fiber, sodium, …) to per-100g rows.
+- **`llm`** — asks Anthropic's `claude-opus-4-8` (structured output) for a
+  comprehensive per-100g nutrient panel (`ANTHROPIC_API_KEY`).
+
+With an online strategy active, meals can be logged from a plain-language
+**description** — quantities included, no explicit components needed:
+
+```sh
+curl -s localhost:8080/api/log -H 'content-type: application/json' \
+  -d '{"description": "1 cup brown rice and 200g grilled chicken"}'
+```
+
+`GET /api/capabilities` reports the active strategy (the web UI uses it to
+offer the description box). Explicit components always win when provided;
+unknown ones are then back-filled in the background. Every resolution runs
+*outside* the synchronous action transaction and is cached through an
+idempotent action, so it lands as an ordinary replicated change: a component
+is resolved once and replays on every synced device — past meals using it
+resolve retroactively.
 
 ## How it works
 

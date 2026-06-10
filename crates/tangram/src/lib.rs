@@ -36,12 +36,12 @@ mod sync;
 mod web;
 
 pub use action::{ActionDef, ActionError, Actions};
-pub use app::App;
+pub use app::{App, Handle};
 pub use tangram_macros::{actions, model};
 
 /// Everything an app needs in scope.
 pub mod prelude {
-    pub use crate::{Actions, App, actions, model};
+    pub use crate::{Actions, App, Handle, actions, model};
 }
 
 /// Implementation details used by macro expansions. Not a public API.

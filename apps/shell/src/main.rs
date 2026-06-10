@@ -41,7 +41,12 @@ async fn main() -> anyhow::Result<()> {
         // the app's static-UI fallback (`Router::nest` would leave it
         // unroutable: a nested fallback only matches non-empty tails).
         .nest_service("/notes/", notes::app().build()?)
-        .nest_service("/nutrition/", nutrition::app().build()?);
+        .nest_service("/nutrition/", {
+            // Nutrition layers strategy-backed routes (description logging,
+            // capabilities) on top of the derived surface.
+            let (router, handle) = nutrition::app().build_parts()?;
+            nutrition::with_api(router, handle)
+        });
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

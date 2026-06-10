@@ -11,6 +11,11 @@
 
 use tangram::prelude::*;
 
+mod api;
+pub mod strategy;
+
+pub use strategy::ResolvedNutrient;
+
 #[model]
 pub struct Nutrition {
     /// Bronze: raw logged meals.
@@ -207,6 +212,108 @@ impl Nutrition {
         }
         id
     }
+
+    /// Cache a full per-100g nutrient panel for a component (any number of
+    /// nutrients, e.g. as resolved by an online nutrition strategy):
+    /// registers unknown nutrient definitions, an ingredient, the component
+    /// mapping, and the per-100g rows. Idempotent — re-adding an
+    /// already-mapped component is a no-op — and replicated, so a component
+    /// is resolved once and replays everywhere. Returns the ingredient id.
+    pub fn add_component_nutrition(
+        &mut self,
+        component: String,
+        nutrients: Vec<ResolvedNutrient>,
+    ) -> Result<String, String> {
+        let component = component.trim().to_lowercase();
+        if component.is_empty() {
+            return Err("component must not be empty".into());
+        }
+        // Idempotency: a component that already resolves keeps its data
+        // ("resolve once, replay forever" — never overwrite cached rows).
+        if let Some(mapping) = self
+            .component_mappings
+            .iter()
+            .find(|m| m.component == component)
+        {
+            return Ok(mapping.ingredient_id.clone());
+        }
+
+        // Deterministic ingredient id from the slugified component, so two
+        // peers caching the same component converge instead of duplicating.
+        let ingredient_id = format!("ing_{}", slug(&component));
+        if !self.ingredients.iter().any(|i| i.id == ingredient_id) {
+            self.ingredients.push(Ingredient {
+                id: ingredient_id.clone(),
+                canonical_name: component.clone(),
+            });
+        }
+        self.component_mappings.push(ComponentMapping {
+            component,
+            ingredient_id: ingredient_id.clone(),
+            fraction: 1.0,
+        });
+
+        for n in nutrients {
+            let name = n.name.trim();
+            if name.is_empty() || !n.amount_per_100g.is_finite() {
+                continue;
+            }
+            // Reuse an existing nutrient definition by display name (the
+            // genesis seed uses short ids like nut_vitc for "Vitamin C");
+            // otherwise register one under a deterministic slugified id.
+            let nutrient_id = match self
+                .nutrients
+                .iter()
+                .find(|d| d.name.eq_ignore_ascii_case(name))
+            {
+                Some(def) => def.id.clone(),
+                None => {
+                    let id = format!("nut_{}", slug(name));
+                    if !self.nutrients.iter().any(|d| d.id == id) {
+                        self.nutrients.push(Nutrient {
+                            id: id.clone(),
+                            name: name.to_string(),
+                            kind: if n.kind == "micro" { "micro" } else { "macro" }.into(),
+                            unit: n.unit.clone(),
+                        });
+                    }
+                    id
+                }
+            };
+            if !self
+                .ingredient_nutrients
+                .iter()
+                .any(|r| r.ingredient_id == ingredient_id && r.nutrient_id == nutrient_id)
+            {
+                self.ingredient_nutrients.push(IngredientNutrient {
+                    ingredient_id: ingredient_id.clone(),
+                    nutrient_id,
+                    amount_per_100g: n.amount_per_100g,
+                });
+            }
+        }
+        Ok(ingredient_id)
+    }
+}
+
+/// Slugify a name into a deterministic id fragment: lowercase alphanumerics
+/// with single underscores ("Saturated Fat" → "saturated_fat").
+fn slug(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_sep = true; // suppress a leading separator
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_sep = false;
+        } else if !last_sep {
+            out.push('_');
+            last_sep = true;
+        }
+    }
+    if out.ends_with('_') {
+        out.pop();
+    }
+    out
 }
 
 /// Seed with Chamber's reference dataset. This is the genesis state, so it
@@ -299,16 +406,31 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The nutrition app, fully configured. Call `.serve()` to run it standalone
-/// or `.build()` to mount it in a multi-app host.
+/// The nutrition app, fully configured. Serve it with
+/// `app().serve_with(with_api)` (standalone) or mount
+/// `with_api(...app().build_parts()?)` in a multi-app host — `with_api` adds
+/// the strategy-backed HTTP routes (`POST /api/log`, `GET /api/capabilities`)
+/// on top of the derived surface.
 pub fn app() -> App<Nutrition> {
     App::<Nutrition>::new("nutrition")
         .instructions(
             "A replicated nutrition tracker. Log meals with gram-quantified \
              components via log_meal; read totals with meal_nutrition. If a \
-             component is unknown, register per-100g data with add_ingredient \
-             and past meals resolve too. Humans see every change live in the \
-             web UI on all synced devices.",
+             component is unknown, register per-100g data with \
+             add_component_nutrition (full panel) or add_ingredient (core \
+             five) and past meals resolve too. Meals can also be logged from \
+             a plain-language description via POST /api/log \
+             {\"description\": \"1 cup rice and 200g chicken\"} when an \
+             online NUTRITION_STRATEGY (calorieninjas | llm) is active. \
+             Humans see every change live in the web UI on all synced \
+             devices.",
         )
         .ui_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"))
+}
+
+/// Merge the nutrition app's custom routes (description-based logging via
+/// the active strategy + the capabilities probe) into the derived router.
+/// Shaped to pass straight to [`App::serve_with`].
+pub fn with_api(router: axum::Router, handle: Handle<Nutrition>) -> axum::Router {
+    router.merge(api::routes(handle))
 }
