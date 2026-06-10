@@ -103,3 +103,27 @@ when third-party apps arrive (D4).
   runtime serves it.
 - Risk accepted: WASI 0.3 RC churn until ~1.0 (late 2026). Pinned Wasmtime
   + the gVisor escape hatch bound the blast radius.
+
+## Addendum — deployment targets and the shared remote interface (accepted 2026-06-10)
+
+The owner confirmed Option B and fixed the deployment targets:
+
+1. **Remote on EC2** (native today, Wasmtime-hosted next) and **local
+   replica** on the laptop, with per-app data confined to
+   `$HOME/.<app-name>` (the default data location now; *enforced* as a
+   capability grant once the embedded-Wasmtime host lands).
+2. **Cloudflare Workers as an alternative remote**: a Durable-Object sync
+   relay (one DO per app document, SQLite-backed storage, automerge via its
+   WASM build) that is **interchangeable with the EC2 remote behind one
+   shared interface** — the HTTP(+SSE) sync transport. A replica points
+   `TANGRAM_REMOTE_<APP>` at either `https://<host>/<app>/sync` (EC2) or
+   the Worker's URL and cannot tell the difference. CF is reached via a
+   thin TS/automerge-wasm relay first, not a `workers-rs` port of the SDK;
+   full app logic on CF (MCP/UI via the Agents SDK) remains Phase 4 scope.
+3. **Sequencing within Option B**: the shared interface ships first
+   (sync-over-HTTP in the SDK + the CF relay + the new data layout), then
+   the embedded-Wasmtime host adds capability enforcement on top. If small
+   interface/config divergences between EC2 and CF are unavoidable, prefer
+   the *cleanest* divergence over forcing identical mechanics (e.g., the
+   relay may persist doc bytes in DO SQLite while EC2 persists files — the
+   wire interface, not the storage, is the contract).
