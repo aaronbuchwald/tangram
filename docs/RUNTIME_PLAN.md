@@ -1,10 +1,15 @@
-# Sandboxed App Runtime — Plan (gVisor now, WASM-open)
+# Sandboxed App Runtime — Plan
 
-**Status:** draft for discussion
-**Goal:** run each Tangram app in its own gVisor sandbox; add/remove apps on
+**Status:** rev 2 (2026-06-10) — runtime order re-decided WASM-first; see
+[ADR-0001](adr/0001-wasm-first-sandbox-runtime.md). Rev 1 sequenced gVisor
+first; Phase 0 of that track is delivered and retained.
+**Goal:** run each Tangram app in its own sandbox; add/remove apps on
 the fly with immediate access; route every web UI under one port at
-`/<app-name>/...`; proxy MCP through agentgateway; keep the design open to a
-future WASM runtime without buying abstraction we don't need yet.
+`/<app-name>/...`; proxy MCP through agentgateway. Two runtime tracks share
+one host architecture: **Track W (chosen spine): WASM components under an
+embedded Wasmtime** with capability grants; **Track G (retained): gVisor
+containers** for unported/untrusted native apps and as the stabilization
+escape hatch.
 
 ## The one architectural shift that matters
 
@@ -110,52 +115,67 @@ construction, not needed now.
   AGENTS.md. Deferred: an automated `/healthz` contract test (the endpoint
   itself is served and was validated end to end).
 
-### Phase 1 — tangram-host: proxy + reconciler, file-driven
-- `tangram-host` crate: streaming-safe proxy + reconciler with the Docker
-  API (`bollard`) + `runtime: runsc` backend.
-- Desired state = `apps.toml` (name, image, env, resources, enabled);
-  file watcher (`notify`) → converge on save; routes appear/disappear live.
-- agentgateway deployed alongside; its config generated from `apps.toml`;
+### Phase 1 (rev 2) — tangram-core split + transport neutrality
+Pure-win prep that every target needs (native, WASI, Cloudflare, browser):
+- Split the SDK: `tangram-core` (model/action dispatch, automerge store
+  logic, sync-protocol state machine, streamable-HTTP MCP protocol — no
+  tokio/hyper) vs. host adapters (the existing tokio/axum host moves behind
+  the seam unchanged for users).
+- Move sync off WebSockets to an HTTP transport (SSE down + POST up, or
+  bidirectional streams later): `wasi:http` has no WS, and one transport
+  then serves native, WASI, CF, and browsers. Drops tungstenite.
+- Exit: apps unchanged (`#[model]`/`#[actions]` identical), native host
+  behavior identical, sync interops across old↔new during a deprecation
+  window or via a coordinated cutover (single-owner fleet makes this easy).
+
+### Phase 2 (rev 2) — tangram-host with embedded Wasmtime (Track W spine)
+- `tangram-host` crate: streaming-safe proxy (path routing, SSE
+  passthrough, hold-until-healthy) + reconciler over the small `Backend`
+  trait. **First Backend = embedded Wasmtime (37+, WASI 0.3)**: one live
+  component instance per app (the doc-actor lifecycle `wasmtime serve`'s
+  per-request model can't give us), capabilities granted in code — preopen
+  `$HOME/.<app-name>` (or configured data root), outbound HTTP allowlist
+  per app spec.
+- SDK: `wasi:http` host adapter over `tangram-core`; apps compile to
+  `wasm32-wasip2` components.
+- Desired state = `apps.toml` (name, component path/image, env, grants,
+  enabled); `notify` watcher → converge on save; routes appear/disappear
+  live. agentgateway alongside, config generated from the same state,
   `/<app>/mcp` routed through it.
-- Retire the in-process shell for deployment (keep `tangram-shell` as the
-  zero-dependency dev mode — it's good DX and exercises prefix mounting).
-- Exit: edit `apps.toml`, save → app reachable at `/<app>/` in seconds;
-  remove → routes gone, container stopped; MCP through agentgateway.
+- One static host binary deploys identically on the Linux remote and a
+  macOS/Linux laptop — this is the two-host story Track G couldn't match.
+- `tangram-shell` stays as zero-dependency dev mode.
+- Exit: edit `apps.toml` → component live at `/<app>/` in well under a
+  second; remove → gone; MCP through agentgateway; same UX on both hosts.
 
-### Phase 2 — Registry app as source of truth (API-driven, live)
-- Dogfood: `apps/registry` is itself a Tangram app — model = list of app
-  specs + status; actions = `install_app`, `set_enabled`, `remove_app`,
-  `set_image`. The reconciler subscribes to its state stream (SSE) instead
-  of the file; `apps.toml` becomes import/export.
-- This gives the "client-side API call changes the source of truth and a
-  container spins up live" requirement for free — plus a UI for the fleet,
-  MCP tools so an *agent* can install apps, and replication of the desired
-  state across devices. One less database to run.
-- Auth before anything else mutating is exposed beyond localhost: bearer
-  token on the registry's mutating routes at minimum.
-- Exit: `POST /registry/api/actions/install_app` (or the MCP tool) → new
-  sandbox serving within seconds; registry UI shows fleet status.
+### Phase 3 — Registry app as source of truth (API-driven, live)
+Unchanged from rev 1 (was Phase 2): `apps/registry` is itself a Tangram app
+(install_app/set_enabled/remove_app/set_image actions); the reconciler
+subscribes to its state; `apps.toml` demotes to import/export; bearer-token
+auth on mutating routes before any non-localhost exposure; default-deny
+egress (grants become enforced, not advisory) lands here.
+Exit: registry action or MCP tool call → new sandbox serving in seconds.
 
-### Phase 3 — k8s backend (when multi-node or org needs arrive)
-- Second `Backend` impl with `kube-rs`: Deployment + Service per app,
-  `RuntimeClass: gvisor` (minikube's gvisor addon for dev — this is where
-  minikube enters, as the test bed for THIS phase, not as the starting
-  point), tangram-host as the in-cluster ingress (or kgateway +
-  agentgateway's native k8s mode with label-based federation).
-- Same desired-state schema → manifests; registry remains the source of
-  truth. GitOps variant (registry exports to a git repo, Flux/Argo applies)
-  only if a multi-operator/audit workflow demands it — for "API call → live
-  container", gitops adds latency and indirection, so it's an export format
-  here, not the spine.
-- Exit: same registry actions converge a minikube cluster; nothing about
-  apps, images, or the gateway changed.
+### Phase 4 — Cloudflare adapter (remote-in-the-cloud)
+- Not WASI: a `workers-rs` host adapter over the same `tangram-core`
+  (Workers don't run WASI components; workers-wasi never matured).
+- Start with the **DO sync relay**: one Durable Object per app document,
+  SQLite-backed DO storage (GA) for doc bytes, WebSocket hibernation or the
+  Phase-1 HTTP sync transport for peers — replaces the always-on EC2 role
+  for sync+persistence at near-zero idle cost. MCP surface via CF's Agents
+  SDK (`McpAgent`) when full app logic moves.
+- Exit: a laptop replica syncs through a DO relay with the EC2 box off.
 
-### Phase 4 — WASM runtime (exploratory)
-- SDK workstream: `wasi:http` adapter (replace tokio listener + rmcp
-  transport binding behind a feature flag); compile notes to
-  `wasm32-wasip2`; run under `wasmtime serve` or a containerd WASM shim —
-  which slots in as just another `Backend`/RuntimeClass.
-- Nothing in phases 0–3 needs rework if the contract held.
+### Track G — gVisor (delivered foundation, on-demand backend)
+- Phase 0 above is **kept**: images, CI job, runsc install, validation. It
+  is the escape hatch if WASI 0.3 stabilization slips, and the designated
+  runtime for **unported or untrusted native apps** (per D4/D5) — a
+  `docker+runsc` Backend impl behind the same trait and desired-state
+  schema whenever needed.
+- k8s extension (was Phase 3): unchanged design — `kube-rs` Backend,
+  `RuntimeClass: gvisor`, minikube as that phase's test bed; WASM under k8s
+  arrives via containerd wasm shims as just another RuntimeClass. Backlog
+  until multi-node/org needs are real.
 
 ## Pushback / positions taken (challenge these)
 
@@ -193,17 +213,34 @@ construction, not needed now.
 - **D4 — trust model: own/trusted apps for months.** Read-only rootfs and
   resource limits from Phase 0; default-deny egress is a Phase 2 hardening
   item, not a blocker.
+- **D5 (rev 2, 2026-06-10) — WASM-first runtime.** The spine is WASM
+  components under an embedded Wasmtime in `tangram-host`; gVisor (Track G,
+  Phase 0 delivered) is retained as the stabilization escape hatch and the
+  runtime for unported/untrusted native apps. Full comparison and rationale:
+  [ADR-0001](adr/0001-wasm-first-sandbox-runtime.md). Supersedes the
+  runsc-first sequencing in D1 (the single-box topology decision itself is
+  unchanged).
 
 ## Risks
 
-- **Streaming through the proxy**: SSE buffering or WS upgrade bugs would
-  break the live-update core. Mitigate: hyper-level proxy (not a generic
-  middleware), integration tests for SSE latency + WS sync through the full
-  chain (client → host → runsc app).
-- **runsc + io: gVisor's gofer adds file I/O overhead** — fine for automerge
-  documents at Tangram scale; revisit if documents grow.
+- **WASI 0.3 is RC-grade until ~late 2026** (1.0 target). Mitigation: we
+  embed and pin our own Wasmtime (no runtime drift), and Track G stands as
+  the tested escape hatch.
+- **The core/adapter split is real SDK surgery** (tokio/axum/rmcp transport
+  out of `tangram-core`; MCP streamable-HTTP reimplemented portably). Keep
+  the native adapter's behavior bit-identical via the existing end-to-end
+  checks (schema parity, sync, SSE) before any WASI work starts.
+- **Streaming through the proxy**: SSE buffering bugs would break the
+  live-update core. Mitigate: hyper-level proxy (not a generic middleware),
+  integration tests for SSE latency + sync through the full chain
+  (client → host → sandboxed app).
+- **Sync transport migration**: moving off WebSockets must not strand
+  replicas; single-owner fleet now makes a coordinated cutover cheap — do
+  it before there are external users.
 - **agentgateway config drift**: generate its config from the same desired
   state, never hand-edit.
-- **Per-app egress** is the weakest isolation story on plain Docker
-  networking (k8s NetworkPolicy is cleaner). Until Phase 3: default-deny
-  egress per container with explicit allowlists where declared.
+- (Track G) **runsc gofer I/O overhead** — fine for automerge documents at
+  Tangram scale; **per-app egress on plain Docker networking** is weak
+  (k8s NetworkPolicy is cleaner) — both inherited only if/when Track G runs
+  third-party apps; WASM grants make egress allowlists first-class on the
+  spine.

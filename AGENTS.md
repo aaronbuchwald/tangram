@@ -21,6 +21,8 @@ symlink to `.agents/skills`.
 - `docs/RUNTIME_PLAN.md` — sandboxed runtime plan **and the app contract**
   (binding: no feature may violate it); packaging in `apps/<app>/Dockerfile`
   + `scripts/build-images.sh` (README "Run an app sandboxed (gVisor)")
+- `docs/adr/` — architecture decision records (ADR-0001: WASM-first runtime
+  vs gVisor — read before runtime/sandbox work)
 - `.agents/skills/` — agent skills (SKILL.md format):
   - `systemd-service` — install/rebuild a Tangram binary as a systemd service
   - `local-replica` — run/check/stop a local replica syncing to a remote
