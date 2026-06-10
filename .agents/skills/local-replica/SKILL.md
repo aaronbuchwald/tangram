@@ -9,9 +9,9 @@ Manage a local Tangram replica that replicates with a remote instance. All
 logic lives in `replica.sh`; run it and interpret the output.
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/replica.sh connect [--remote <ws base>] [--bind <addr:port>] [--data-dir <dir>]
-bash ${CLAUDE_SKILL_DIR}/replica.sh status
-bash ${CLAUDE_SKILL_DIR}/replica.sh stop
+bash .agents/skills/local-replica/replica.sh connect [--remote <ws base>] [--bind <addr:port>] [--data-dir <dir>]
+bash .agents/skills/local-replica/replica.sh status
+bash .agents/skills/local-replica/replica.sh stop
 ```
 
 Pass the user's arguments through: $ARGUMENTS

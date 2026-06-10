@@ -60,7 +60,11 @@ apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
 apps/shell              multi-app host: serves every app under one port, prefixed
 docs/SDK_DESIGN.md      architecture & roadmap
+.agents/skills/         agent skills (SKILL.md format), tool-agnostic
 ```
+
+AGENTS.md (symlinked as CLAUDE.md) is the entry point for coding agents;
+skills live in `.agents/skills/` (Claude Code finds them via a symlink).
 
 ## Run the examples
 
@@ -127,7 +131,7 @@ UI and synced instance.
 The day-to-day setup: a remote box runs the apps permanently; your laptop
 runs a local replica that syncs to it through an SSH tunnel. You work against
 the replica (UI + MCP), offline edits included, and everything converges.
-There are Claude Code skills for both halves (`.claude/skills/`), or follow
+There are agent skills for both halves (`.agents/skills/`), or follow
 the manual steps.
 
 ### 1. Remote: install the persistent service
@@ -135,7 +139,7 @@ the manual steps.
 On the remote box, in this repo (or ask Claude: `/systemd-service install`):
 
 ```sh
-bash .claude/skills/systemd-service/service.sh install \
+bash .agents/skills/systemd-service/service.sh install \
   --env NUTRITION_STRATEGY=calorieninjas        # optional; needs the key in .env
 ```
 
@@ -165,7 +169,7 @@ With an `ssh tangram` session open, from your local clone (or ask Claude:
 `/local-replica connect`):
 
 ```sh
-bash .claude/skills/local-replica/replica.sh connect
+bash .agents/skills/local-replica/replica.sh connect
 ```
 
 This starts the shell on `127.0.0.1:8090` with

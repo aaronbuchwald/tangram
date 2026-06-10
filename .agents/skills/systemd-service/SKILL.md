@@ -13,7 +13,7 @@ lives in `service.sh`; run it and interpret the output.
 Install (build + write unit + enable + start + verify):
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/service.sh install \
+bash .agents/skills/systemd-service/service.sh install \
   [--dir <repo path>] [--name <service name>] [--binary <cargo package>] \
   [--bind <addr:port>] [--env KEY=VALUE ...]
 ```
@@ -21,7 +21,7 @@ bash ${CLAUDE_SKILL_DIR}/service.sh install \
 Rebuild (build + restart + verify):
 
 ```bash
-bash ${CLAUDE_SKILL_DIR}/service.sh rebuild \
+bash .agents/skills/systemd-service/service.sh rebuild \
   [--dir <repo path>] [--name <service name>] [--binary <cargo package>]
 ```
 

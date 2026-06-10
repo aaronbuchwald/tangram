@@ -47,6 +47,7 @@ coverage/
 data/
 data-*/
 
-# Claude Code local state (skills in .claude/skills/ are committed)
+# Claude Code local state (skills live in .agents/skills/; the committed
+# .claude/skills is a symlink to it)
 .claude/worktrees/
 .claude/settings.local.json
