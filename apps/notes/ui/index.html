@@ -5,59 +5,207 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Notes</title>
   <style>
+    /* ── "The Duplicator": one-ink risograph print language ────────────────
+       Everything on the page is a single blue ink at varying strength on a
+       shared paper stock; the fluorescent-pink second pass appears only in
+       the steno margin rule and the masthead misregistration. The sibling
+       app (nutrition) prints on the same stock in green. */
     :root {
       color-scheme: light dark;
-      --bg: #fdfdfc;
-      --fg: #1c1c1a;
-      --muted: #77756e;
-      --border: #e3e1da;
-      --accent: #c2552b;
+      --paper: #f2f1ec;
+      --ink: #005a9e;          /* riso blue, deepened for body contrast */
+      --ink-2: #ef3f7c;        /* fluorescent pink, second pass */
+      --muted: color-mix(in srgb, var(--ink) 62%, var(--paper));
+      --rule: color-mix(in srgb, var(--ink) 26%, var(--paper));
+      --faint: color-mix(in srgb, var(--ink) 8%, var(--paper));
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #1e1e1c;
-        --fg: #e8e6e0;
-        --muted: #8f8d85;
-        --border: #38362f;
-        --accent: #e07a4f;
+        --paper: #10171f;      /* night master: blue-black stock */
+        --ink: #8cbde8;
+        --ink-2: #f573ae;
       }
     }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
-      margin: 0; padding: 1rem;
-      background: var(--bg); color: var(--fg);
-      font: 15px/1.5 system-ui, sans-serif;
-      max-width: 640px; margin-inline: auto;
+      margin: 0;
+      padding: 1.25rem 1.25rem 3rem;
+      background: var(--paper);
+      color: var(--ink);
+      font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 580px;
+      margin-inline: auto;
     }
-    h1 { font-size: 1.05rem; margin: 0 0 0.25rem; }
-    .live { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.75rem; }
-    .live .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #5aa869; margin-right: 4px; }
+    /* paper grain — a faint fractal-noise pass baked into the stock */
+    body::after {
+      content: "";
+      position: fixed; inset: 0;
+      pointer-events: none;
+      z-index: 60;
+      background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.45 0"/></filter><rect width="180" height="180" filter="url(%23n)"/></svg>');
+      opacity: .35;
+      mix-blend-mode: multiply;
+    }
+    @media (prefers-color-scheme: dark) {
+      body::after { filter: invert(1); opacity: .14; mix-blend-mode: screen; }
+    }
+
+    .masthead {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-bottom: .65rem;
+      margin-bottom: 1rem;
+      border-bottom: 3px solid var(--ink);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(1.7rem, 7vw, 2.1rem);
+      font-weight: 800;
+      letter-spacing: .045em;
+      text-transform: uppercase;
+      line-height: 1;
+      /* the duplicator's second pass, slightly off-register */
+      text-shadow: .085em .07em 0 color-mix(in srgb, var(--ink-2) 70%, transparent);
+    }
+
+    /* live indicator as an inspection stamp */
+    .live {
+      font: 600 10px/1 var(--mono);
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--ink);
+      border: 1.5px solid var(--ink);
+      padding: 5px 8px 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      margin-bottom: .15rem;
+    }
+    .live .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--ink);
+    }
+    .live.off { border-style: dashed; color: var(--muted); border-color: var(--muted); }
     .live.off .dot { background: var(--muted); }
-    form { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+
+    form { display: flex; gap: .6rem; margin-bottom: 1.4rem; align-items: stretch; }
     input {
-      flex: 1; padding: 0.45rem 0.6rem; border: 1px solid var(--border);
-      border-radius: 6px; background: transparent; color: inherit; font: inherit;
+      flex: 1;
+      min-width: 0;
+      padding: .5rem .15rem;
+      border: none;
+      border-bottom: 2px solid var(--rule);
+      border-radius: 0;
+      background: transparent;
+      color: var(--ink);
+      font: inherit;
+      caret-color: var(--ink-2);
     }
+    input::placeholder { color: var(--muted); }
+    input:focus { outline: none; border-bottom-color: var(--ink); }
     button {
-      padding: 0.45rem 0.8rem; border: none; border-radius: 6px;
-      background: var(--accent); color: #fff; font: inherit; cursor: pointer;
+      font: 700 .8rem/1 system-ui, sans-serif;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      padding: .55rem .95rem;
+      border: 1.5px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      cursor: pointer;
+      border-radius: 0;
     }
-    button.ghost { background: transparent; color: var(--muted); padding: 0.2rem 0.4rem; }
-    ul { list-style: none; margin: 0; padding: 0; }
+    button:hover { box-shadow: 2px 2px 0 color-mix(in srgb, var(--ink-2) 80%, transparent); }
+    button:active { translate: 1px 1px; box-shadow: none; }
+    :focus-visible { outline: 2px solid var(--ink-2); outline-offset: 2px; }
+
+    /* the pad: ruled entries with a steno margin for the timestamp */
+    ul { list-style: none; margin: 0; padding: 0; position: relative; }
+    ul:not(:empty)::before {
+      /* the pink margin rule */
+      content: "";
+      position: absolute;
+      left: 62px; top: 0; bottom: 0;
+      width: 1px;
+      background: color-mix(in srgb, var(--ink-2) 60%, transparent);
+    }
     li {
-      padding: 0.45rem 0.1rem; border-bottom: 1px solid var(--border);
-      display: flex; align-items: baseline; gap: 0.75rem;
+      display: grid;
+      grid-template-columns: 62px 1fr auto;
+      align-items: baseline;
+      border-bottom: 1px solid var(--rule);
     }
-    li span.text { flex: 1; overflow-wrap: anywhere; }
-    li time { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
-    .empty { color: var(--muted); padding: 0.5rem 0; }
+    li time {
+      font: 500 10.5px/1 var(--mono);
+      letter-spacing: 0;
+      color: var(--muted);
+      padding: .8rem .6rem .8rem 0;
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    /* the rest of today's page stays ruled and ready */
+    ul:not(:empty)::after {
+      content: "";
+      display: block;
+      height: 132px;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0 43px,
+        var(--rule) 43px 44px
+      );
+    }
+    li .text {
+      padding: .62rem .5rem .62rem .85rem;
+      overflow-wrap: anywhere;
+    }
+    li .del {
+      background: none;
+      border: none;
+      color: var(--muted);
+      padding: .55rem .3rem;
+      font: 600 .85rem/1 var(--mono);
+      letter-spacing: 0;
+      cursor: pointer;
+    }
+    li .del:hover { color: var(--ink-2); box-shadow: none; }
+    li .del:active { translate: none; }
+
+    .empty {
+      color: var(--muted);
+      padding: 1.1rem .15rem;
+      border-bottom: 1px solid var(--rule);
+    }
+    .empty::before {
+      content: "—";
+      color: var(--ink-2);
+      margin-right: .5rem;
+    }
+
+    @media (max-width: 460px) {
+      body { padding: 1rem .9rem 2.5rem; }
+      li { grid-template-columns: 56px 1fr auto; }
+      ul:not(:empty)::before { left: 56px; }
+      li time { padding-right: .45rem; font-size: 10px; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .live:not(.off) .dot { animation: breathe 2.4s ease-in-out infinite; }
+      @keyframes breathe { 50% { opacity: .35; } }
+    }
   </style>
 </head>
 <body>
-  <h1>Notes</h1>
-  <div class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></div>
+  <header class="masthead">
+    <h1>Notes</h1>
+    <div class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></div>
+  </header>
   <form id="add-form">
-    <input id="note-input" placeholder="Add a note…" autocomplete="off" required />
+    <input id="note-input" placeholder="Write a note…" autocomplete="off" required />
     <button type="submit">Add</button>
   </form>
   <ul id="notes"></ul>
@@ -83,17 +231,17 @@
       const notes = [...(state.notes ?? [])].sort((a, b) => b.created_at_ms - a.created_at_ms);
       list.replaceChildren(...notes.map((note) => {
         const li = document.createElement("li");
+        const time = document.createElement("time");
+        time.textContent = new Date(note.created_at_ms).toLocaleTimeString(undefined, { timeStyle: "short" });
         const text = document.createElement("span");
         text.className = "text";
         text.textContent = note.text;
-        const time = document.createElement("time");
-        time.textContent = new Date(note.created_at_ms).toLocaleTimeString();
         const del = document.createElement("button");
-        del.className = "ghost";
+        del.className = "del";
         del.textContent = "✕";
         del.title = "Delete note";
         del.addEventListener("click", () => act("delete_note", { id: note.id }).catch(console.error));
-        li.append(text, time, del);
+        li.append(time, text, del);
         return li;
       }));
       empty.hidden = notes.length > 0;
