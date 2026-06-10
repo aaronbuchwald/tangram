@@ -14,9 +14,43 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::action::Actions;
+use crate::action::{ActionError, Actions};
 use crate::store::Store;
 use crate::{Model, mcp, sync, web};
+
+/// A cloneable handle onto a running app's store, for custom async code
+/// (extra HTTP routes, background resolvers) that lives OUTSIDE the
+/// synchronous action layer. Actions stay the single write path: a handle
+/// can only run registered actions and read state, so every mutation it
+/// makes is an ordinary attributed, replicated change.
+pub struct Handle<M> {
+    store: Arc<Store<M>>,
+}
+
+impl<M> Clone for Handle<M> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+        }
+    }
+}
+
+impl<M: Model + Actions> Handle<M> {
+    /// Run a registered action by name with JSON arguments (the same entry
+    /// point the HTTP and MCP surfaces use).
+    pub fn apply(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ActionError> {
+        self.store.apply(name, args)
+    }
+
+    /// The current replicated state as JSON.
+    pub fn state_json(&self) -> serde_json::Value {
+        self.store.state_json()
+    }
+}
 
 /// Builder + runtime for a Tangram app.
 ///
@@ -78,6 +112,13 @@ impl<M: Model + Actions> App<M> {
     /// `-` → `_`). `TANGRAM_REMOTE` is only consulted by [`serve`](App::serve),
     /// because a host with several apps cannot share one remote URL.
     pub fn build(self) -> anyhow::Result<axum::Router> {
+        Ok(self.build_parts()?.0)
+    }
+
+    /// Like [`build`](App::build), but also returns a [`Handle`] onto the
+    /// store so the app can mount custom routes or run background work that
+    /// applies actions and reads state from async code.
+    pub fn build_parts(self) -> anyhow::Result<(axum::Router, Handle<M>)> {
         let data_dir =
             PathBuf::from(std::env::var("TANGRAM_DATA_DIR").unwrap_or_else(|_| "data".into()));
         let frame_ancestors = std::env::var("FRAME_ANCESTORS").unwrap_or_else(|_| "*".into());
@@ -103,13 +144,14 @@ impl<M: Model + Actions> App<M> {
             StreamableHttpServerConfig::default(),
         );
 
-        Ok(web::router(store, self.ui_dir.clone())
+        let router = web::router(store.clone(), self.ui_dir.clone())
             .nest_service("/mcp", mcp_service)
             .layer(SetResponseHeaderLayer::overriding(
                 header::CONTENT_SECURITY_POLICY,
                 csp,
             ))
-            .layer(TraceLayer::new_for_http()))
+            .layer(TraceLayer::new_for_http());
+        Ok((router, Handle { store }))
     }
 
     /// The per-app remote from the environment: `TANGRAM_REMOTE_<NAME>`.
@@ -118,7 +160,22 @@ impl<M: Model + Actions> App<M> {
         std::env::var(format!("TANGRAM_REMOTE_{suffix}")).ok()
     }
 
-    pub async fn serve(mut self) -> anyhow::Result<()> {
+    pub async fn serve(self) -> anyhow::Result<()> {
+        self.serve_with(|router, _| router).await
+    }
+
+    /// [`serve`](App::serve), with a hook to extend the derived router before
+    /// it binds. The hook receives the assembled router plus a [`Handle`]
+    /// onto the store, so an app can merge custom routes (or spawn background
+    /// tasks) that run actions and read state from async code:
+    ///
+    /// ```ignore
+    /// app().serve_with(|router, handle| router.merge(my_routes(handle))).await
+    /// ```
+    pub async fn serve_with(
+        mut self,
+        extend: impl FnOnce(axum::Router, Handle<M>) -> axum::Router,
+    ) -> anyhow::Result<()> {
         let _ = dotenvy::dotenv();
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
@@ -133,7 +190,8 @@ impl<M: Model + Actions> App<M> {
 
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
         let name = self.name.clone();
-        let app = self.build()?;
+        let (app, handle) = self.build_parts()?;
+        let app = extend(app, handle);
 
         let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await
