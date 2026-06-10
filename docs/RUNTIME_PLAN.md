@@ -117,13 +117,19 @@ construction, not needed now.
 
 ### Phase 1 (rev 2) — tangram-core split + transport neutrality
 Pure-win prep that every target needs (native, WASI, Cloudflare, browser):
-- Split the SDK: `tangram-core` (model/action dispatch, automerge store
+- [ ] Split the SDK: `tangram-core` (model/action dispatch, automerge store
   logic, sync-protocol state machine, streamable-HTTP MCP protocol — no
   tokio/hyper) vs. host adapters (the existing tokio/axum host moves behind
   the seam unchanged for users).
-- Move sync off WebSockets to an HTTP transport (SSE down + POST up, or
-  bidirectional streams later): `wasi:http` has no WS, and one transport
-  then serves native, WASI, CF, and browsers. Drops tungstenite.
+- [x] Move sync off WebSockets to an HTTP transport (SSE pokes down + POST
+  exchanges up) — delivered 2026-06-10: wire contract in
+  [SYNC_PROTOCOL.md](SYNC_PROTOCOL.md), implemented in the SDK
+  (`sync.rs`/`web.rs`); tungstenite dropped; legacy `ws://` remote values
+  rewritten with a deprecation warning. One transport now serves native,
+  WASI, CF, and browsers.
+- [x] Default per-app data location moves to `$HOME/.<app-name>` (the future
+  capability-grant root; explicit `TANGRAM_DATA_DIR` unchanged) — delivered
+  2026-06-10 alongside the transport.
 - Exit: apps unchanged (`#[model]`/`#[actions]` identical), native host
   behavior identical, sync interops across old↔new during a deprecation
   window or via a coordinated cutover (single-owner fleet makes this easy).
@@ -159,12 +165,17 @@ Exit: registry action or MCP tool call → new sandbox serving in seconds.
 ### Phase 4 — Cloudflare adapter (remote-in-the-cloud)
 - Not WASI: a `workers-rs` host adapter over the same `tangram-core`
   (Workers don't run WASI components; workers-wasi never matured).
-- Start with the **DO sync relay**: one Durable Object per app document,
-  SQLite-backed DO storage (GA) for doc bytes, WebSocket hibernation or the
-  Phase-1 HTTP sync transport for peers — replaces the always-on EC2 role
-  for sync+persistence at near-zero idle cost. MCP surface via CF's Agents
-  SDK (`McpAgent`) when full app logic moves.
-- Exit: a laptop replica syncs through a DO relay with the EC2 box off.
+- [x] The **DO sync relay** — delivered 2026-06-10 (`cloud/cloudflare/`):
+  one Durable Object per app document, SQLite-backed DO storage for doc
+  bytes, the Phase-1 HTTP sync transport for peers (same interface as the
+  native SDK — interchangeable remotes), automerge via its WASM build.
+  Replaces the always-on EC2 role for sync+persistence at near-zero idle
+  cost. Validated under `wrangler dev`: native↔relay↔native convergence
+  from an empty relay (genesis merges cleanly), state survives relay
+  restarts.
+- [ ] MCP surface via CF's Agents SDK (`McpAgent`) when full app logic moves.
+- Exit (met for sync): a laptop replica syncs through a DO relay with the
+  EC2 box off.
 
 ### Track G — gVisor (delivered foundation, on-demand backend)
 - Phase 0 above is **kept**: images, CI job, runsc install, validation. It

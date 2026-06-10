@@ -1,0 +1,19 @@
+{
+  "name": "tangram-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Durable-Object sync relay speaking the Tangram HTTP sync protocol (docs/SYNC_PROTOCOL.md)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@automerge/automerge": "^3.2.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260610.0",
+    "typescript": "^5.6.0",
+    "wrangler": "~4.86.0"
+  }
+}

@@ -1,136 +1,240 @@
 //! Replication between instances using Automerge's sync protocol over
-//! WebSockets. Topology is symmetric: every instance serves `/sync` and can
-//! also dial out to one remote (`TANGRAM_REMOTE`). The server is not special
-//! — it's just another peer that happens to be reachable.
+//! HTTP(+SSE) — the wire contract is specified in `docs/SYNC_PROTOCOL.md`.
+//! Topology is symmetric: every instance serves `POST /sync` +
+//! `GET /sync/events` and can also dial out to one remote (`TANGRAM_REMOTE`).
+//! The server is not special — it's just another peer that happens to be
+//! reachable. The same interface is served by the Cloudflare Durable-Object
+//! relay in `cloud/cloudflare/`, so a replica cannot tell them apart.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use anyhow::Context;
+use futures_util::StreamExt;
 
 use crate::Model;
 use crate::action::Actions;
 use crate::store::Store;
 
-/// Core peer loop, transport-agnostic: exchange raw sync-protocol frames with
-/// one peer until either side disconnects. The automerge sync protocol
-/// converges and then goes quiet (`generate_sync` returns `None`); the watch
-/// channel wakes us whenever the local document changes so we push updates to
-/// the peer immediately — this is what makes remote UIs update quickly.
-async fn peer_loop<M: Model + Actions>(
-    store: Arc<Store<M>>,
-    mut incoming: mpsc::Receiver<Vec<u8>>,
-    outgoing: mpsc::Sender<Vec<u8>>,
-) {
-    let mut sync_state = automerge::sync::State::new();
-    let mut version = store.subscribe();
+// ── server side ──────────────────────────────────────────────────────────────
 
-    loop {
-        // Flush everything we owe the peer.
-        while let Some(frame) = store.generate_sync(&mut sync_state) {
-            if outgoing.send(frame).await.is_err() {
-                return; // peer gone
-            }
-        }
-        tokio::select! {
-            frame = incoming.recv() => {
-                let Some(frame) = frame else { return };
-                match store.receive_sync(&mut sync_state, &frame) {
-                    // Document changed: wake SSE streams and other peers.
-                    Ok(true) => store.bump(),
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!("dropping sync peer after bad message: {e}");
-                        return;
-                    }
-                }
-            }
-            changed = version.changed() => {
-                if changed.is_err() {
-                    return; // store dropped
-                }
-            }
-        }
-    }
+/// Sessions idle longer than this are evicted. Losing a session is harmless:
+/// the next POST starts from a fresh `automerge::sync::State` and the
+/// protocol re-converges (it just costs an extra round trip or two).
+const SESSION_IDLE: Duration = Duration::from_secs(5 * 60);
+
+struct Session {
+    state: automerge::sync::State,
+    last_seen: Instant,
 }
 
-/// Handle an inbound peer on the `/sync` WebSocket route.
-pub(crate) async fn serve_peer<M: Model + Actions>(
-    socket: axum::extract::ws::WebSocket,
-    store: Arc<Store<M>>,
-) {
-    use axum::extract::ws::Message;
-
-    let (mut ws_tx, mut ws_rx) = socket.split();
-    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(64);
-    let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
-
-    let forward_out = async {
-        while let Some(frame) = out_rx.recv().await {
-            if ws_tx.send(Message::Binary(frame.into())).await.is_err() {
-                break;
-            }
-        }
-    };
-    let forward_in = async {
-        while let Some(Ok(msg)) = ws_rx.next().await {
-            if let Message::Binary(bytes) = msg
-                && in_tx.send(bytes.to_vec()).await.is_err()
-            {
-                break;
-            }
-        }
-    };
-
-    tokio::select! {
-        () = peer_loop(store, in_rx, out_tx) => {}
-        () = forward_out => {}
-        () = forward_in => {}
-    }
+/// Per-peer sync states held in server memory, keyed by the client-generated
+/// `X-Tangram-Session` id.
+#[derive(Default)]
+pub(crate) struct Sessions {
+    map: Mutex<HashMap<String, Session>>,
 }
+
+/// Handle one `POST /sync`: apply the client's message (if any), then return
+/// every message we owe that peer, framed as `[u32 big-endian length][bytes]`.
+pub(crate) fn handle_post<M: Model + Actions>(
+    store: &Store<M>,
+    sessions: &Sessions,
+    session_id: &str,
+    body: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let mut map = sessions.map.lock().expect("sessions lock");
+    map.retain(|_, s| s.last_seen.elapsed() < SESSION_IDLE);
+    let session = map
+        .entry(session_id.to_string())
+        .or_insert_with(|| Session {
+            state: automerge::sync::State::new(),
+            last_seen: Instant::now(),
+        });
+    session.last_seen = Instant::now();
+
+    if !body.is_empty() && store.receive_sync(&mut session.state, body)? {
+        // Document changed: wake SSE pokes, UIs, and other peers.
+        store.bump();
+    }
+    let mut response = Vec::new();
+    while let Some(msg) = store.generate_sync(&mut session.state) {
+        response.extend_from_slice(&u32::try_from(msg.len())?.to_be_bytes());
+        response.extend_from_slice(&msg);
+    }
+    Ok(response)
+}
+
+// ── client side ──────────────────────────────────────────────────────────────
 
 /// Dial out to a remote instance and keep syncing with it, reconnecting with
-/// backoff. `url` is e.g. `ws://other-host:8080/sync`.
+/// backoff. `url` is a sync base like `http://other-host:8080/sync` (legacy
+/// `ws://`/`wss://` values are rewritten with a deprecation warning).
 pub(crate) async fn run_remote<M: Model + Actions>(url: String, store: Arc<Store<M>>) {
-    use tokio_tungstenite::tungstenite::Message;
-
+    let base = normalize_remote(&url);
+    let client = reqwest::Client::new();
     loop {
-        match tokio_tungstenite::connect_async(&url).await {
-            Ok((socket, _resp)) => {
-                tracing::info!("syncing with remote {url}");
-                let (mut ws_tx, mut ws_rx) = socket.split();
-                let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(64);
-                let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(64);
-
-                let forward_out = async {
-                    while let Some(frame) = out_rx.recv().await {
-                        if ws_tx.send(Message::Binary(frame.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                };
-                let forward_in = async {
-                    while let Some(Ok(msg)) = ws_rx.next().await {
-                        if let Message::Binary(bytes) = msg
-                            && in_tx.send(bytes.to_vec()).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                };
-
-                tokio::select! {
-                    () = peer_loop(store.clone(), in_rx, out_tx) => {}
-                    () = forward_out => {}
-                    () = forward_in => {}
-                }
-                tracing::warn!("lost sync connection to {url}; reconnecting");
-            }
-            Err(e) => {
-                tracing::warn!("cannot reach remote {url}: {e}; retrying");
-            }
+        if let Err(e) = sync_with_remote(&client, &base, &store).await {
+            tracing::warn!("sync with {base} failed: {e:#}; reconnecting");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Rewrite legacy WebSocket remote URLs (the pre-HTTP transport) so old
+/// configs keep working.
+fn normalize_remote(url: &str) -> String {
+    let rewritten = if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else {
+        return url.trim_end_matches('/').to_string();
+    };
+    tracing::warn!(
+        "ws:// sync remotes are deprecated (sync runs over HTTP now): using {rewritten} for {url}"
+    );
+    rewritten.trim_end_matches('/').to_string()
+}
+
+/// One connection's lifetime: open the SSE poke stream, then run a sync round
+/// on every poke or local change. Only returns on failure (transport error or
+/// stream close); the caller reconnects with a fresh session — the server
+/// then re-syncs us from a fresh `State`.
+async fn sync_with_remote<M: Model + Actions>(
+    client: &reqwest::Client,
+    base: &str,
+    store: &Arc<Store<M>>,
+) -> anyhow::Result<()> {
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut state = automerge::sync::State::new();
+    let mut version = store.subscribe();
+
+    let response = client
+        .get(format!("{base}/events"))
+        .query(&[("session", &session)])
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .context("opening poke stream")?;
+    tracing::info!("syncing with remote {base}");
+    let mut pokes = response.bytes_stream();
+    let mut sse_buf = String::new();
+
+    loop {
+        // Converge both directions, then sleep until there's work again. The
+        // first iteration doubles as the initial sync (the server also pokes
+        // on connect).
+        sync_round(client, base, &session, &mut state, store).await?;
+        loop {
+            tokio::select! {
+                chunk = pokes.next() => {
+                    let chunk = chunk.context("poke stream closed")?.context("poke stream")?;
+                    sse_buf.push_str(&String::from_utf8_lossy(&chunk));
+                    if drain_pokes(&mut sse_buf) {
+                        break;
+                    }
+                }
+                changed = version.changed() => {
+                    changed.context("store dropped")?;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Minimal SSE parse: drop complete blank-line-terminated blocks from `buf`
+/// and report whether any was a real event. The server only ever sends
+/// `event: poke`, so the event's contents don't matter; comment-only blocks
+/// (`: keep-alive`) are not pokes.
+fn drain_pokes(buf: &mut String) -> bool {
+    let mut poked = false;
+    while let Some(end) = buf.find("\n\n") {
+        poked |= buf[..end]
+            .lines()
+            .any(|line| !line.is_empty() && !line.starts_with(':'));
+        buf.drain(..end + 2);
+    }
+    poked
+}
+
+/// Exchange sync messages with the remote until both sides quiesce: we have
+/// nothing to send AND the response carries nothing.
+async fn sync_round<M: Model + Actions>(
+    client: &reqwest::Client,
+    base: &str,
+    session: &str,
+    state: &mut automerge::sync::State,
+    store: &Arc<Store<M>>,
+) -> anyhow::Result<()> {
+    loop {
+        let message = store.generate_sync(state);
+        let quiet = message.is_none();
+        let body = client
+            .post(base)
+            .header("X-Tangram-Session", session)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(message.unwrap_or_default())
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .context("sync POST")?
+            .bytes()
+            .await
+            .context("sync POST body")?;
+
+        let mut changed = false;
+        for frame in parse_frames(&body)? {
+            changed |= store.receive_sync(state, frame)?;
+        }
+        if changed {
+            store.bump();
+        }
+        if quiet && body.is_empty() {
+            return Ok(());
+        }
+    }
+}
+
+/// Split a response body into its `[u32 big-endian length][bytes]` frames.
+fn parse_frames(mut bytes: &[u8]) -> anyhow::Result<Vec<&[u8]>> {
+    let mut frames = Vec::new();
+    while !bytes.is_empty() {
+        anyhow::ensure!(bytes.len() >= 4, "truncated sync frame header");
+        let len = u32::from_be_bytes(bytes[..4].try_into().expect("4 bytes")) as usize;
+        anyhow::ensure!(bytes.len() >= 4 + len, "truncated sync frame");
+        frames.push(&bytes[4..4 + len]);
+        bytes = &bytes[4 + len..];
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{drain_pokes, parse_frames};
+
+    #[test]
+    fn frames_roundtrip() {
+        let mut body = Vec::new();
+        for msg in [b"hello".as_slice(), b"".as_slice(), b"world".as_slice()] {
+            body.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+            body.extend_from_slice(msg);
+        }
+        let frames = parse_frames(&body).unwrap();
+        assert_eq!(frames, vec![b"hello".as_slice(), b"", b"world"]);
+        assert!(parse_frames(&body[..body.len() - 1]).is_err());
+        assert!(parse_frames(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn sse_pokes() {
+        let mut buf = String::from("event: poke\ndata:\n\n: keep-al");
+        assert!(drain_pokes(&mut buf));
+        assert_eq!(buf, ": keep-al"); // partial block stays buffered
+        buf.push_str("ive\n\n");
+        assert!(!drain_pokes(&mut buf)); // comment-only block is not a poke
+        assert!(buf.is_empty());
     }
 }

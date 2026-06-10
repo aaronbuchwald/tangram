@@ -17,7 +17,11 @@ symlink to `.agents/skills`.
 - `apps/nutrition` — fuller example; pluggable resolution in
   `apps/nutrition/src/strategy/` (see README "Nutrition strategies")
 - `apps/shell` — multi-app host serving every app under one port, prefixed
+- `cloud/cloudflare` — Durable-Object sync relay (TypeScript Worker); speaks
+  the same sync interface as the SDK, interchangeable as a remote
 - `docs/SDK_DESIGN.md` — architecture & roadmap
+- `docs/SYNC_PROTOCOL.md` — the HTTP(+SSE) sync wire contract (binding for
+  every sync server: native SDK and the Cloudflare relay)
 - `docs/RUNTIME_PLAN.md` — sandboxed runtime plan **and the app contract**
   (binding: no feature may violate it); packaging in `apps/<app>/Dockerfile`
   + `scripts/build-images.sh` (README "Run an app sandboxed (gVisor)")

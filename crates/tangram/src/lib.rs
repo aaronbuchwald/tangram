@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The state lives in an Automerge CRDT document persisted to disk, so it is
-//! local-first by default; set `TANGRAM_REMOTE=ws://host:port/sync` to
+//! local-first by default; set `TANGRAM_REMOTE=http://host:port/sync` to
 //! replicate with another instance (changes merge from either side and every
 //! connected UI updates live over SSE).
 

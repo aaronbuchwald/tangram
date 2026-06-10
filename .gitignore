@@ -19,6 +19,7 @@ Thumbs.db
 
 # Build artifacts and dependencies
 node_modules/
+.wrangler/
 dist/
 build/
 out/

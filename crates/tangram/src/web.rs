@@ -1,13 +1,13 @@
 //! The derived web surface: state + actions JSON API, a live SSE state
-//! stream, the sync WebSocket, and the app's static UI.
+//! stream, the HTTP sync endpoints, and the app's static UI.
 
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::body::Bytes;
+use axum::extract::{FromRef, Path, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
@@ -24,6 +24,28 @@ use crate::action::{ActionError, Actions};
 use crate::store::Store;
 use crate::sync;
 
+/// Router state: the store plus the per-peer sync sessions (which belong to
+/// this serving surface, not to the transport-neutral store).
+struct AppState<M> {
+    store: Arc<Store<M>>,
+    sync_sessions: Arc<sync::Sessions>,
+}
+
+impl<M> Clone for AppState<M> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            sync_sessions: self.sync_sessions.clone(),
+        }
+    }
+}
+
+impl<M> FromRef<AppState<M>> for Arc<Store<M>> {
+    fn from_ref(state: &AppState<M>) -> Self {
+        state.store.clone()
+    }
+}
+
 pub(crate) fn router<M: Model + Actions>(store: Arc<Store<M>>, ui_dir: PathBuf) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -31,12 +53,16 @@ pub(crate) fn router<M: Model + Actions>(store: Arc<Store<M>>, ui_dir: PathBuf) 
         .route("/api/actions", get(list_actions::<M>))
         .route("/api/actions/{name}", axum::routing::post(run_action::<M>))
         .route("/api/events", get(events::<M>))
-        .route("/sync", get(sync_ws::<M>))
+        .route("/sync", axum::routing::post(sync_post::<M>))
+        .route("/sync/events", get(sync_events::<M>))
         // Permissive CORS so embedding hosts can call the API; tighten for
         // apps holding sensitive data.
         .layer(CorsLayer::permissive())
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
-        .with_state(store)
+        .with_state(AppState {
+            store,
+            sync_sessions: Arc::default(),
+        })
 }
 
 async fn state<M: Model + Actions>(State(store): State<Arc<Store<M>>>) -> Json<serde_json::Value> {
@@ -95,9 +121,40 @@ async fn events<M: Model + Actions>(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn sync_ws<M: Model + Actions>(
-    State(store): State<Arc<Store<M>>>,
-    upgrade: WebSocketUpgrade,
+/// `POST /sync` — one HTTP sync exchange (see `docs/SYNC_PROTOCOL.md`): the
+/// body carries zero or one automerge sync message from the peer identified
+/// by `X-Tangram-Session`; the response carries every message we owe it,
+/// length-framed.
+async fn sync_post<M: Model + Actions>(
+    State(app): State<AppState<M>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| sync::serve_peer(socket, store))
+    let Some(session) = headers
+        .get("x-tangram-session")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "missing X-Tangram-Session header").into_response();
+    };
+    match sync::handle_post(&app.store, &app.sync_sessions, session, &body) {
+        Ok(frames) => {
+            ([(header::CONTENT_TYPE, "application/octet-stream")], frames).into_response()
+        }
+        Err(e) => {
+            tracing::warn!("rejecting bad sync message: {e}");
+            (StatusCode::BAD_REQUEST, "bad sync message").into_response()
+        }
+    }
+}
+
+/// `GET /sync/events` — SSE poke stream: an `event: poke` on connect and on
+/// every document change, telling the peer to run a `POST /sync` round. The
+/// `session` query parameter is accepted for symmetry with the protocol doc
+/// but unused here (sessions are tracked by the POST handler).
+async fn sync_events<M: Model + Actions>(
+    State(store): State<Arc<Store<M>>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream =
+        WatchStream::new(store.subscribe()).map(|_| Ok(Event::default().event("poke").data("")));
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

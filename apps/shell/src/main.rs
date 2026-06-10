@@ -56,12 +56,12 @@ async fn main() -> anyhow::Result<()> {
     for (prefix, _, _) in APPS {
         tracing::info!("{prefix} — web UI http://{bind_addr}/{prefix}/");
         tracing::info!("{prefix} — mcp    http://{bind_addr}/{prefix}/mcp");
-        tracing::info!("{prefix} — sync   ws://{bind_addr}/{prefix}/sync");
+        tracing::info!("{prefix} — sync   http://{bind_addr}/{prefix}/sync");
     }
 
     // Race the server against Ctrl-C instead of using graceful shutdown: the
     // hosted apps hold connections that never close on their own (SSE state
-    // streams, sync WebSockets, MCP sessions), so graceful shutdown would
+    // streams, sync poke streams, MCP sessions), so graceful shutdown would
     // hang until every client disconnected. Aborting them is safe because
     // each app's store persists synchronously on every change.
     tokio::select! {
@@ -82,7 +82,7 @@ fn index_html() -> String {
       <a class="app" href="/{prefix}/"><strong>{title}</strong><span>{blurb}</span></a>
       <div class="endpoints">
         <code>/{prefix}/mcp</code>
-        <code>ws://&hellip;/{prefix}/sync</code>
+        <code>/{prefix}/sync</code>
       </div>
     </li>
 "#

@@ -11,7 +11,7 @@ CRDT-replicated state:
 |---|---|---|
 | **MCP** (streamable HTTP) | `/mcp` | AI agents — Claude Code, Claude Desktop, any MCP client |
 | **Web UI + JSON API** | `/`, `/api/*` | Humans (standalone or iframed into Obsidian / a Tangram shell) |
-| **Sync** (Automerge protocol over WebSocket) | `/sync` | Other instances of the same app — your other devices, a shared relay, a collaborator |
+| **Sync** (Automerge protocol over HTTP+SSE) | `/sync` | Other instances of the same app — your other devices, a shared relay, a collaborator |
 
 State lives in an [Automerge](https://automerge.org) document persisted to
 disk: the app is fully functional offline, and when a peer is reachable,
@@ -59,7 +59,9 @@ crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
 apps/shell              multi-app host: serves every app under one port, prefixed
+cloud/cloudflare        Durable-Object sync relay speaking the same sync interface
 docs/SDK_DESIGN.md      architecture & roadmap
+docs/SYNC_PROTOCOL.md   the HTTP(+SSE) sync wire contract
 .agents/skills/         agent skills (SKILL.md format), tool-agnostic
 ```
 
@@ -82,7 +84,7 @@ cargo run -p tangram-nutrition    # instance A on :8080
 
 BIND_ADDR=127.0.0.1:8081 \
 TANGRAM_DATA_DIR=data-b \
-TANGRAM_REMOTE=ws://127.0.0.1:8080/sync \
+TANGRAM_REMOTE=http://127.0.0.1:8080/sync \
 cargo run -p tangram-nutrition    # instance B, replicating with A
 ```
 
@@ -106,8 +108,8 @@ Instead each app reads `TANGRAM_REMOTE_<NAME>` (name uppercased):
 ```sh
 BIND_ADDR=127.0.0.1:8081 \
 TANGRAM_DATA_DIR=data-b \
-TANGRAM_REMOTE_NOTES=ws://127.0.0.1:8080/notes/sync \
-TANGRAM_REMOTE_NUTRITION=ws://127.0.0.1:8080/nutrition/sync \
+TANGRAM_REMOTE_NOTES=http://127.0.0.1:8080/notes/sync \
+TANGRAM_REMOTE_NUTRITION=http://127.0.0.1:8080/nutrition/sync \
 cargo run -p tangram-shell        # second shell, replicating both apps with the first
 ```
 
@@ -206,7 +208,7 @@ bash .agents/skills/local-replica/replica.sh connect
 ```
 
 This starts the shell on `127.0.0.1:8090` with
-`TANGRAM_REMOTE_<APP>=ws://127.0.0.1:8080/<app>/sync` (i.e. syncing to the
+`TANGRAM_REMOTE_<APP>=http://127.0.0.1:8080/<app>/sync` (i.e. syncing to the
 remote through the tunnel), waits until both apps' states converge with the
 remote, and prints the URLs. It also compares nutrition capabilities with the
 remote: if the remote resolves meal descriptions but your replica doesn't, it
@@ -218,8 +220,8 @@ equivalent:
 ```sh
 BIND_ADDR=127.0.0.1:8090 \
 TANGRAM_DATA_DIR=data-replica \
-TANGRAM_REMOTE_NOTES=ws://127.0.0.1:8080/notes/sync \
-TANGRAM_REMOTE_NUTRITION=ws://127.0.0.1:8080/nutrition/sync \
+TANGRAM_REMOTE_NOTES=http://127.0.0.1:8080/notes/sync \
+TANGRAM_REMOTE_NUTRITION=http://127.0.0.1:8080/nutrition/sync \
 cargo run --release -p tangram-shell
 ```
 
@@ -256,19 +258,45 @@ want the replica to sync continuously (closer to how multi-device should
 feel), put both machines on a [Tailscale](https://tailscale.com) tailnet and
 skip the tunnel: keep the remote bound to `127.0.0.1` behind `tailscale
 serve`, or bind it to the tailnet interface, and point the replica straight
-at it (`replica.sh connect --remote ws://<remote-tailnet-name>:8080`). Same
+at it (`replica.sh connect --remote http://<remote-tailnet-name>:8080`). Same
 caveat either way: `/sync` and `/mcp` have no auth yet, so only expose them
 on networks where every peer is trusted — a tailnet qualifies, the public
 internet does not.
+
+### Alternative: a Cloudflare relay as the remote
+
+Instead of an always-on box, the remote can be the serverless sync relay in
+[`cloud/cloudflare/`](cloud/cloudflare/): one Durable Object per app stores
+the document (SQLite-backed) and speaks the exact same sync interface
+([docs/SYNC_PROTOCOL.md](docs/SYNC_PROTOCOL.md)), so replicas can't tell it
+from a native instance:
+
+```sh
+cd cloud/cloudflare && npm install && npx wrangler login && npx wrangler deploy
+```
+
+then point each replica at the worker:
+
+```sh
+TANGRAM_REMOTE_NOTES=https://tangram-relay.<your-subdomain>.workers.dev/notes/sync \
+TANGRAM_REMOTE_NUTRITION=https://tangram-relay.<your-subdomain>.workers.dev/nutrition/sync \
+cargo run --release -p tangram-shell
+```
+
+Two laptops pointed at the same relay converge through it with no machine of
+yours running in between. `npx wrangler dev` runs the same relay locally for
+testing (see [cloud/cloudflare/README.md](cloud/cloudflare/README.md)). The
+no-auth caveat above applies doubly: a deployed worker is on the public
+internet.
 
 ## Configuration (env / `.env`)
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1:8080` | Listen address |
-| `TANGRAM_REMOTE` | — | `ws://host:port/sync` of a peer to replicate with (single-app mode) |
+| `TANGRAM_REMOTE` | — | `http://host:port/sync` of a peer to replicate with (single-app mode); legacy `ws://`/`wss://` values are rewritten to `http(s)://` with a warning |
 | `TANGRAM_REMOTE_<NAME>` | — | Per-app remote, e.g. `TANGRAM_REMOTE_NOTES` (required form in a shell) |
-| `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
+| `TANGRAM_DATA_DIR` | `$HOME/.<app-name>` | Where the document file lives, directly inside it. Unset: each app uses its own `~/.<app>` (e.g. `~/.notes/notes.automerge`); `./data` if `$HOME` is also unset |
 | `TANGRAM_UI_DIR` | builder value | Static UI directory; overrides the app's compiled-in path (set in container images, where that path doesn't exist) |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
@@ -323,9 +351,12 @@ synced device — past meals using it resolve retroactively.
   hydrate model → run method → reconcile back as one commit (named after the
   action, so history is attributable). Results are returned to the caller;
   the resulting *data* (not the action) replicates.
-- **Sync**: Automerge's sync protocol over WebSocket; every instance serves
-  `/sync` and can dial one `TANGRAM_REMOTE`. Topology is symmetric — a
-  "server" is just a reachable peer.
+- **Sync**: Automerge's sync protocol over HTTP — every instance serves
+  `POST /sync` plus an SSE poke stream at `/sync/events`, and can dial one
+  `TANGRAM_REMOTE`. Topology is symmetric — a "server" is just a reachable
+  peer — and the wire contract
+  ([docs/SYNC_PROTOCOL.md](docs/SYNC_PROTOCOL.md)) is shared by the native
+  SDK and the Cloudflare relay, so they're interchangeable as remotes.
 - **Live UIs**: a watch channel fires on every document change; `/api/events`
   (SSE) pushes the full state JSON to UIs, and sync peers are woken to
   forward the change on.

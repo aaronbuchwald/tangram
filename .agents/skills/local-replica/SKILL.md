@@ -1,7 +1,7 @@
 ---
 name: local-replica
 description: Set up, check, or stop a local Tangram replica that syncs to a remote instance (typically through an SSH tunnel). Use when asked to run a local replica, connect a local instance to the remote, check replica sync status, or stop the local replica.
-argument-hint: connect|status|stop [--remote <ws base>] [--bind <addr:port>] [--data-dir <dir>] [--env KEY=VALUE]...
+argument-hint: connect|status|stop [--remote <http base>] [--bind <addr:port>] [--data-dir <dir>] [--env KEY=VALUE]...
 allowed-tools: Bash
 ---
 
@@ -9,7 +9,7 @@ Manage a local Tangram replica that replicates with a remote instance. All
 logic lives in `replica.sh`; run it and interpret the output.
 
 ```bash
-bash .agents/skills/local-replica/replica.sh connect [--remote <ws base>] [--bind <addr:port>] [--data-dir <dir>] [--env KEY=VALUE]...
+bash .agents/skills/local-replica/replica.sh connect [--remote <http base>] [--bind <addr:port>] [--data-dir <dir>] [--env KEY=VALUE]...
 bash .agents/skills/local-replica/replica.sh status
 bash .agents/skills/local-replica/replica.sh stop
 ```
@@ -18,9 +18,11 @@ Pass the user's arguments through: $ARGUMENTS
 
 ## Defaults
 
-- `--remote`: `ws://127.0.0.1:8080` — the remote as seen through an SSH
+- `--remote`: `http://127.0.0.1:8080` — the remote as seen through an SSH
   tunnel (`ssh tangram` with `LocalForward 8080`). Pass a different base for
-  a direct/tailnet remote, e.g. `ws://my-host:8080`.
+  a direct/tailnet remote, e.g. `http://my-host:8080`, or a deployed
+  Cloudflare relay, e.g. `https://tangram-relay.<subdomain>.workers.dev`
+  (legacy `ws://` bases still work).
 - `--bind`: `127.0.0.1:8090` (off the tunnel-forwarded ports).
 - `--data-dir`: `data-replica` — kept separate from `data/` so a replica can
   coexist with a primary instance in the same checkout.

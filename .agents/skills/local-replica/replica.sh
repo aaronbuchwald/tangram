@@ -2,12 +2,12 @@
 # Manage a local Tangram replica that syncs to a remote instance.
 #
 # Usage:
-#   replica.sh connect [--remote <ws base>] [--bind <addr:port>] [--data-dir <dir>]
+#   replica.sh connect [--remote <http base>] [--bind <addr:port>] [--data-dir <dir>]
 #                      [--env KEY=VALUE]...
-#   replica.sh status  [--remote <ws base>] [--bind <addr:port>]
+#   replica.sh status  [--remote <http base>] [--bind <addr:port>]
 #   replica.sh stop
 #
-# Defaults: --remote ws://127.0.0.1:8080 (a remote reached through an SSH
+# Defaults: --remote http://127.0.0.1:8080 (a remote reached through an SSH
 # tunnel, e.g. `ssh tangram`), --bind 127.0.0.1:8090, --data-dir data-replica.
 # --env (repeatable) exports extra environment to the started replica.
 set -euo pipefail
@@ -26,7 +26,7 @@ case "$SUBCMD" in
   *) usage ;;
 esac
 
-REMOTE="ws://127.0.0.1:8080"
+REMOTE="http://127.0.0.1:8080"
 BIND="127.0.0.1:8090"
 DATA_DIR="data-replica"
 ENV_VARS=()
@@ -46,8 +46,10 @@ DIR="$(git rev-parse --show-toplevel 2>/dev/null)" \
   || die "not inside a git repo; run from your tangram checkout"
 cd "$DIR"
 REMOTE="${REMOTE%/}"
-REMOTE_HTTP="${REMOTE/ws:/http:}"
-REMOTE_HTTP="${REMOTE_HTTP/wss:/https:}"
+# Accept legacy ws:// bases (the SDK rewrites them too); curl needs http://.
+REMOTE="${REMOTE/#ws:/http:}"
+REMOTE="${REMOTE/#wss:/https:}"
+REMOTE_HTTP="$REMOTE"
 PID_FILE="$DATA_DIR/replica.pid"
 LOG_FILE="$DATA_DIR/replica.log"
 

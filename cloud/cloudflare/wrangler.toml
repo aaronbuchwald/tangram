@@ -1,0 +1,15 @@
+name = "tangram-relay"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[vars]
+# Apps this relay serves: one Durable Object (one automerge document) each.
+APPS = "notes,nutrition"
+
+[[durable_objects.bindings]]
+name = "TANGRAM_DOC"
+class_name = "TangramDoc"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TangramDoc"]

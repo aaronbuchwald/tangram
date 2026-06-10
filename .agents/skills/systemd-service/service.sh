@@ -118,6 +118,10 @@ install_cmd() {
   echo "==> writing $UNIT"
   local env_lines=""
   [ -n "$BIND" ] && env_lines+="Environment=BIND_ADDR=$BIND"$'\n'
+  # Pin the repo-local data dir explicitly: the SDK's default (when unset)
+  # is $HOME/.<app-name>, but installed services predate that and keep
+  # their documents in <repo>/data.
+  env_lines+="Environment=TANGRAM_DATA_DIR=$DIR/data"$'\n'
   local kv
   for kv in ${ENVS[@]+"${ENVS[@]}"}; do
     env_lines+="Environment=$kv"$'\n'

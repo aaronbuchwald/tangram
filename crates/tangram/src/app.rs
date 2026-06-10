@@ -23,10 +23,14 @@ use crate::{Model, mcp, sync, web};
 ///
 /// Environment (all optional, `.env` is loaded if present):
 /// - `BIND_ADDR` — listen address (default `127.0.0.1:8080`)
-/// - `TANGRAM_REMOTE` — `ws://host:port/sync` of a peer instance to replicate with
-///   (single-app mode only; see [`App::remote`] for multi-app hosts)
+/// - `TANGRAM_REMOTE` — `http://host:port/sync` of a peer instance to
+///   replicate with (single-app mode only; see [`App::remote`] for multi-app
+///   hosts). Legacy `ws://`/`wss://` values are rewritten to `http(s)://`
+///   with a deprecation warning.
 /// - `TANGRAM_REMOTE_<NAME>` — per-app remote, e.g. `TANGRAM_REMOTE_NOTES`
-/// - `TANGRAM_DATA_DIR` — where the document lives (default `./data`)
+/// - `TANGRAM_DATA_DIR` — where the document lives, directly inside it
+///   (a shell's apps share one dir). Default when unset: `$HOME/.<app-name>`
+///   (e.g. `~/.notes/notes.automerge`), or `./data` if `$HOME` is unset.
 /// - `TANGRAM_UI_DIR` — static UI directory; when set it overrides the
 ///   builder's [`ui_dir`](App::ui_dir) (containers set this because the
 ///   compile-time path baked in by the app doesn't exist in their filesystem)
@@ -66,7 +70,7 @@ impl<M: Model + Actions> App<M> {
         self
     }
 
-    /// `ws://host:port/sync` of a peer instance to replicate with. Takes
+    /// `http://host:port/sync` of a peer instance to replicate with. Takes
     /// precedence over `TANGRAM_REMOTE_<NAME>` (and, in single-app mode,
     /// `TANGRAM_REMOTE`).
     pub fn remote(mut self, url: impl Into<String>) -> Self {
@@ -75,8 +79,8 @@ impl<M: Model + Actions> App<M> {
     }
 
     /// Open the store, start the remote sync client if one is configured, and
-    /// return the fully assembled router for this app (JSON API + SSE + sync
-    /// WebSocket + static UI + `/mcp`). No binding or env-loading side
+    /// return the fully assembled router for this app (JSON API + SSE + HTTP
+    /// sync + static UI + `/mcp`). No binding or env-loading side
     /// effects, so a host can [`nest`](axum::Router::nest) several apps'
     /// routers under different path prefixes on one server.
     ///
@@ -92,8 +96,17 @@ impl<M: Model + Actions> App<M> {
     /// store so the app can mount custom routes or run background work that
     /// applies actions and reads state from async code.
     pub fn build_parts(self) -> anyhow::Result<(axum::Router, Ctx<M>)> {
-        let data_dir =
-            PathBuf::from(std::env::var("TANGRAM_DATA_DIR").unwrap_or_else(|_| "data".into()));
+        // Explicit TANGRAM_DATA_DIR puts the document directly inside it (so
+        // a shell's apps can share one dir). When unset, each app defaults to
+        // its own `$HOME/.<app-name>` — the directory a future sandbox host
+        // grants as the app's whole filesystem (ADR-0001).
+        let data_dir = match std::env::var("TANGRAM_DATA_DIR") {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => match std::env::var("HOME") {
+                Ok(home) => PathBuf::from(home).join(format!(".{}", self.name)),
+                Err(_) => PathBuf::from("data"),
+            },
+        };
         // The env override wins over the builder value: apps bake in an
         // absolute compile-time UI path that doesn't exist inside containers.
         let ui_dir = std::env::var("TANGRAM_UI_DIR")
@@ -176,12 +189,12 @@ impl<M: Model + Actions> App<M> {
             .with_context(|| format!("failed to bind {bind_addr}"))?;
         tracing::info!("{name} — web UI http://{bind_addr}/");
         tracing::info!("{name} — mcp    http://{bind_addr}/mcp");
-        tracing::info!("{name} — sync   ws://{bind_addr}/sync");
+        tracing::info!("{name} — sync   http://{bind_addr}/sync");
 
         // Race the server against Ctrl-C instead of using graceful shutdown:
         // graceful shutdown waits for open connections to drain, but Tangram
-        // apps hold connections that never close on their own (SSE state
-        // streams, sync WebSockets, MCP sessions), so Ctrl-C would hang until
+        // apps hold connections that never close on their own (SSE state and
+        // sync poke streams, MCP sessions), so Ctrl-C would hang until
         // every client disconnected. Aborting them is safe — persistence is
         // synchronous on every change (`Store::persist` runs inside `apply` /
         // `receive_sync`), so there is nothing to flush at shutdown.
