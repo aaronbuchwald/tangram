@@ -1,6 +1,7 @@
 //! App assembly: one builder that wires the store, web surface, MCP surface,
 //! and sync peers together and serves them on a single port.
 
+use std::future::IntoFuture;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,11 +143,19 @@ impl<M: Model + Actions> App<M> {
         tracing::info!("{name} — mcp    http://{bind_addr}/mcp");
         tracing::info!("{name} — sync   ws://{bind_addr}/sync");
 
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await?;
+        // Race the server against Ctrl-C instead of using graceful shutdown:
+        // graceful shutdown waits for open connections to drain, but Tangram
+        // apps hold connections that never close on their own (SSE state
+        // streams, sync WebSockets, MCP sessions), so Ctrl-C would hang until
+        // every client disconnected. Aborting them is safe — persistence is
+        // synchronous on every change (`Store::persist` runs inside `apply` /
+        // `receive_sync`), so there is nothing to flush at shutdown.
+        tokio::select! {
+            result = axum::serve(listener, app).into_future() => result?,
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("{name} — shutting down");
+            }
+        }
         Ok(())
     }
 }

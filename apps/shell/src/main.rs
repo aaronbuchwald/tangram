@@ -3,6 +3,8 @@
 //! `/mcp`, `/sync`) and its own document; per-app sync remotes come from
 //! `TANGRAM_REMOTE_<NAME>` (e.g. `TANGRAM_REMOTE_NOTES`).
 
+use std::future::IntoFuture;
+
 use anyhow::Context;
 use axum::Router;
 use axum::response::{Html, Redirect};
@@ -51,11 +53,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("{prefix} — sync   ws://{bind_addr}/{prefix}/sync");
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    // Race the server against Ctrl-C instead of using graceful shutdown: the
+    // hosted apps hold connections that never close on their own (SSE state
+    // streams, sync WebSockets, MCP sessions), so graceful shutdown would
+    // hang until every client disconnected. Aborting them is safe because
+    // each app's store persists synchronously on every change.
+    tokio::select! {
+        result = axum::serve(listener, app).into_future() => result?,
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("shell — shutting down");
+        }
+    }
     Ok(())
 }
 
