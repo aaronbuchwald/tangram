@@ -18,6 +18,9 @@ symlink to `.agents/skills`.
   `apps/nutrition/src/strategy/` (see README "Nutrition strategies")
 - `apps/shell` — multi-app host serving every app under one port, prefixed
 - `docs/SDK_DESIGN.md` — architecture & roadmap
+- `docs/RUNTIME_PLAN.md` — sandboxed runtime plan **and the app contract**
+  (binding: no feature may violate it); packaging in `apps/<app>/Dockerfile`
+  + `scripts/build-images.sh` (README "Run an app sandboxed (gVisor)")
 - `.agents/skills/` — agent skills (SKILL.md format):
   - `systemd-service` — install/rebuild a Tangram binary as a systemd service
   - `local-replica` — run/check/stop a local replica syncing to a remote

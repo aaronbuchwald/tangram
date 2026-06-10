@@ -84,14 +84,31 @@ construction, not needed now.
 
 ## Phases
 
-### Phase 0 — Contract + packaging (no orchestration yet)
-- Write the app contract into AGENTS.md/docs; add `/healthz` to the contract
-  test (already served).
-- musl static builds; per-app Dockerfile (scratch); `docker run
-  --runtime=runsc` each app by hand; verify all four surfaces + sync between
-  a sandboxed app and a host replica.
-- Exit: notes + nutrition each run sandboxed under runsc with persistent
-  data volumes; CI builds the images.
+### Phase 0 — Contract + packaging (no orchestration yet) — ✅ delivered 2026-06-10
+- [x] musl static builds (`x86_64-unknown-linux-musl`, rustls/ring — both
+  binaries statically linked); per-app Dockerfile at `apps/<app>/Dockerfile`
+  (`FROM scratch` + binary + `ui/`, ~10–15 MB images); built by
+  `scripts/build-images.sh` → `tangram/<app>:dev`.
+- [x] `docker run --runtime=runsc` validated by hand for both apps
+  (read-only rootfs, host publish on 127.0.0.1): `/healthz`, UI `/`,
+  `/api/actions/*`, MCP initialize all pass; persistence across container
+  replacement on a named volume; bidirectional sync between a sandboxed app
+  and a host replica through `/sync`; nutrition resolves a description-only
+  `log_meal` via CalorieNinjas through the gVisor netstack (egress works).
+- [x] Cold start (`docker run` → first `/healthz` 200): ~240 ms steady
+  state; ~1.5 s for the very first runsc container after daemon start
+  (platform warmup) — within the ~100–300 ms expectation above.
+- [x] CI builds the musl binaries + both images (`images` job, build-only).
+- Contract notes discovered: apps pinned the UI dir at an absolute
+  compile-time path (violates "runnable anywhere"); fixed by the
+  `TANGRAM_UI_DIR` env override in the SDK (env wins over builder value).
+  Images bind `0.0.0.0:8080` inside the sandbox (required for port
+  mapping); the host-side publish stays loopback. Containers currently run
+  as root inside the sandbox (scratch has no passwd; non-root + resource
+  limits deferred to Phase 1 hardening — read-only rootfs already used).
+- The contract lives in this doc ("The app contract" above), indexed from
+  AGENTS.md. Deferred: an automated `/healthz` contract test (the endpoint
+  itself is served and was validated end to end).
 
 ### Phase 1 — tangram-host: proxy + reconciler, file-driven
 - `tangram-host` crate: streaming-safe proxy + reconciler with the Docker
