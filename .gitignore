@@ -1,0 +1,44 @@
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts and dependencies
+node_modules/
+dist/
+build/
+out/
+target/
+bin/
+*.o
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Coverage / test output
+coverage/
+*.cover
+.coverage
+
+
+# Added by cargo
+
+/target

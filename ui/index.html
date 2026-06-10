@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scratchpad</title>
+  <style>
+    /* Compact, theme-aware styling so the UI looks right both standalone
+       and embedded as a small iframe tile inside Obsidian / Tangram. */
+    :root {
+      color-scheme: light dark;
+      --bg: #fdfdfc;
+      --fg: #1c1c1a;
+      --muted: #77756e;
+      --border: #e3e1da;
+      --accent: #c2552b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1e1e1c;
+        --fg: #e8e6e0;
+        --muted: #8f8d85;
+        --border: #38362f;
+        --accent: #e07a4f;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 1rem;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.5 system-ui, sans-serif;
+    }
+    h1 { font-size: 1.05rem; margin: 0 0 0.75rem; }
+    form { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+    input {
+      flex: 1;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+    }
+    button {
+      padding: 0.45rem 0.8rem;
+      border: none;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.ghost { background: transparent; color: var(--muted); }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li {
+      padding: 0.45rem 0.1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+    li time { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+    .empty { color: var(--muted); padding: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Scratchpad</h1>
+  <form id="add-form">
+    <input id="note-input" placeholder="Add a note…" autocomplete="off" required />
+    <button type="submit">Add</button>
+    <button type="button" class="ghost" id="clear-btn" title="Clear all notes">Clear</button>
+  </form>
+  <ul id="notes"></ul>
+  <div class="empty" id="empty" hidden>No notes yet. Add one here or via an MCP tool call.</div>
+
+  <script>
+    const list = document.getElementById("notes");
+    const empty = document.getElementById("empty");
+    const input = document.getElementById("note-input");
+
+    async function refresh() {
+      const res = await fetch("api/notes");
+      const notes = await res.json();
+      list.replaceChildren(...notes.map((note) => {
+        const li = document.createElement("li");
+        const span = document.createElement("span");
+        span.textContent = note.text;
+        const time = document.createElement("time");
+        time.textContent = new Date(note.created_at_unix * 1000).toLocaleTimeString();
+        li.append(span, time);
+        return li;
+      }));
+      empty.hidden = notes.length > 0;
+    }
+
+    document.getElementById("add-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await fetch("api/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: input.value }),
+      });
+      input.value = "";
+      refresh();
+    });
+
+    document.getElementById("clear-btn").addEventListener("click", async () => {
+      await fetch("api/notes", { method: "DELETE" });
+      refresh();
+    });
+
+    refresh();
+    // Poll so notes added by MCP tool calls show up without a manual reload.
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
