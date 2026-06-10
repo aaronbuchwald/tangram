@@ -122,6 +122,103 @@ Ask Claude to log a meal or register nutrition data for a new ingredient
 (`add_ingredient`) — the change lands in the same document and pushes to every
 UI and synced instance.
 
+## Getting started: a persistent remote + a local replica
+
+The day-to-day setup: a remote box runs the apps permanently; your laptop
+runs a local replica that syncs to it through an SSH tunnel. You work against
+the replica (UI + MCP), offline edits included, and everything converges.
+There are Claude Code skills for both halves (`.claude/skills/`), or follow
+the manual steps.
+
+### 1. Remote: install the persistent service
+
+On the remote box, in this repo (or ask Claude: `/systemd-service install`):
+
+```sh
+bash .claude/skills/systemd-service/service.sh install \
+  --env NUTRITION_STRATEGY=calorieninjas        # optional; needs the key in .env
+```
+
+This builds the release shell, writes a systemd unit (working directory = the
+repo, so `.env` secrets load via dotenvy), enables it at boot, starts it on
+`127.0.0.1:8080`, and health-checks it. After pulling new code, rebuild with
+`/systemd-service rebuild` (or `service.sh rebuild`).
+
+### 2. Tunnel: one SSH config entry
+
+On your **local machine**, add to `~/.ssh/config`:
+
+```
+Host tangram
+    HostName <your-remote-host>
+    User ubuntu
+    IdentityFile ~/.ssh/<your-key>.pem
+    LocalForward 8080 127.0.0.1:8080
+```
+
+Now every `ssh tangram` session doubles as the sync link: the remote's web,
+MCP, and sync endpoints all appear at `localhost:8080` on your machine.
+
+### 3. Local: run the replica
+
+With an `ssh tangram` session open, from your local clone (or ask Claude:
+`/local-replica connect`):
+
+```sh
+bash .claude/skills/local-replica/replica.sh connect
+```
+
+This starts the shell on `127.0.0.1:8090` with
+`TANGRAM_REMOTE_<APP>=ws://127.0.0.1:8080/<app>/sync` (i.e. syncing to the
+remote through the tunnel), waits until both apps' states converge with the
+remote, and prints the URLs. Manual equivalent:
+
+```sh
+BIND_ADDR=127.0.0.1:8090 \
+TANGRAM_DATA_DIR=data-replica \
+TANGRAM_REMOTE_NOTES=ws://127.0.0.1:8080/notes/sync \
+TANGRAM_REMOTE_NUTRITION=ws://127.0.0.1:8080/nutrition/sync \
+cargo run --release -p tangram-shell
+```
+
+### 4. Point your local MCP at the replica
+
+```sh
+claude mcp add --transport http notes     http://127.0.0.1:8090/notes/mcp
+claude mcp add --transport http nutrition http://127.0.0.1:8090/nutrition/mcp
+```
+
+Agent writes land in the local replica and replicate up the tunnel on their
+own.
+
+### 5. Watch them sync
+
+Open both sides of the same app in two tabs:
+
+| | notes | nutrition |
+|---|---|---|
+| **local replica** (`:8090`) | <http://localhost:8090/notes/> | <http://localhost:8090/nutrition/> |
+| **remote via tunnel** (`:8080`) | <http://localhost:8080/notes/> | <http://localhost:8080/nutrition/> |
+
+Add a note or log a meal in either tab — the other updates in well under a
+second (CRDT sync + SSE push). `/local-replica status` reports per-app
+convergence. Then the local-first test: close the SSH session — the `:8080`
+tab dies (it *was* the tunnel) but `:8090` keeps working; make edits, re-run
+`ssh tangram`, and watch them appear on the remote within a couple seconds
+(the replica reconnects with ~2s backoff).
+
+### Alternative: a tailnet instead of an SSH tunnel
+
+The SSH tunnel is zero-install but lives only as long as the session. If you
+want the replica to sync continuously (closer to how multi-device should
+feel), put both machines on a [Tailscale](https://tailscale.com) tailnet and
+skip the tunnel: keep the remote bound to `127.0.0.1` behind `tailscale
+serve`, or bind it to the tailnet interface, and point the replica straight
+at it (`replica.sh connect --remote ws://<remote-tailnet-name>:8080`). Same
+caveat either way: `/sync` and `/mcp` have no auth yet, so only expose them
+on networks where every peer is trusted — a tailnet qualifies, the public
+internet does not.
+
 ## Configuration (env / `.env`)
 
 | Variable | Default | Purpose |
