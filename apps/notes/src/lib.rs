@@ -84,19 +84,27 @@ impl Notes {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    tangram::time::now_ms()
 }
+
+/// MCP instructions, shared between the native app builder and the WASM
+/// component's `describe()` export.
+const INSTRUCTIONS: &str = "A shared, replicated notes list. Notes you add are visible to humans \
+     in the web UI and on every synced device.";
 
 /// The notes app, fully configured. Call `.serve()` to run it standalone or
 /// `.build()` to mount it in a multi-app host.
+#[cfg(not(target_family = "wasm"))]
 pub fn app() -> App<Notes> {
     App::<Notes>::new("notes")
-        .instructions(
-            "A shared, replicated notes list. Notes you add are visible to humans \
-             in the web UI and on every synced device.",
-        )
+        .instructions(INSTRUCTIONS)
         .ui_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"))
 }
+
+// Compiled for wasm32-wasip2, the same model + actions become a Tangram
+// component (`tangram-host` owns the platform around it).
+#[cfg(target_family = "wasm")]
+tangram::export_component!(Notes {
+    name: "notes",
+    instructions: INSTRUCTIONS,
+});

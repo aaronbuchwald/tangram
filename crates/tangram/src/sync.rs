@@ -12,10 +12,55 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::StreamExt;
+use tokio::sync::watch;
 
 use crate::Model;
 use crate::action::Actions;
 use crate::store::Store;
+
+/// The document surface the sync protocol runs over. The SDK's typed
+/// [`Store`] implements it, and so does `tangram-host`'s untyped per-app
+/// document — both sides of the protocol (server `handle_post` and client
+/// [`run_remote`]) are generic over this seam, so one implementation serves
+/// native apps and host-managed WASM components identically.
+///
+/// Contract: `receive_sync` persists the document itself when it changed;
+/// `bump` wakes every subscriber (UIs, poke streams, peers) and is the
+/// caller's job after receives so a batch of messages wakes them once.
+pub trait DocHandle: Send + Sync + 'static {
+    /// Next pending sync message for the peer represented by `state`.
+    fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>>;
+    /// Apply one sync message from a peer; returns true if the document
+    /// changed (already persisted by the implementation).
+    fn receive_sync(
+        &self,
+        state: &mut automerge::sync::State,
+        bytes: &[u8],
+    ) -> anyhow::Result<bool>;
+    /// Wake subscribers after a change.
+    fn bump(&self);
+    /// Subscribe to the change signal.
+    fn subscribe(&self) -> watch::Receiver<u64>;
+}
+
+impl<M: Model + Actions> DocHandle for Store<M> {
+    fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
+        Store::generate_sync(self, state)
+    }
+    fn receive_sync(
+        &self,
+        state: &mut automerge::sync::State,
+        bytes: &[u8],
+    ) -> anyhow::Result<bool> {
+        Store::receive_sync(self, state, bytes)
+    }
+    fn bump(&self) {
+        Store::bump(self)
+    }
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        Store::subscribe(self)
+    }
+}
 
 // ── server side ──────────────────────────────────────────────────────────────
 
@@ -32,14 +77,14 @@ struct Session {
 /// Per-peer sync states held in server memory, keyed by the client-generated
 /// `X-Tangram-Session` id.
 #[derive(Default)]
-pub(crate) struct Sessions {
+pub struct Sessions {
     map: Mutex<HashMap<String, Session>>,
 }
 
 /// Handle one `POST /sync`: apply the client's message (if any), then return
 /// every message we owe that peer, framed as `[u32 big-endian length][bytes]`.
-pub(crate) fn handle_post<M: Model + Actions>(
-    store: &Store<M>,
+pub fn handle_post<D: DocHandle + ?Sized>(
+    store: &D,
     sessions: &Sessions,
     session_id: &str,
     body: &[u8],
@@ -71,7 +116,7 @@ pub(crate) fn handle_post<M: Model + Actions>(
 /// Dial out to a remote instance and keep syncing with it, reconnecting with
 /// backoff. `url` is a sync base like `http://other-host:8080/sync` (legacy
 /// `ws://`/`wss://` values are rewritten with a deprecation warning).
-pub(crate) async fn run_remote<M: Model + Actions>(url: String, store: Arc<Store<M>>) {
+pub async fn run_remote<D: DocHandle>(url: String, store: Arc<D>) {
     let base = normalize_remote(&url);
     let client = reqwest::Client::new();
     loop {
@@ -102,10 +147,10 @@ fn normalize_remote(url: &str) -> String {
 /// on every poke or local change. Only returns on failure (transport error or
 /// stream close); the caller reconnects with a fresh session — the server
 /// then re-syncs us from a fresh `State`.
-async fn sync_with_remote<M: Model + Actions>(
+async fn sync_with_remote<D: DocHandle>(
     client: &reqwest::Client,
     base: &str,
-    store: &Arc<Store<M>>,
+    store: &Arc<D>,
 ) -> anyhow::Result<()> {
     let session = uuid::Uuid::new_v4().to_string();
     let mut state = automerge::sync::State::new();
@@ -162,12 +207,12 @@ fn drain_pokes(buf: &mut String) -> bool {
 
 /// Exchange sync messages with the remote until both sides quiesce: we have
 /// nothing to send AND the response carries nothing.
-async fn sync_round<M: Model + Actions>(
+async fn sync_round<D: DocHandle>(
     client: &reqwest::Client,
     base: &str,
     session: &str,
     state: &mut automerge::sync::State,
-    store: &Arc<Store<M>>,
+    store: &Arc<D>,
 ) -> anyhow::Result<()> {
     loop {
         let message = store.generate_sync(state);

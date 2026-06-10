@@ -11,6 +11,7 @@
 
 use tangram::prelude::*;
 
+#[cfg(not(target_family = "wasm"))]
 mod api;
 pub mod strategy;
 
@@ -165,7 +166,7 @@ impl Nutrition {
         if strategy.can_resolve() && !unknown.is_empty() {
             if has_explicit {
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
+                let backfill = async move {
                     for component in unknown {
                         match strategy.resolve(&component).await {
                             Ok(Some(nutrients)) => {
@@ -179,7 +180,15 @@ impl Nutrition {
                             }
                         }
                     }
-                });
+                };
+                // Natively the back-fill runs in the background (Chamber's
+                // fillNutrition behavior). Inside a WASM component there is
+                // no spawner — dispatch is one synchronous doc-in/doc-out
+                // call — so the same resolution runs inline, best-effort.
+                #[cfg(not(target_family = "wasm"))]
+                tokio::spawn(backfill);
+                #[cfg(target_family = "wasm")]
+                backfill.await;
             } else {
                 for component in unknown {
                     match strategy.resolve(&component).await {
@@ -189,7 +198,10 @@ impl Nutrition {
                                 "strategy could not resolve {component:?}; logging anyway"
                             )
                         }
-                        Err(e) => return Err(format!("could not resolve {component:?}: {e}")),
+                        // `:#` keeps the whole error chain: the root cause
+                        // (e.g. a denied capability, with how to grant it) is
+                        // what makes the failure actionable for the caller.
+                        Err(e) => return Err(format!("could not resolve {component:?}: {e:#}")),
                     }
                 }
             }
@@ -545,29 +557,29 @@ impl Default for Nutrition {
 }
 
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    tangram::time::now_ms()
 }
+
+/// MCP instructions, shared between the native app builder and the WASM
+/// component's `describe()` export.
+const INSTRUCTIONS: &str = "A replicated nutrition tracker. Log meals via log_meal: either \
+     explicit gram-quantified components, or a plain-language \
+     description (quantities included) that the active nutrition \
+     strategy resolves over the network — GET /api/capabilities \
+     reports whether descriptions can be resolved. Read totals with \
+     meal_nutrition. If a component is unknown, register per-100g \
+     data with add_component_nutrition (full panel) or \
+     add_ingredient (core five) and past meals resolve too. Humans \
+     see every change live in the web UI on all synced devices.";
 
 /// The nutrition app, fully configured. Serve it with
 /// `app().serve_with(with_api)` (standalone) or mount
 /// `with_api(...app().build_parts()?)` in a multi-app host — `with_api` adds
 /// the `GET /api/capabilities` probe on top of the derived surface.
+#[cfg(not(target_family = "wasm"))]
 pub fn app() -> App<Nutrition> {
     App::<Nutrition>::new("nutrition")
-        .instructions(
-            "A replicated nutrition tracker. Log meals via log_meal: either \
-             explicit gram-quantified components, or a plain-language \
-             description (quantities included) that the active nutrition \
-             strategy resolves over the network — GET /api/capabilities \
-             reports whether descriptions can be resolved. Read totals with \
-             meal_nutrition. If a component is unknown, register per-100g \
-             data with add_component_nutrition (full panel) or \
-             add_ingredient (core five) and past meals resolve too. Humans \
-             see every change live in the web UI on all synced devices.",
-        )
+        .instructions(INSTRUCTIONS)
         .ui_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"))
 }
 
@@ -575,6 +587,16 @@ pub fn app() -> App<Nutrition> {
 /// (every user-facing *operation* is a registered action; the probe just
 /// reports what the active strategy can do). Shaped to pass straight to
 /// [`App::serve_with`].
+#[cfg(not(target_family = "wasm"))]
 pub fn with_api(router: axum::Router, _ctx: Ctx<Nutrition>) -> axum::Router {
     router.merge(api::routes())
 }
+
+// Compiled for wasm32-wasip2, the same model + actions become a Tangram
+// component (`tangram-host` owns the platform around it; strategy HTTP goes
+// through the host's allowlist-enforced `http-fetch` import).
+#[cfg(target_family = "wasm")]
+tangram::export_component!(Nutrition {
+    name: "nutrition",
+    instructions: INSTRUCTIONS,
+});

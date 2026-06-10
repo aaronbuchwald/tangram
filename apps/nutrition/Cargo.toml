@@ -8,14 +8,20 @@ tangram.workspace = true
 anyhow.workspace = true
 automerge.workspace = true
 autosurgeon.workspace = true
-axum.workspace = true
-reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Native-only: the binary's runtime + the custom capabilities route. The
+# library also compiles to wasm32-wasip2 (the WASM component), which must
+# not pull the server stack; strategy HTTP goes through tangram::http.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+axum.workspace = true
+tokio.workspace = true
+
 [lib]
 name = "nutrition"
+# cdylib: `cargo build --lib --target wasm32-wasip2` emits the component.
+crate-type = ["lib", "cdylib"]

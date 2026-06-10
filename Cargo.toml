@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/tangram",
+    "crates/tangram-host",
     "crates/tangram-macros",
     "apps/notes",
     "apps/nutrition",
@@ -20,8 +21,10 @@ anyhow = "1"
 automerge = "0.10"
 autosurgeon = "0.12"
 axum = "0.8"
+base64 = "0.22"
 dotenvy = "0.15"
 futures-util = "0.3"
+notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
@@ -30,10 +33,17 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "0.8"
+tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors", "set-header", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+# Embedded WASM runtime for tangram-host (pinned: we ship our own runtime,
+# no drift — ADR-0001) and the guest-side bindings generator.
+wasmtime = { version = "45", features = ["anyhow"] }
+wasmtime-wasi = "45"
+wit-bindgen = "0.58"
 
 proc-macro2 = "1"
 quote = "1"

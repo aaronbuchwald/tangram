@@ -76,47 +76,85 @@ impl<M: Model + Actions> Ctx<M> {
 /// objects) the first time they sync.
 const GENESIS_ACTOR: [u8; 16] = *b"tangram-genesis!";
 
+/// The deterministic genesis document for a model: the fixed genesis actor,
+/// a zero-timestamp commit, one reconcile of `M::default()`. Every Tangram
+/// instance of an app — native binary or WASM component — derives these
+/// identical bytes, which is what lets independently started instances merge
+/// into one document (and what the component's `genesis` export returns).
+pub(crate) fn genesis_bytes<M: Model>() -> anyhow::Result<Vec<u8>> {
+    let mut genesis = Automerge::new().with_actor(ActorId::from(&GENESIS_ACTOR[..]));
+    let mut tx = genesis.transaction();
+    autosurgeon::reconcile(&mut tx, M::default())?;
+    tx.commit_with(
+        CommitOptions::default()
+            .with_message("genesis")
+            .with_time(0),
+    );
+    Ok(genesis.save())
+}
+
 pub(crate) struct Store<M> {
     doc: Mutex<AutoCommit>,
     version: watch::Sender<u64>,
-    path: PathBuf,
+    /// Where the document persists. `None` for in-memory stores (the WASM
+    /// guest works doc-in/doc-out per dispatch; the host owns persistence).
+    path: Option<PathBuf>,
     actions: HashMap<&'static str, ActionDef<M>>,
     _marker: PhantomData<fn() -> M>,
 }
 
+// On wasm only the in-memory/dispatch surface is reachable (the host owns
+// files and sync); the unused native methods are dead code there by design.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
 impl<M: Model + Actions> Store<M> {
     /// Load the document from `path`, or create it from `M::default()`.
     pub fn open(path: PathBuf) -> anyhow::Result<Self> {
-        let mut doc = if path.exists() {
+        let doc = if path.exists() {
             let bytes = std::fs::read(&path)?;
             AutoCommit::load(&bytes)?
         } else {
-            let mut genesis = Automerge::new().with_actor(ActorId::from(&GENESIS_ACTOR[..]));
-            let mut tx = genesis.transaction();
-            autosurgeon::reconcile(&mut tx, M::default())?;
-            tx.commit_with(
-                CommitOptions::default()
-                    .with_message("genesis")
-                    .with_time(0),
-            );
-            let bytes = genesis.save();
+            let bytes = genesis_bytes::<M>()?;
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
             std::fs::write(&path, &bytes)?;
             AutoCommit::load(&bytes)?
         };
+        Ok(Self::from_doc(doc, Some(path)))
+    }
+
+    /// An in-memory store over existing document bytes — the WASM guest's
+    /// view: one dispatch operates on the bytes the host passed in, and the
+    /// mutated save goes back out as the return value (nothing persists
+    /// here).
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub fn in_memory(bytes: &[u8]) -> anyhow::Result<Self> {
+        Ok(Self::from_doc(AutoCommit::load(bytes)?, None))
+    }
+
+    fn from_doc(mut doc: AutoCommit, path: Option<PathBuf>) -> Self {
         // Every instance edits as its own random actor; only genesis is fixed.
         doc.set_actor(ActorId::random());
-
         let actions = M::actions().into_iter().map(|a| (a.name, a)).collect();
-        Ok(Self {
+        Self {
             doc: Mutex::new(doc),
             version: watch::Sender::new(0),
             path,
             actions,
             _marker: PhantomData,
-        })
+        }
+    }
+
+    /// Current document heads (used by the guest to detect mutation).
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub fn heads(&self) -> Vec<automerge::ChangeHash> {
+        self.doc.lock().expect("store lock").get_heads()
+    }
+
+    /// Full document save.
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    pub fn save(&self) -> Vec<u8> {
+        self.doc.lock().expect("store lock").save()
     }
 
     pub fn action_defs(&self) -> impl Iterator<Item = &ActionDef<M>> {
@@ -240,14 +278,17 @@ impl<M: Model + Actions> Store<M> {
         Ok(changed)
     }
 
-    /// Write the full document to disk (atomic via temp file + rename).
-    /// Documents here are small app states; incremental saves can come later.
+    /// Write the full document to disk (atomic via temp file + rename), if
+    /// this store persists at all (in-memory guest stores don't — the host
+    /// owns their persistence). Documents here are small app states;
+    /// incremental saves can come later.
     fn persist(&self, doc: &mut AutoCommit) {
+        let Some(path) = &self.path else { return };
         let bytes = doc.save();
-        let tmp = self.path.with_extension("automerge.tmp");
-        let result = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &self.path));
+        let tmp = path.with_extension("automerge.tmp");
+        let result = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, path));
         if let Err(e) = result {
-            tracing::error!("failed to persist document to {}: {e}", self.path.display());
+            tracing::error!("failed to persist document to {}: {e}", path.display());
         }
     }
 }

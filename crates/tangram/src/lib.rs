@@ -29,20 +29,31 @@
 //! connected UI updates live over SSE).
 
 mod action;
+#[cfg(not(target_family = "wasm"))]
 mod app;
+#[cfg(target_family = "wasm")]
+pub mod guest;
+pub mod http;
+#[cfg(not(target_family = "wasm"))]
 mod mcp;
 mod store;
-mod sync;
+#[cfg(not(target_family = "wasm"))]
+pub mod sync;
+pub mod time;
+#[cfg(not(target_family = "wasm"))]
 mod web;
 
 pub use action::{ActionDef, ActionError, ActionFuture, ActionHandler, Actions};
+#[cfg(not(target_family = "wasm"))]
 pub use app::App;
 pub use store::Ctx;
 pub use tangram_macros::{actions, model};
 
 /// Everything an app needs in scope.
 pub mod prelude {
-    pub use crate::{Actions, App, Ctx, actions, model};
+    #[cfg(not(target_family = "wasm"))]
+    pub use crate::App;
+    pub use crate::{Actions, Ctx, actions, model};
 }
 
 /// Implementation details used by macro expansions. Not a public API.

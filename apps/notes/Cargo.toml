@@ -5,13 +5,19 @@ edition.workspace = true
 
 [dependencies]
 tangram.workspace = true
-anyhow.workspace = true
 automerge.workspace = true
 autosurgeon.workspace = true
 schemars.workspace = true
 serde.workspace = true
-tokio.workspace = true
 uuid.workspace = true
+
+# Native-only: the binary's runtime. The library also compiles to
+# wasm32-wasip2 (the WASM component), which must not pull the server stack.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+anyhow.workspace = true
+tokio.workspace = true
 
 [lib]
 name = "notes"
+# cdylib: `cargo build --lib --target wasm32-wasip2` emits the component.
+crate-type = ["lib", "cdylib"]

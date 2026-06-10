@@ -136,7 +136,7 @@ async fn sync_post<M: Model + Actions>(
     else {
         return (StatusCode::BAD_REQUEST, "missing X-Tangram-Session header").into_response();
     };
-    match sync::handle_post(&app.store, &app.sync_sessions, session, &body) {
+    match sync::handle_post(&*app.store, &app.sync_sessions, session, &body) {
         Ok(frames) => {
             ([(header::CONTENT_TYPE, "application/octet-stream")], frames).into_response()
         }

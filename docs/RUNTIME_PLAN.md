@@ -135,24 +135,52 @@ Pure-win prep that every target needs (native, WASI, Cloudflare, browser):
   window or via a coordinated cutover (single-owner fleet makes this easy).
 
 ### Phase 2 (rev 2) — tangram-host with embedded Wasmtime (Track W spine)
-- `tangram-host` crate: streaming-safe proxy (path routing, SSE
-  passthrough, hold-until-healthy) + reconciler over the small `Backend`
-  trait. **First Backend = embedded Wasmtime (37+, WASI 0.3)**: one live
-  component instance per app (the doc-actor lifecycle `wasmtime serve`'s
-  per-request model can't give us), capabilities granted in code — preopen
-  `$HOME/.<app-name>` (or configured data root), outbound HTTP allowlist
-  per app spec.
-- SDK: `wasi:http` host adapter over `tangram-core`; apps compile to
-  `wasm32-wasip2` components.
-- Desired state = `apps.toml` (name, component path/image, env, grants,
-  enabled); `notify` watcher → converge on save; routes appear/disappear
-  live. agentgateway alongside, config generated from the same state,
-  `/<app>/mcp` routed through it.
-- One static host binary deploys identically on the Linux remote and a
-  macOS/Linux laptop — this is the two-host story Track G couldn't match.
-- `tangram-shell` stays as zero-dependency dev mode.
-- Exit: edit `apps.toml` → component live at `/<app>/` in well under a
-  second; remove → gone; MCP through agentgateway; same UX on both hosts.
+Delivered 2026-06-10, with one design refinement over the original sketch:
+**logic-in-component, platform-in-host**. The sandbox boundary is the app
+LOGIC, not an HTTP server: components export a custom WIT world
+(`crates/tangram-host/wit/tangram.wit` — `describe`/`genesis`/`dispatch`/
+`state-json`, doc-in/doc-out) instead of serving `wasi:http`, and the native
+host owns HTTP, sync, MCP, persistence, and UI files. This dodges WASI 0.3
+RC churn entirely (stable wasm32-wasip2 + pinned wasmtime 45) and is a
+stronger grant model than preopens: the component has NO filesystem
+capability at all — the host is the only thing touching `$HOME/.<app-name>`.
+- [x] `tangram-host` crate (`crates/tangram-host`): embedded Wasmtime, one
+  LIVE component instance per app (instantiate once, dispatch repeatedly,
+  calls serialized per app), reconciler + `notify` watcher over `apps.toml`
+  (name → component path, ui dir, data_dir, allow_hosts, env with `${VAR}`
+  host-expansion, optional sync remote).
+- [x] Capabilities = the host's imports, nothing else: `http-fetch`
+  (enforced per-app host allowlist; deny → actionable error naming the
+  grant), `log` (→ tracing), `now-ms`. wasip2 std plumbing is linked with an
+  EMPTY WASI ctx (no preopens, no sockets); import audit shows no
+  wasi:sockets / wasi:http at all.
+- [x] SDK guest adapter: the `tangram` crate itself compiles to
+  wasm32-wasip2 (`guest.rs` + `tangram::export_component!(Model {..})`;
+  apps add `crate-type = ["cdylib"]`), running the SAME action registry and
+  store dispatch as native. `tangram::http` / `tangram::time` facades:
+  reqwest/SystemTime natively, host imports in the guest (nutrition's
+  strategies ported to them). Components: notes 2.4 MiB, nutrition 2.8 MiB.
+- [x] Genesis parity guaranteed by construction (one `genesis_bytes()` fn)
+  and verified byte-identical guest↔native for both apps — host-managed
+  docs replicate bidirectionally with native instances over the Phase-1
+  HTTP sync transport (server core + dial-out client reused via the new
+  `tangram::sync::DocHandle` seam — the first slice of the core split).
+- [x] Full per-app surface under one port, same shapes as the SDK: UI,
+  `/api/state|actions|events`, `/sync(+events)`, `/mcp` (rmcp bridge with
+  tools from `describe()`), same action error envelope.
+- [x] Live converge measured (release build): edit `apps.toml` → app
+  serving in ~0.40 s end to end (≈50 ms debounce + ~310–370 ms component
+  instantiation incl. cranelift compile); remove → routes gone in ~30 ms;
+  component rebuild (mtime) hot-reloads the instance.
+- [ ] agentgateway alongside, config generated from the same desired state,
+  `/<app>/mcp` routed through it (later phase; the host serves MCP directly
+  for now).
+- `tangram-shell` stays as zero-dependency dev mode (unchanged, verified).
+- Known gap: custom native routes (nutrition's `GET /api/capabilities`
+  probe) don't exist in the component world; its UI degrades gracefully to
+  components-only input. Needs a `describe()`-level capability story later.
+- Exit met: edit `apps.toml` → component live at `/<app>/` in well under a
+  second; remove → gone; same binary + config on any Linux/macOS host.
 
 ### Phase 3 — Registry app as source of truth (API-driven, live)
 Unchanged from rev 1 (was Phase 2): `apps/registry` is itself a Tangram app

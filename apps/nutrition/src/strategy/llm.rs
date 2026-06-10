@@ -12,6 +12,7 @@
 use anyhow::Context;
 use serde::Deserialize;
 use serde_json::json;
+use tangram::http;
 
 use super::ResolvedNutrient;
 
@@ -92,8 +93,9 @@ pub async fn resolve(component: &str) -> anyhow::Result<Option<Vec<ResolvedNutri
         "messages": [{ "role": "user", "content": format!("Food: {component:?}") }],
     });
 
-    let mut req = reqwest::Client::new()
-        .post(ANTHROPIC_URL)
+    // Through the tangram::http facade: reqwest natively, the host's
+    // allowlist-enforced `http-fetch` import inside a WASM component.
+    let mut req = http::Request::post(ANTHROPIC_URL)
         .header("anthropic-version", "2023-06-01")
         .json(&body);
     // An OAuth token (sk-ant-oat…) authenticates via `Authorization: Bearer`
@@ -102,20 +104,21 @@ pub async fn resolve(component: &str) -> anyhow::Result<Option<Vec<ResolvedNutri
     // with either credential the environment supplies.
     if key.starts_with("sk-ant-oat") {
         req = req
-            .bearer_auth(&key)
+            .header("authorization", format!("Bearer {key}"))
             .header("anthropic-beta", "oauth-2025-04-20");
     } else {
         req = req.header("x-api-key", &key);
     }
 
-    let resp = req
-        .send()
+    let resp = http::fetch(req)
         .await
         .with_context(|| format!("Anthropic request failed for {component:?}"))?;
-    let status = resp.status();
-    let payload: serde_json::Value = resp.json().await.context("Anthropic response body")?;
-    if !status.is_success() {
-        anyhow::bail!("Anthropic lookup failed ({status}) for {component:?}: {payload}");
+    let payload: serde_json::Value = resp.json().context("Anthropic response body")?;
+    if !resp.is_success() {
+        anyhow::bail!(
+            "Anthropic lookup failed ({}) for {component:?}: {payload}",
+            resp.status
+        );
     }
 
     let Some(text) = payload

@@ -16,6 +16,7 @@
 //! normalize to per-100g.
 
 use anyhow::Context;
+use tangram::http;
 
 use super::ResolvedNutrient;
 
@@ -96,20 +97,22 @@ pub async fn resolve(component: &str) -> anyhow::Result<Option<Vec<ResolvedNutri
         anyhow::anyhow!("NUTRITION_STRATEGY=calorieninjas requires CALORIENINJAS_API_KEY to be set")
     })?;
 
-    let resp = reqwest::Client::new()
-        .get(CALORIENINJAS_URL)
-        .query(&[("query", component)])
-        .header("X-Api-Key", api_key)
-        .send()
+    // Through the tangram::http facade: reqwest natively, the host's
+    // allowlist-enforced `http-fetch` import inside a WASM component.
+    let url = format!(
+        "{CALORIENINJAS_URL}?query={}",
+        http::urlencode(component.trim())
+    );
+    let resp = http::fetch(http::Request::get(url).header("X-Api-Key", api_key))
         .await
         .with_context(|| format!("CalorieNinjas request failed for {component:?}"))?;
-    if !resp.status().is_success() {
+    if !resp.is_success() {
         anyhow::bail!(
             "CalorieNinjas lookup failed ({}) for {component:?}",
-            resp.status()
+            resp.status
         );
     }
-    let data: serde_json::Value = resp.json().await.context("CalorieNinjas response body")?;
+    let data: serde_json::Value = resp.json().context("CalorieNinjas response body")?;
     let Some(item) = data.get("items").and_then(|i| i.get(0)) else {
         return Ok(None);
     };

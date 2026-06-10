@@ -1,0 +1,76 @@
+/// The Tangram component world (ADR-0001, RUNTIME_PLAN Phase 2).
+///
+/// The sandbox boundary is the APP LOGIC: a Tangram app compiles to a WASM
+/// component that exports its model/actions over this world and imports
+/// nothing but the `host` capabilities below. The native `tangram-host`
+/// binary owns the platform — HTTP serving, sync, MCP, persistence, UI
+/// files — and is the only thing that touches the app's data directory.
+/// Capability grants are therefore exactly what the host implements:
+/// `http-fetch` enforces a per-app outbound host allowlist; there are no
+/// filesystem, socket, or inbound-HTTP imports at all.
+package tangram:app;
+
+/// Capabilities the host grants to the component. This is the component's
+/// ENTIRE view of the outside world (plus the inert std plumbing of
+/// wasip2: env vars, clocks, random — granted data, not I/O channels).
+interface host {
+    /// Perform one outbound HTTP request, subject to the app's configured
+    /// host allowlist. `request-json` is
+    ///   {"method","url","headers":{..},"body-b64"}
+    /// and a successful result is
+    ///   {"status","headers":{..},"body-b64"}.
+    /// Requests to hosts outside the allowlist fail with a clear error.
+    http-fetch: func(request-json: string) -> result<string, string>;
+
+    /// Emit a log line into the host's tracing output.
+    /// `level` is one of trace|debug|info|warn|error.
+    log: func(level: string, message: string);
+
+    /// Wall-clock time in milliseconds since the Unix epoch (guests stamp
+    /// created-at times with this).
+    now-ms: func() -> s64;
+}
+
+/// What every Tangram app component exports. Calls are synchronous from the
+/// guest's point of view; the host serializes them per app instance.
+interface guest {
+    /// Result of one action dispatch.
+    record dispatch-result {
+        /// Full automerge save of the document IF the action mutated it
+        /// (the host merges these bytes into its copy and persists);
+        /// `none` for read-only actions.
+        doc: option<list<u8>>,
+        /// The action's return value, JSON-encoded.
+        result-json: string,
+    }
+
+    /// Describe the app: JSON
+    ///   {"name","instructions","actions":[{"name","description","mutates",
+    ///    "input-schema"}..]}
+    /// — everything the host needs to derive the HTTP action routes and the
+    /// MCP tool list.
+    describe: func() -> string;
+
+    /// The deterministic genesis document bytes: fixed `tangram-genesis!`
+    /// actor, time 0, one reconcile of the model's `Default`. MUST byte-match
+    /// the native SDK's genesis for the same model — that shared root is what
+    /// lets host-managed documents replicate with native instances.
+    genesis: func() -> list<u8>;
+
+    /// Run one action against the given document bytes. The guest loads the
+    /// doc, hydrates the model, dispatches through the app's action registry
+    /// (sync actions inline; async actions with `http-fetch`-backed I/O),
+    /// and returns the result plus the mutated document, if any. Errors keep
+    /// the SDK's `ActionError` rendering ("unknown action: ..",
+    /// "invalid arguments: ..", "internal error: ..", or a bare domain
+    /// failure) so the host can map them onto the same HTTP error envelope.
+    dispatch: func(action: string, args-json: string, doc: list<u8>) -> result<dispatch-result, string>;
+
+    /// The model state in the given document bytes, as JSON.
+    state-json: func(doc: list<u8>) -> string;
+}
+
+world app {
+    import host;
+    export guest;
+}

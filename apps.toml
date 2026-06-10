@@ -1,0 +1,23 @@
+# Desired state for tangram-host (README "Run apps as WASM components").
+# Build the components first:
+#   cargo build -p tangram-notes -p tangram-nutrition --lib --target wasm32-wasip2 --release
+# then: cargo run -p tangram-host --release -- apps.toml
+# Paths are relative to the directory you run the host from. Edits converge
+# live: add/remove/reload apps without restarting the host.
+
+[apps.notes]
+component = "target/wasm32-wasip2/release/notes.wasm"
+ui = "apps/notes/ui"
+
+[apps.nutrition]
+component = "target/wasm32-wasip2/release/nutrition.wasm"
+ui = "apps/nutrition/ui"
+# The component's ENTIRE outbound-network grant. Without this entry,
+# description-based log_meal fails with an error naming the missing grant.
+allow_hosts = ["api.calorieninjas.com"]
+
+[apps.nutrition.env]
+NUTRITION_STRATEGY = "calorieninjas"
+# ${VAR} values are expanded from the host's environment (.env is loaded),
+# so the secret itself stays out of this file.
+CALORIENINJAS_API_KEY = "${CALORIENINJAS_API_KEY}"

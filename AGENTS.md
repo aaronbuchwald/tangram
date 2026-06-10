@@ -11,7 +11,12 @@ symlink to `.agents/skills`.
 
 ## Where things are
 
-- `crates/tangram` — the runtime: store/sync/web/mcp/app modules, App builder
+- `crates/tangram` — the runtime: store/sync/web/mcp/app modules, App builder;
+  also compiles to wasm32-wasip2 as the component guest adapter (`guest.rs`,
+  `export_component!`, the `http`/`time` facades)
+- `crates/tangram-host` — embedded-Wasmtime host: runs apps as WASM
+  components per `apps.toml` with capability grants (WIT world in its `wit/`;
+  README "Run apps as WASM components")
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in

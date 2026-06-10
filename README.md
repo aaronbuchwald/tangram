@@ -158,6 +158,54 @@ image. The nutrition app resolves meal descriptions from inside the sandbox
 too: pass the key with `--env-file .env` (gVisor's netstack handles the
 egress). Cold start to a serving `/healthz` is ~240 ms.
 
+## Run apps as WASM components (tangram-host)
+
+The WASM-first runtime ([ADR-0001](docs/adr/0001-wasm-first-sandbox-runtime.md),
+Phase 2 of [docs/RUNTIME_PLAN.md](docs/RUNTIME_PLAN.md)): apps compile to
+`wasm32-wasip2` components containing ONLY app logic, and one native
+`tangram-host` binary owns the whole platform — HTTP serving, the sync
+protocol, MCP, persistence, and static UI files. The component's world
+(`crates/tangram-host/wit/tangram.wit`) imports nothing but `http-fetch`
+(behind a per-app outbound host allowlist), `log`, and `now-ms`; the host is
+the only thing that touches `$HOME/.<app-name>`, so an app cannot name a
+file, socket, or non-granted host at all.
+
+```sh
+rustup target add wasm32-wasip2                                       # once
+cargo build -p tangram-notes -p tangram-nutrition --lib \
+  --target wasm32-wasip2 --release                                    # → target/wasm32-wasip2/release/{notes,nutrition}.wasm
+cargo run -p tangram-host --release -- apps.toml
+```
+
+`apps.toml` is the desired state — the host watches it and converges live
+(add/remove/reload apps, including when a component file is rebuilt, without
+a restart):
+
+```toml
+[apps.notes]
+component = "target/wasm32-wasip2/release/notes.wasm"
+ui = "apps/notes/ui"
+
+[apps.nutrition]
+component = "target/wasm32-wasip2/release/nutrition.wasm"
+ui = "apps/nutrition/ui"
+allow_hosts = ["api.calorieninjas.com"]     # the app's ENTIRE outbound grant
+
+[apps.nutrition.env]
+NUTRITION_STRATEGY = "calorieninjas"
+CALORIENINJAS_API_KEY = "${CALORIENINJAS_API_KEY}"   # ${VAR} expands from the host env / .env
+```
+
+Every app serves its full surface under one port, exactly like the shell:
+`/<app>/` (UI), `/<app>/api/*` (state, actions, SSE), `/<app>/sync` (the
+HTTP sync protocol — interoperates bidirectionally with native instances and
+the Cloudflare relay; genesis bytes are identical by construction), and
+`/<app>/mcp`. An optional per-app `remote` dials out to a peer, and
+`data_dir` overrides the default `$HOME/.<app-name>`. An app whose spec
+grants no `allow_hosts` simply cannot reach the network: nutrition's
+description-based `log_meal` then fails with an error saying which host to
+grant in `apps.toml`.
+
 ## Getting started: a persistent remote + a local replica
 
 The day-to-day setup: a remote box runs the apps permanently; your laptop
