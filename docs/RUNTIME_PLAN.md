@@ -164,17 +164,18 @@ construction, not needed now.
    import/export — it's the right dev/bootstrap UX even after the registry
    exists.
 
-## Open decisions (need input)
+## Decisions (resolved 2026-06-10)
 
-- **D1 — near-term topology:** single EC2 box for the foreseeable future
-  (Phase 3 stays backlog) vs. multi-node soon (pull Phase 3 forward)?
-- **D2 — control plane:** registry-as-Tangram-app (recommended) vs.
-  sqlite+REST in tangram-host vs. file-only for now?
-- **D3 — agentgateway scope:** MCP plane only (recommended) vs. fronting
-  all app traffic?
-- **D4 — trust model timing:** when do third-party/untrusted apps arrive?
-  That decides how early per-app egress policy and resource quotas move
-  from "configured" to "enforced + default-deny".
+- **D1 — topology: single box for now.** Phase 3 (k8s backend) is backlog;
+  Docker API + runsc is the Phase 1–2 substrate. The desired-state schema
+  and `Backend` trait keep the k8s swap honest.
+- **D2 — control plane: registry as a Tangram app** (Phase 2), with the
+  Phase 1 file watcher kept as bootstrap and import/export.
+- **D3 — agentgateway scope: MCP plane only.** tangram-host proxies
+  UI/SSE/sync directly.
+- **D4 — trust model: own/trusted apps for months.** Read-only rootfs and
+  resource limits from Phase 0; default-deny egress is a Phase 2 hardening
+  item, not a blocker.
 
 ## Risks
 
