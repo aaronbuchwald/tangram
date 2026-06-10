@@ -58,6 +58,7 @@ crates/tangram          the SDK: CRDT store, sync, web + MCP surfaces, App build
 crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
+apps/shell              multi-app host: serves every app under one port, prefixed
 docs/SDK_DESIGN.md      architecture & roadmap
 ```
 
@@ -84,6 +85,33 @@ cargo run -p tangram-nutrition    # instance B, replicating with A
 Open both UIs; log a meal in either and watch it appear in the other
 immediately. Kill A, keep using B offline, restart A — they reconverge.
 
+### Run them all in one server
+
+The shell mounts every example app on one port, each under its own path
+prefix with its full surface intact (`/notes/`, `/notes/mcp`, `/notes/sync`,
+`/nutrition/`, …) and an index page at `/`:
+
+```sh
+cargo run -p tangram-shell        # http://127.0.0.1:8080
+```
+
+Apps keep separate documents (`notes.automerge`, `nutrition.automerge` in
+`TANGRAM_DATA_DIR`), so one shell can't share a single `TANGRAM_REMOTE`.
+Instead each app reads `TANGRAM_REMOTE_<NAME>` (name uppercased):
+
+```sh
+BIND_ADDR=127.0.0.1:8081 \
+TANGRAM_DATA_DIR=data-b \
+TANGRAM_REMOTE_NOTES=ws://127.0.0.1:8080/notes/sync \
+TANGRAM_REMOTE_NUTRITION=ws://127.0.0.1:8080/nutrition/sync \
+cargo run -p tangram-shell        # second shell, replicating both apps with the first
+```
+
+Under the hood each app crate exposes `pub fn app() -> tangram::App<…>`;
+`app().serve()` runs it standalone while `app().build()?` returns its
+`axum::Router` for a host to `nest_service` under a prefix (see
+`apps/shell/src/main.rs`).
+
 ### Connect an agent
 
 ```sh
@@ -99,7 +127,8 @@ UI and synced instance.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1:8080` | Listen address |
-| `TANGRAM_REMOTE` | — | `ws://host:port/sync` of a peer to replicate with |
+| `TANGRAM_REMOTE` | — | `ws://host:port/sync` of a peer to replicate with (single-app mode) |
+| `TANGRAM_REMOTE_<NAME>` | — | Per-app remote, e.g. `TANGRAM_REMOTE_NOTES` (required form in a shell) |
 | `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |

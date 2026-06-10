@@ -5,6 +5,7 @@ members = [
     "crates/tangram-macros",
     "apps/notes",
     "apps/nutrition",
+    "apps/shell",
 ]
 
 [workspace.package]

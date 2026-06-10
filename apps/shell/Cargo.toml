@@ -1,0 +1,15 @@
+[package]
+name = "tangram-shell"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+notes = { package = "tangram-notes", path = "../notes" }
+nutrition = { package = "tangram-nutrition", path = "../nutrition" }
+
+anyhow.workspace = true
+axum.workspace = true
+dotenvy.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
