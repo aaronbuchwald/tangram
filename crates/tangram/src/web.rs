@@ -66,7 +66,7 @@ async fn run_action<M: Model + Actions>(
     body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
-    match store.apply(&name, args) {
+    match store.dispatch(&name, args).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "result": result }))),
         Err(e) => {
             let status = match &e {

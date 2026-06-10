@@ -15,43 +15,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::action::{ActionError, Actions};
-use crate::store::Store;
+use crate::action::Actions;
+use crate::store::{Ctx, Store};
 use crate::{Model, mcp, sync, web};
-
-/// A cloneable handle onto a running app's store, for custom async code
-/// (extra HTTP routes, background resolvers) that lives OUTSIDE the
-/// synchronous action layer. Actions stay the single write path: a handle
-/// can only run registered actions and read state, so every mutation it
-/// makes is an ordinary attributed, replicated change.
-pub struct Handle<M> {
-    store: Arc<Store<M>>,
-}
-
-impl<M> Clone for Handle<M> {
-    fn clone(&self) -> Self {
-        Self {
-            store: self.store.clone(),
-        }
-    }
-}
-
-impl<M: Model + Actions> Handle<M> {
-    /// Run a registered action by name with JSON arguments (the same entry
-    /// point the HTTP and MCP surfaces use).
-    pub fn apply(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value, ActionError> {
-        self.store.apply(name, args)
-    }
-
-    /// The current replicated state as JSON.
-    pub fn state_json(&self) -> serde_json::Value {
-        self.store.state_json()
-    }
-}
 
 /// Builder + runtime for a Tangram app.
 ///
@@ -116,10 +82,10 @@ impl<M: Model + Actions> App<M> {
         Ok(self.build_parts()?.0)
     }
 
-    /// Like [`build`](App::build), but also returns a [`Handle`] onto the
+    /// Like [`build`](App::build), but also returns a [`Ctx`] onto the
     /// store so the app can mount custom routes or run background work that
     /// applies actions and reads state from async code.
-    pub fn build_parts(self) -> anyhow::Result<(axum::Router, Handle<M>)> {
+    pub fn build_parts(self) -> anyhow::Result<(axum::Router, Ctx<M>)> {
         let data_dir =
             PathBuf::from(std::env::var("TANGRAM_DATA_DIR").unwrap_or_else(|_| "data".into()));
         let frame_ancestors = std::env::var("FRAME_ANCESTORS").unwrap_or_else(|_| "*".into());
@@ -152,7 +118,7 @@ impl<M: Model + Actions> App<M> {
                 csp,
             ))
             .layer(TraceLayer::new_for_http());
-        Ok((router, Handle { store }))
+        Ok((router, Ctx::new(store)))
     }
 
     /// The per-app remote from the environment: `TANGRAM_REMOTE_<NAME>`.
@@ -166,16 +132,16 @@ impl<M: Model + Actions> App<M> {
     }
 
     /// [`serve`](App::serve), with a hook to extend the derived router before
-    /// it binds. The hook receives the assembled router plus a [`Handle`]
+    /// it binds. The hook receives the assembled router plus a [`Ctx`]
     /// onto the store, so an app can merge custom routes (or spawn background
     /// tasks) that run actions and read state from async code:
     ///
     /// ```ignore
-    /// app().serve_with(|router, handle| router.merge(my_routes(handle))).await
+    /// app().serve_with(|router, ctx| router.merge(my_routes(ctx))).await
     /// ```
     pub async fn serve_with(
         mut self,
-        extend: impl FnOnce(axum::Router, Handle<M>) -> axum::Router,
+        extend: impl FnOnce(axum::Router, Ctx<M>) -> axum::Router,
     ) -> anyhow::Result<()> {
         let _ = dotenvy::dotenv();
         let _ = tracing_subscriber::fmt()

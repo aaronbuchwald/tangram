@@ -15,6 +15,7 @@ mod api;
 pub mod strategy;
 
 pub use strategy::ResolvedNutrient;
+use strategy::Strategy;
 
 #[model]
 pub struct Nutrition {
@@ -86,11 +87,121 @@ pub struct NutritionRow {
 
 #[actions]
 impl Nutrition {
-    /// Log a meal with its components and gram quantities. Component names
-    /// are matched (case-insensitively) against known ingredient mappings
-    /// when nutrition is computed; unknown components simply contribute no
-    /// nutrients until `add_ingredient` registers them. Returns the meal id.
-    pub fn log_meal(
+    /// Log a meal. Provide EITHER explicit gram-quantified `components`
+    /// (which always win) OR a plain-language `description` with quantities
+    /// included (e.g. "1 cup brown rice and 200g grilled chicken") — the
+    /// active nutrition strategy resolves the description over the network
+    /// and caches the result as replicated reference data. The offline
+    /// strategy cannot resolve descriptions; it needs explicit components.
+    /// Unknown explicit components are back-filled in the background when an
+    /// online strategy is active, and can always be registered later via
+    /// `add_component_nutrition` (past meals resolve retroactively). Returns
+    /// the meal id.
+    pub async fn log_meal(
+        ctx: Ctx<Self>,
+        name: Option<String>,
+        description: Option<String>,
+        components: Option<Vec<MealComponent>>,
+        eaten_at_ms: Option<i64>,
+    ) -> Result<String, String> {
+        let strategy = Strategy::from_env();
+        let description = description.as_deref().unwrap_or("").trim().to_string();
+        let name = name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                if description.is_empty() {
+                    "meal".into()
+                } else {
+                    description.clone()
+                }
+            });
+
+        // Explicit components win, mirroring Chamber's parseMeal contract.
+        let explicit: Vec<MealComponent> = components
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| MealComponent {
+                component: c.component.trim().to_string(),
+                qty_g: c.qty_g,
+            })
+            .filter(|c| !c.component.is_empty() && c.qty_g.is_finite() && c.qty_g > 0.0)
+            .collect();
+        let has_explicit = !explicit.is_empty();
+
+        let components = if has_explicit {
+            explicit
+        } else if !description.is_empty() {
+            // Description path: nutrition has to come from a dynamic lookup,
+            // so the offline strategy can't serve it — tell the caller plainly.
+            if !strategy.can_resolve() {
+                return Err(
+                    "the offline nutrition strategy cannot resolve a description; provide \
+                     explicit components, or configure an online strategy (set \
+                     CALORIENINJAS_API_KEY, or NUTRITION_STRATEGY=calorieninjas|llm)"
+                        .into(),
+                );
+            }
+            // The whole description is one 100g component: CalorieNinjas-style
+            // natural-language queries handle the quantities inside it.
+            vec![MealComponent {
+                component: description,
+                qty_g: 100.0,
+            }]
+        } else {
+            return Err(
+                "provide a description or at least one component with positive grams".into(),
+            );
+        };
+
+        // Resolve components the reference data doesn't cover yet, via the
+        // active strategy — async, never under the store lock.
+        // Description-only meals resolve in the foreground (their nutrition
+        // IS the lookup); explicit-component meals log immediately and
+        // back-fill in the background (Chamber's fillNutrition behavior).
+        let unknown = unknown_components(&ctx, &components)?;
+        if strategy.can_resolve() && !unknown.is_empty() {
+            if has_explicit {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    for component in unknown {
+                        match strategy.resolve(&component).await {
+                            Ok(Some(nutrients)) => {
+                                if let Err(e) = cache_component(&ctx, &component, nutrients) {
+                                    tracing::warn!("failed to cache {component:?}: {e}");
+                                }
+                            }
+                            Ok(None) => tracing::info!("strategy could not resolve {component:?}"),
+                            Err(e) => {
+                                tracing::warn!("background resolve of {component:?} failed: {e}")
+                            }
+                        }
+                    }
+                });
+            } else {
+                for component in unknown {
+                    match strategy.resolve(&component).await {
+                        Ok(Some(nutrients)) => cache_component(&ctx, &component, nutrients)?,
+                        Ok(None) => {
+                            tracing::info!(
+                                "strategy could not resolve {component:?}; logging anyway"
+                            )
+                        }
+                        Err(e) => return Err(format!("could not resolve {component:?}: {e}")),
+                    }
+                }
+            }
+        }
+
+        // Commit the meal as an ordinary attributed, replicated change.
+        ctx.mutate("log_meal", |m| m.commit_meal(name, components, eaten_at_ms))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Internal commit step of `log_meal` (private — not an action).
+    fn commit_meal(
         &mut self,
         name: String,
         components: Vec<MealComponent>,
@@ -296,6 +407,40 @@ impl Nutrition {
     }
 }
 
+/// The distinct components of a meal with no component mapping yet
+/// (case-insensitive, matching `meal_nutrition`'s lookup rule).
+fn unknown_components(
+    ctx: &Ctx<Nutrition>,
+    components: &[MealComponent],
+) -> Result<Vec<String>, String> {
+    let state = ctx.state().map_err(|e| e.to_string())?;
+    let mut unknown: Vec<String> = Vec::new();
+    for c in components {
+        let known = state
+            .component_mappings
+            .iter()
+            .any(|m| m.component.eq_ignore_ascii_case(&c.component));
+        if !known && !unknown.iter().any(|u| u.eq_ignore_ascii_case(&c.component)) {
+            unknown.push(c.component.clone());
+        }
+    }
+    Ok(unknown)
+}
+
+/// Cache freshly-resolved rows through the idempotent mutation (phase 2 of a
+/// resolution — a plain attributed, replicated change).
+fn cache_component(
+    ctx: &Ctx<Nutrition>,
+    component: &str,
+    nutrients: Vec<ResolvedNutrient>,
+) -> Result<(), String> {
+    ctx.mutate("add_component_nutrition", |m| {
+        m.add_component_nutrition(component.to_string(), nutrients)
+    })
+    .map_err(|e| e.to_string())?
+    .map(|_| ())
+}
+
 /// Slugify a name into a deterministic id fragment: lowercase alphanumerics
 /// with single underscores ("Saturated Fat" → "saturated_fat").
 fn slug(name: &str) -> String {
@@ -409,28 +554,27 @@ fn now_ms() -> i64 {
 /// The nutrition app, fully configured. Serve it with
 /// `app().serve_with(with_api)` (standalone) or mount
 /// `with_api(...app().build_parts()?)` in a multi-app host — `with_api` adds
-/// the strategy-backed HTTP routes (`POST /api/log`, `GET /api/capabilities`)
-/// on top of the derived surface.
+/// the `GET /api/capabilities` probe on top of the derived surface.
 pub fn app() -> App<Nutrition> {
     App::<Nutrition>::new("nutrition")
         .instructions(
-            "A replicated nutrition tracker. Log meals with gram-quantified \
-             components via log_meal; read totals with meal_nutrition. If a \
-             component is unknown, register per-100g data with \
-             add_component_nutrition (full panel) or add_ingredient (core \
-             five) and past meals resolve too. Meals can also be logged from \
-             a plain-language description via POST /api/log \
-             {\"description\": \"1 cup rice and 200g chicken\"} when an \
-             online NUTRITION_STRATEGY (calorieninjas | llm) is active. \
-             Humans see every change live in the web UI on all synced \
-             devices.",
+            "A replicated nutrition tracker. Log meals via log_meal: either \
+             explicit gram-quantified components, or a plain-language \
+             description (quantities included) that the active nutrition \
+             strategy resolves over the network — GET /api/capabilities \
+             reports whether descriptions can be resolved. Read totals with \
+             meal_nutrition. If a component is unknown, register per-100g \
+             data with add_component_nutrition (full panel) or \
+             add_ingredient (core five) and past meals resolve too. Humans \
+             see every change live in the web UI on all synced devices.",
         )
         .ui_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"))
 }
 
-/// Merge the nutrition app's custom routes (description-based logging via
-/// the active strategy + the capabilities probe) into the derived router.
-/// Shaped to pass straight to [`App::serve_with`].
-pub fn with_api(router: axum::Router, handle: Handle<Nutrition>) -> axum::Router {
-    router.merge(api::routes(handle))
+/// Merge the nutrition app's capabilities probe into the derived router
+/// (every user-facing *operation* is a registered action; the probe just
+/// reports what the active strategy can do). Shaped to pass straight to
+/// [`App::serve_with`].
+pub fn with_api(router: axum::Router, _ctx: Ctx<Nutrition>) -> axum::Router {
+    router.merge(api::routes())
 }

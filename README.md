@@ -139,9 +139,12 @@ the manual steps.
 On the remote box, in this repo (or ask Claude: `/systemd-service install`):
 
 ```sh
-bash .agents/skills/systemd-service/service.sh install \
-  --env NUTRITION_STRATEGY=calorieninjas        # optional; needs the key in .env
+bash .agents/skills/systemd-service/service.sh install
 ```
+
+With `CALORIENINJAS_API_KEY` in the repo's `.env`, the nutrition app
+auto-enables the calorieninjas strategy; pass `--env NUTRITION_STRATEGY=…`
+only to override.
 
 This builds the release shell, writes a systemd unit (working directory = the
 repo, so `.env` secrets load via dotenvy), enables it at boot, starts it on
@@ -175,7 +178,12 @@ bash .agents/skills/local-replica/replica.sh connect
 This starts the shell on `127.0.0.1:8090` with
 `TANGRAM_REMOTE_<APP>=ws://127.0.0.1:8080/<app>/sync` (i.e. syncing to the
 remote through the tunnel), waits until both apps' states converge with the
-remote, and prints the URLs. Manual equivalent:
+remote, and prints the URLs. It also compares nutrition capabilities with the
+remote: if the remote resolves meal descriptions but your replica doesn't, it
+prints a reminder to copy `CALORIENINJAS_API_KEY` into your local `.env`
+(with the key present, the calorieninjas strategy auto-enables — no
+`NUTRITION_STRATEGY` needed). Pass extra env with `--env KEY=VALUE`. Manual
+equivalent:
 
 ```sh
 BIND_ADDR=127.0.0.1:8090 \
@@ -233,17 +241,19 @@ internet does not.
 | `TANGRAM_DATA_DIR` | `./data` | Where the document file lives |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
-| `NUTRITION_STRATEGY` | `offline` | Nutrition app: how novel components resolve (`offline` \| `calorieninjas` \| `llm`) |
-| `CALORIENINJAS_API_KEY` | — | Required for `NUTRITION_STRATEGY=calorieninjas` |
+| `NUTRITION_STRATEGY` | auto | Nutrition app: how novel components resolve (`offline` \| `calorieninjas` \| `llm`); unset → `calorieninjas` if `CALORIENINJAS_API_KEY` is set, else `offline` |
+| `CALORIENINJAS_API_KEY` | — | Required for `calorieninjas`; its presence auto-enables that strategy when `NUTRITION_STRATEGY` is unset |
 | `ANTHROPIC_API_KEY` | — | Required for `NUTRITION_STRATEGY=llm` (or `ANTHROPIC_AUTH_TOKEN`) |
 
 ## Nutrition strategies
 
 The nutrition app ports Chamber's pluggable nutrition-resolution seam: a
 *strategy* decides how a novel meal component gets its per-100g nutrient
-values. Select one with `NUTRITION_STRATEGY`:
+values. An explicit `NUTRITION_STRATEGY` wins; when unset, the presence of
+`CALORIENINJAS_API_KEY` auto-enables `calorieninjas` (online resolution is
+the default expectation), otherwise `offline`:
 
-- **`offline`** (default) — deterministic and keyless. The reference dataset
+- **`offline`** (keyless default) — deterministic and keyless. The reference dataset
   ships in the replicated genesis document; meals must be logged with
   explicit gram-quantified components, and unknown components contribute
   nothing until registered (`add_component_nutrition` / `add_ingredient`).
@@ -254,20 +264,22 @@ values. Select one with `NUTRITION_STRATEGY`:
   comprehensive per-100g nutrient panel (`ANTHROPIC_API_KEY`).
 
 With an online strategy active, meals can be logged from a plain-language
-**description** — quantities included, no explicit components needed:
+**description** — quantities included, no explicit components needed. This is
+the same registered `log_meal` action everywhere (HTTP action route, MCP
+tool, web UI — one contract by construction):
 
 ```sh
-curl -s localhost:8080/api/log -H 'content-type: application/json' \
+curl -s localhost:8080/api/actions/log_meal -H 'content-type: application/json' \
   -d '{"description": "1 cup brown rice and 200g grilled chicken"}'
 ```
 
 `GET /api/capabilities` reports the active strategy (the web UI uses it to
 offer the description box). Explicit components always win when provided;
-unknown ones are then back-filled in the background. Every resolution runs
-*outside* the synchronous action transaction and is cached through an
-idempotent action, so it lands as an ordinary replicated change: a component
-is resolved once and replays on every synced device — past meals using it
-resolve retroactively.
+unknown ones are then back-filled in the background. `log_meal` is an async
+action: it resolves over the network *without* holding the store lock and
+caches results through an idempotent mutation, so each resolution lands as an
+ordinary replicated change: a component is resolved once and replays on every
+synced device — past meals using it resolve retroactively.
 
 ## How it works
 

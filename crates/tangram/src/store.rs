@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use automerge::sync::SyncDoc;
 use automerge::transaction::CommitOptions;
@@ -13,7 +13,61 @@ use automerge::{ActorId, AutoCommit, Automerge};
 use tokio::sync::watch;
 
 use crate::Model;
-use crate::action::{ActionDef, ActionError, Actions};
+use crate::action::{ActionDef, ActionError, ActionHandler, Actions};
+
+/// A cloneable context handle onto a running app's store, for async code
+/// (async actions, background resolvers, custom routes) that lives OUTSIDE
+/// the lock-held synchronous layer. The CRDT document is still only ever
+/// mutated under the lock via attributed commits: a `Ctx` can read hydrated
+/// snapshots and run synchronous mutation closures, but the lock is acquired
+/// and released inside each call — it is never held across an await.
+pub struct Ctx<M> {
+    store: Arc<Store<M>>,
+}
+
+impl<M> Clone for Ctx<M> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+        }
+    }
+}
+
+impl<M: Model + Actions> Ctx<M> {
+    pub(crate) fn new(store: Arc<Store<M>>) -> Self {
+        Self { store }
+    }
+
+    /// A hydrated snapshot of the current state (the lock is released before
+    /// this returns).
+    pub fn state(&self) -> Result<M, ActionError> {
+        self.store.hydrate()
+    }
+
+    /// The current replicated state as JSON.
+    pub fn state_json(&self) -> serde_json::Value {
+        self.store.state_json()
+    }
+
+    /// Run a synchronous mutation under the store lock as one attributed
+    /// commit: hydrate → `f` → reconcile → commit with `name` as the message
+    /// → persist → wake subscribers — the same pipeline a sync action runs.
+    /// `f` is synchronous by construction, so the lock cannot be held across
+    /// an await.
+    pub fn mutate<R>(&self, name: &str, f: impl FnOnce(&mut M) -> R) -> Result<R, ActionError> {
+        self.store.mutate(name, f)
+    }
+
+    /// Run any registered action by name (sync or async) — the same dispatch
+    /// path the HTTP and MCP surfaces use.
+    pub async fn apply(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ActionError> {
+        self.store.dispatch(name, args).await
+    }
+}
 
 /// All Tangram instances build their initial document with this fixed actor
 /// and a zero timestamp, so any two fresh instances of the same app produce a
@@ -82,11 +136,14 @@ impl<M: Model + Actions> Store<M> {
         }
     }
 
-    /// Run an action: hydrate the model, invoke the handler, and (for
-    /// mutating actions) reconcile the result back into the document as one
-    /// attributed change, persist it, and wake every subscriber.
-    pub fn apply(
-        &self,
+    /// Run an action by name — the single dispatch path shared by the HTTP
+    /// action route, the MCP tool bridge, and [`Ctx::apply`], so every
+    /// surface exposes the same contract by construction. Sync actions run
+    /// inline under the store lock; async actions are awaited OUTSIDE the
+    /// lock (they mutate through [`Ctx::mutate`], which takes the lock per
+    /// commit).
+    pub async fn dispatch(
+        self: &Arc<Self>,
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, ActionError> {
@@ -94,10 +151,25 @@ impl<M: Model + Actions> Store<M> {
             .actions
             .get(name)
             .ok_or_else(|| ActionError::Unknown(name.to_string()))?;
+        match def.handler {
+            ActionHandler::Sync(handler) => self.apply_sync(def, handler, args),
+            ActionHandler::Async(handler) => handler(Ctx::new(self.clone()), args).await,
+        }
+    }
 
+    /// Run a sync action under the lock: hydrate the model, invoke the
+    /// handler, and (for mutating actions) reconcile the result back into the
+    /// document as one attributed change, persist it, and wake every
+    /// subscriber.
+    fn apply_sync(
+        &self,
+        def: &ActionDef<M>,
+        handler: fn(&mut M, serde_json::Value) -> Result<serde_json::Value, ActionError>,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, ActionError> {
         let mut doc = self.doc.lock().expect("store lock");
         let mut model: M = autosurgeon::hydrate(&*doc).map_err(ActionError::internal)?;
-        let result = (def.handler)(&mut model, args)?;
+        let result = handler(&mut model, args)?;
 
         if def.mutates {
             autosurgeon::reconcile(&mut *doc, model).map_err(ActionError::internal)?;
@@ -109,6 +181,25 @@ impl<M: Model + Actions> Store<M> {
                 drop(doc);
                 self.bump();
             }
+        }
+        Ok(result)
+    }
+
+    /// Run a synchronous mutation closure as one attributed commit (the
+    /// pipeline behind [`Ctx::mutate`]): hydrate → `f` → reconcile → commit
+    /// with `message` → persist → wake subscribers.
+    pub fn mutate<R>(&self, message: &str, f: impl FnOnce(&mut M) -> R) -> Result<R, ActionError> {
+        let mut doc = self.doc.lock().expect("store lock");
+        let mut model: M = autosurgeon::hydrate(&*doc).map_err(ActionError::internal)?;
+        let result = f(&mut model);
+        autosurgeon::reconcile(&mut *doc, model).map_err(ActionError::internal)?;
+        if doc
+            .commit_with(CommitOptions::default().with_message(message))
+            .is_some()
+        {
+            self.persist(&mut doc);
+            drop(doc);
+            self.bump();
         }
         Ok(result)
     }

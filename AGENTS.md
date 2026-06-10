@@ -38,9 +38,11 @@ cargo run -p tangram-shell                                # run all apps, one po
 
 ## Conventions not obvious from code
 
-- Actions are synchronous and must do no I/O; network work is two-phase via
-  the app `Handle` (resolve outside the action, commit via an idempotent
-  action).
+- Every user-facing operation must be a registered action: a sync method
+  (`&self`/`&mut self`, pure state transition, no I/O) or an `async fn`
+  taking `Ctx<Self>` for network work (resolve outside the lock, commit via
+  `Ctx::mutate`). Custom routes are reserved for non-operations (capability
+  probes, static assets). The store lock is never held across an await.
 - Model `Default` must be deterministic — it becomes the shared genesis
   commit. Use `Vec`, not `HashMap`.
 - UI fetches use relative paths only: apps get prefix-mounted under the shell

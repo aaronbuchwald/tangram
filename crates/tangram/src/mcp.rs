@@ -83,7 +83,7 @@ impl<M: Model + Actions> ServerHandler for McpBridge<M> {
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| serde_json::json!({}));
-        match self.store.apply(&request.name, args) {
+        match self.store.dispatch(&request.name, args).await {
             Ok(result) => {
                 let text =
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());

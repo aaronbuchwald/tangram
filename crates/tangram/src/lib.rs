@@ -35,13 +35,14 @@ mod store;
 mod sync;
 mod web;
 
-pub use action::{ActionDef, ActionError, Actions};
-pub use app::{App, Handle};
+pub use action::{ActionDef, ActionError, ActionFuture, ActionHandler, Actions};
+pub use app::App;
+pub use store::Ctx;
 pub use tangram_macros::{actions, model};
 
 /// Everything an app needs in scope.
 pub mod prelude {
-    pub use crate::{Actions, App, Handle, actions, model};
+    pub use crate::{Actions, App, Ctx, actions, model};
 }
 
 /// Implementation details used by macro expansions. Not a public API.

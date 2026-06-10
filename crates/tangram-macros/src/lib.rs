@@ -41,6 +41,13 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// become tool descriptions and the remaining parameters become a JSON-schema
 /// described argument object.
 ///
+/// Public `async fn` items become **async actions**: they take a
+/// `tangram::Ctx<Self>` as their first parameter instead of `self`, run
+/// OUTSIDE the store lock, and may perform I/O (network lookups, etc.). They
+/// read state via `Ctx::state` and commit attributed mutations via
+/// `Ctx::mutate`; the remaining parameters become the argument object exactly
+/// as for sync actions, so every surface sees one identical contract.
+///
 /// Methods returning `Result<T, E>` surface `Err` as an action failure
 /// (requires `E: Display`); any other return type is serialized as the result.
 #[proc_macro_attribute]
@@ -67,18 +74,30 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
             continue;
         }
         let sig = &method.sig;
-        if sig.asyncness.is_some() {
-            return Err(syn::Error::new(
-                sig.span(),
-                "tangram actions must be synchronous (they run inside a state transaction)",
-            ));
-        }
+        let is_async = sig.asyncness.is_some();
 
-        // Receiver decides whether the action mutates the document.
-        let Some(FnArg::Receiver(receiver)) = sig.inputs.first() else {
-            continue; // associated fn (no self) — not an action
+        // Sync actions take a receiver (`&mut self` mutates, `&self` reads).
+        // Async actions take a `Ctx<Self>` context handle as their first
+        // parameter instead of `self` (they run outside the store lock and
+        // mutate through the context, so they are presumed mutating).
+        let mutates = if is_async {
+            match sig.inputs.first() {
+                Some(FnArg::Typed(_)) => {}
+                _ => {
+                    return Err(syn::Error::new(
+                        sig.span(),
+                        "async tangram actions take a context handle as their first parameter \
+                         (e.g. `ctx: Ctx<Self>`) instead of `self`",
+                    ));
+                }
+            }
+            true
+        } else {
+            let Some(FnArg::Receiver(receiver)) = sig.inputs.first() else {
+                continue; // associated fn (no self/ctx) — not an action
+            };
+            receiver.mutability.is_some()
         };
-        let mutates = receiver.mutability.is_some();
 
         let fn_ident = &sig.ident;
         let name_str = fn_ident.to_string();
@@ -110,7 +129,11 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
             }
         });
 
-        let call = quote! { model.#fn_ident(#(args.#field_idents),*) };
+        let call = if is_async {
+            quote! { Self::#fn_ident(ctx, #(args.#field_idents),*).await }
+        } else {
+            quote! { model.#fn_ident(#(args.#field_idents),*) }
+        };
         // Result-returning actions propagate Err as an action failure.
         let invoke = if returns_result(&sig.output) {
             quote! {
@@ -118,6 +141,28 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
             }
         } else {
             quote! { let out = #call; }
+        };
+
+        let handler = if is_async {
+            quote! {
+                ::tangram::ActionHandler::Async(|ctx, raw| ::std::boxed::Box::pin(async move {
+                    let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
+                        .map_err(::tangram::ActionError::bad_args)?;
+                    #invoke
+                    ::tangram::__private::serde_json::to_value(out)
+                        .map_err(::tangram::ActionError::internal)
+                }))
+            }
+        } else {
+            quote! {
+                ::tangram::ActionHandler::Sync(|model, raw| {
+                    let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
+                        .map_err(::tangram::ActionError::bad_args)?;
+                    #invoke
+                    ::tangram::__private::serde_json::to_value(out)
+                        .map_err(::tangram::ActionError::internal)
+                })
+            }
         };
 
         defs.push(quote! {
@@ -129,13 +174,7 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
                     ::tangram::__private::serde_json::to_value(::schemars::schema_for!(#args_ident))
                         .expect("action arg schema serializes")
                 },
-                handler: |model, raw| {
-                    let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
-                        .map_err(::tangram::ActionError::bad_args)?;
-                    #invoke
-                    ::tangram::__private::serde_json::to_value(out)
-                        .map_err(::tangram::ActionError::internal)
-                },
+                handler: #handler,
             }
         });
     }

@@ -2,10 +2,11 @@
 //! `strategies.ts`.
 //!
 //! A [`Strategy`] is *how* a meal component gets its per-100g nutrient
-//! values. Selection is by the `NUTRITION_STRATEGY` env var
-//! (`offline | calorieninjas | llm`, default `offline`):
+//! values. Selection: an explicit `NUTRITION_STRATEGY` env var
+//! (`offline | calorieninjas | llm`) wins; when unset, the presence of
+//! `CALORIENINJAS_API_KEY` auto-enables CalorieNinjas, else offline:
 //!
-//! - **Offline** (default) — deterministic and keyless. It has NO dynamic
+//! - **Offline** (keyless default) — deterministic and keyless. It has NO dynamic
 //!   `resolve`; components fall back to whatever the reference data covers.
 //!   Divergence from Chamber: Chamber pre-seeds a `component_nutrients`
 //!   table from the strategy's `seed` (and creates it EMPTY for online
@@ -49,13 +50,39 @@ pub enum Strategy {
 }
 
 impl Strategy {
-    /// Select a strategy from the `NUTRITION_STRATEGY` env var. Defaults to
-    /// offline (deterministic, keyless) for an unset or unknown value.
+    /// Select a strategy from the environment: an explicit
+    /// `NUTRITION_STRATEGY` wins; when it is unset, the presence of
+    /// `CALORIENINJAS_API_KEY` auto-enables CalorieNinjas (online resolution
+    /// is the default expectation, not an exception); otherwise offline
+    /// (deterministic, keyless).
     pub fn from_env() -> Self {
+        Self::from_env_with_reason().0
+    }
+
+    /// [`from_env`](Self::from_env), plus a human-readable reason for the
+    /// choice (for startup logging).
+    pub fn from_env_with_reason() -> (Self, &'static str) {
         match std::env::var("NUTRITION_STRATEGY").as_deref() {
-            Ok("calorieninjas") => Self::CalorieNinjas,
-            Ok("llm") => Self::Llm,
-            _ => Self::Offline,
+            Ok("calorieninjas") => (Self::CalorieNinjas, "NUTRITION_STRATEGY=calorieninjas"),
+            Ok("llm") => (Self::Llm, "NUTRITION_STRATEGY=llm"),
+            Ok("offline") => (Self::Offline, "NUTRITION_STRATEGY=offline"),
+            Ok(_) => (
+                Self::Offline,
+                "unknown NUTRITION_STRATEGY value; falling back to offline",
+            ),
+            Err(_) => {
+                if std::env::var("CALORIENINJAS_API_KEY").is_ok_and(|k| !k.trim().is_empty()) {
+                    (
+                        Self::CalorieNinjas,
+                        "NUTRITION_STRATEGY unset; CALORIENINJAS_API_KEY present, auto-enabling calorieninjas",
+                    )
+                } else {
+                    (
+                        Self::Offline,
+                        "NUTRITION_STRATEGY unset and no CALORIENINJAS_API_KEY; offline",
+                    )
+                }
+            }
         }
     }
 
@@ -78,8 +105,8 @@ impl Strategy {
     /// Dynamic per-100g lookup for a component not yet covered by the
     /// reference data. Returns `Ok(None)` when the strategy can't make sense
     /// of the food (the component just won't contribute nutrition — it does
-    /// not fail the meal). Runs over the network, so it must be called
-    /// OUTSIDE any action (actions are synchronous and hold the store lock).
+    /// not fail the meal). Runs over the network, so call it from async
+    /// actions or background tasks — never while holding the store lock.
     pub async fn resolve(self, component: &str) -> anyhow::Result<Option<Vec<ResolvedNutrient>>> {
         match self {
             Self::Offline => anyhow::bail!(

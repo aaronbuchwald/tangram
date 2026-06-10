@@ -423,20 +423,10 @@
     });
     el("cancelBtn").addEventListener("click", () => dialog.close());
 
-    // POST /api/log — the strategy-backed logging endpoint. Explicit
-    // components win; a bare description is resolved server-side via the
-    // active strategy (CalorieNinjas / LLM) before the meal is logged.
-    async function apiLog(body) {
-      const r = await fetch("api/log", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-      return data;
-    }
-
+    // Submitting goes through the registered log_meal action — the same
+    // contract agents use over MCP. Explicit components win; a bare
+    // description is resolved server-side via the active strategy
+    // (CalorieNinjas / LLM) before the meal is logged.
     el("logForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const body = { eaten_at_ms: eatenAtForDay(selectedDate) };
@@ -465,7 +455,7 @@
       const saveBtn = el("saveBtn");
       saveBtn.disabled = true;
       try {
-        await apiLog(body);
+        await act("log_meal", body);
         dialog.close();
       } catch (err) {
         showError("Could not log meal: " + err.message);
