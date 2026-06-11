@@ -605,10 +605,14 @@ pub fn with_api(router: axum::Router, _ctx: Ctx<Nutrition>) -> axum::Router {
 
 // Compiled for wasm32-wasip2, the same model + actions become a Tangram
 // component (`tangram-host` owns the platform around it; strategy HTTP goes
-// through the host's allowlist-enforced `http-fetch` import). The
-// capabilities object is computed at instantiation from the env vars the
-// host grants the component, exactly as the native `api.rs` route computes
-// it at startup — the host serves it at `GET /nutrition/api/capabilities`.
+// through the host's allowlist-enforced `http-fetch` import, which also
+// injects the API credential at the egress boundary — ADR-0005). The
+// capabilities object reports the SELECTED strategy's resolve ability from
+// `NUTRITION_STRATEGY` (an env var, not a secret); whether the strategy is
+// actually CONFIGURED — i.e. an egress credential resolves — is decided
+// host-side and ANDed into `description_input` (the component no longer sees
+// the key, so it cannot decide this itself). The host serves the result at
+// `GET /nutrition/api/capabilities`.
 #[cfg(target_family = "wasm")]
 tangram::export_component!(Nutrition {
     name: "nutrition",

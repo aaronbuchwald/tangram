@@ -571,6 +571,38 @@ hosted use of the remote, and OAuth-connected local instances.
   unaffected (regression tests stay green); new unit tests cover env:// resolve,
   ${VAR}→env:// equivalence, unknown-scheme error, missing-var degradation, and
   SecretString Debug redaction.
+- [x] **Phase 10b — egress credential injection** — delivered 2026-06-11
+  (ADR-0005). The plaintext credential no longer enters the component's
+  address space: the host attaches it at the `http-fetch` egress boundary. A
+  per-app spec declares injection rules keyed by outbound host —
+  `[apps.<app>.inject]` in apps.toml, or the `inject` list on a registry
+  `install_app` (replicated as the registry model's `Inject` rows) — each
+  naming exactly one kind (`header` / `bearer` / `query`) and a `secret`
+  `scheme://locator` reference resolved through the 10a `SecretRegistry`
+  (`config::InjectRule` / `InjectKind`). In `HostState::http_fetch`
+  (`crates/tangram-host/src/runtime.rs`) a request to an injection-matched
+  host has its credential resolved host-side into a `SecretString` (lived only
+  for the request, never logged) and attached just before the real outbound
+  call; non-matching requests pass through unmodified. Injection COMPOSES with
+  the allowlist — an injected host must also be in `allow_hosts` (validated at
+  load and re-checked at egress), never a bypass. Nutrition migrated: the
+  component issues a bare CalorieNinjas request and no longer reads
+  `CALORIENINJAS_API_KEY` or sets `X-Api-Key` (the native binary, with no host
+  broker, still self-authenticates from its own env). The capabilities probe's
+  `description_input` is now derived host-side — ANDed with whether an
+  injection secret resolves — so a missing/unresolvable key reports
+  `description_input:false` and the strategy stays offline/degraded (no crash,
+  no leak); apps with no inject rule keep native/host capabilities parity.
+  apps.toml + the marketplace nutrition seed (a new `inject` manifest grant;
+  the API key moves out of `env_keys`) carry the rule. Env injection (10a)
+  remains for the rare secret a component must compute on internally — that
+  case retains in-sandbox exposure (ADR-0005 scope note). New tests: config
+  inject parse/validate/kind + env-isolation + configured-iff-resolves, a
+  registry parse_state inject test, registry install/set_inject validation,
+  the marketplace seed grant, and a host integration test
+  (`tests/egress_injection.rs`, self-skips without components / live key)
+  proving capabilities gating, env isolation, and that the host-injected
+  request authenticates while a sibling app with no rule cannot.
 
 Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →

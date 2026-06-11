@@ -14,6 +14,15 @@
 //! API: GET https://api.calorieninjas.com/v1/nutrition?query=<food>, header
 //! `X-Api-Key: <key>`. Values are reported per `serving_size_g`; we
 //! normalize to per-100g.
+//!
+//! Authentication (ADR-0005, RUNTIME_PLAN Phase 10b): as a WASM component
+//! under `tangram-host`, the strategy issues the BARE request — no
+//! `X-Api-Key` header, no env-read of the key — and the HOST attaches the
+//! credential at its `http-fetch` egress boundary from an injection rule, so
+//! the plaintext key never enters the component's address space. Run as a
+//! native binary (no host), there is no egress broker, so the native build
+//! still reads `CALORIENINJAS_API_KEY` from its own environment and sets the
+//! header itself.
 
 use anyhow::Context;
 use tangram::http;
@@ -93,17 +102,30 @@ fn display_name(field: &str) -> String {
 /// nutrient field it returns for the first matched item, normalized to
 /// per-100g.
 pub async fn resolve(component: &str) -> anyhow::Result<Option<Vec<ResolvedNutrient>>> {
-    let api_key = std::env::var("CALORIENINJAS_API_KEY").map_err(|_| {
-        anyhow::anyhow!("NUTRITION_STRATEGY=calorieninjas requires CALORIENINJAS_API_KEY to be set")
-    })?;
-
     // Through the tangram::http facade: reqwest natively, the host's
     // allowlist-enforced `http-fetch` import inside a WASM component.
     let url = format!(
         "{CALORIENINJAS_URL}?query={}",
         http::urlencode(component.trim())
     );
-    let resp = http::fetch(http::Request::get(url).header("X-Api-Key", api_key))
+
+    // The BARE request. Under tangram-host (wasm) the host injects the
+    // X-Api-Key credential at its egress boundary (ADR-0005) — the component
+    // neither reads the key nor sets the header. As a native binary there is
+    // no host broker, so the native build authenticates itself from its own
+    // environment, preserving standalone behavior.
+    #[cfg_attr(target_family = "wasm", allow(unused_mut))]
+    let mut req = http::Request::get(url);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let api_key = std::env::var("CALORIENINJAS_API_KEY").map_err(|_| {
+            anyhow::anyhow!(
+                "NUTRITION_STRATEGY=calorieninjas requires CALORIENINJAS_API_KEY to be set"
+            )
+        })?;
+        req = req.header("X-Api-Key", api_key);
+    }
+    let resp = http::fetch(req)
         .await
         .with_context(|| format!("CalorieNinjas request failed for {component:?}"))?;
     if !resp.is_success() {

@@ -58,9 +58,16 @@ allow_hosts = ["api.calorieninjas.com"]
 
 [apps.nutrition.env]
 NUTRITION_STRATEGY = "calorieninjas"
-# ${VAR} values are expanded from the host's environment (.env is loaded),
-# so the secret itself stays out of this file.
-CALORIENINJAS_API_KEY = "${CALORIENINJAS_API_KEY}"
+
+# Egress credential injection (ADR-0005, RUNTIME_PLAN Phase 10b): the HOST
+# attaches the CalorieNinjas API key to the component's outbound request at
+# its `http-fetch` boundary, so the plaintext key NEVER enters the
+# component's address space (the component issues a bare request and the host
+# authenticates it). `secret` is an env://NAME reference resolved from the
+# host's environment (.env is loaded) — the secret stays out of this file and
+# out of the sandbox. The injected host must also be in allow_hosts above.
+[apps.nutrition.inject]
+"api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
 
 # ── Multi-tenancy (RUNTIME_PLAN Phase 5; README "Multi-tenancy") ─────────────
 # Uncomment to serve isolated, bearer-gated app sets under /t/<tenant>/

@@ -7,11 +7,17 @@
 //! a component to even name. The wasip2 std plumbing (env, clocks, random,
 //! stdio) is linked with an empty WASI context — no preopens, no sockets.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use secrecy::ExposeSecret as _;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+
+use crate::config::{InjectKind, InjectRule};
+use crate::secrets::SecretRegistry;
 
 // In their own module so the generated `tangram::app::...` paths can't
 // collide with the `tangram` SDK crate.
@@ -38,6 +44,14 @@ pub struct HostState {
     table: ResourceTable,
     app: String,
     allow_hosts: Vec<String>,
+    /// Egress credential-injection rules (ADR-0005, Phase 10b), keyed by
+    /// lowercased outbound host. For a matching `http-fetch` the host
+    /// resolves the rule's secret through `secrets` and attaches it just
+    /// before the real request — the component never holds the plaintext.
+    inject: Vec<(String, InjectKind, InjectRule)>,
+    /// The secret-resolution seam, used host-side at request time to turn an
+    /// inject rule's `scheme://locator` reference into a `SecretString`.
+    secrets: Arc<SecretRegistry>,
     client: reqwest::Client,
 }
 
@@ -80,6 +94,31 @@ impl host::Host for HostState {
             ));
         }
 
+        // Egress credential injection (ADR-0005): if an injection rule
+        // matches this (allowlisted) host, resolve its secret host-side and
+        // attach the credential just before the real request — the component
+        // issued a BARE request and never held the plaintext. A rule whose
+        // secret does not resolve is skipped (the request goes out
+        // unauthenticated → degraded, never a crash). The `SecretString`
+        // lives only for this call and is never logged.
+        let host_lc = host.to_ascii_lowercase();
+        let injected = match self.inject.iter().find(|(h, _, _)| *h == host_lc) {
+            Some((_, kind, rule)) => rule
+                .resolve_secret(&self.secrets, &format!("{}: inject {host_lc}", self.app))
+                .await
+                .map(|secret| (kind.clone(), secret)),
+            None => None,
+        };
+
+        let mut parsed = parsed;
+        if let Some((InjectKind::Query(name), secret)) = &injected {
+            // Query injection must mutate the URL before it is consumed by
+            // the request builder.
+            parsed
+                .query_pairs_mut()
+                .append_pair(name, secret.expose_secret());
+        }
+
         let method: reqwest::Method = request
             .get("method")
             .and_then(serde_json::Value::as_str)
@@ -98,6 +137,18 @@ impl host::Host for HostState {
                 builder = builder.header(name, value.as_str().unwrap_or_default());
             }
         }
+        // Apply header/bearer injection AFTER the component's own headers, so
+        // the host-attached credential is authoritative (a component cannot
+        // pre-set the injected header to a value of its choosing).
+        match &injected {
+            Some((InjectKind::Header(name), secret)) => {
+                builder = builder.header(name, secret.expose_secret());
+            }
+            Some((InjectKind::Bearer, secret)) => {
+                builder = builder.bearer_auth(secret.expose_secret());
+            }
+            _ => {}
+        }
         if let Some(b64) = request.get("body-b64").and_then(serde_json::Value::as_str)
             && !b64.is_empty()
         {
@@ -107,7 +158,7 @@ impl host::Host for HostState {
             builder = builder.body(body);
         }
 
-        tracing::debug!(app = %self.app, %url, "outbound http-fetch");
+        tracing::debug!(app = %self.app, %url, injected = injected.is_some(), "outbound http-fetch");
         let response = builder
             .send()
             .await
@@ -167,12 +218,18 @@ struct Inner {
 
 impl ComponentHandle {
     /// Compile + instantiate the component at `path` with this app's grants.
+    /// `inject` carries the egress credential-injection rules (ADR-0005) and
+    /// `secrets` the resolver seam used to turn their references into values
+    /// host-side at request time — neither is ever exposed to the component.
+    #[allow(clippy::too_many_arguments)]
     pub async fn instantiate(
         engine: &Engine,
         path: &std::path::Path,
         app: &str,
         allow_hosts: &[String],
         env: &[(String, String)],
+        inject: Vec<(String, InjectKind, InjectRule)>,
+        secrets: Arc<SecretRegistry>,
     ) -> anyhow::Result<Self> {
         let component = Component::from_file(engine, path)?;
         let mut linker = Linker::<HostState>::new(engine);
@@ -192,6 +249,8 @@ impl ComponentHandle {
             table: ResourceTable::new(),
             app: app.to_string(),
             allow_hosts: allow_hosts.to_vec(),
+            inject,
+            secrets,
             client: reqwest::Client::new(),
         };
         let mut store = Store::new(engine, state);

@@ -74,8 +74,36 @@ pub struct CapabilityManifest {
     /// stay on the host: installs pass `${KEY}` so the host expands them
     /// from its own .env — secrets never enter a replicated document.
     env_keys: Vec<String>,
+    /// Egress credential-injection grants (ADR-0005): for each entry the HOST
+    /// attaches the named credential to the app's outbound request to `host`
+    /// at its `http-fetch` boundary — the plaintext NEVER enters the
+    /// component. The install passes these to the registry's `install_app`
+    /// `inject` argument. Additive field: older catalog documents hydrate it
+    /// as an empty list, and a listing posted without it (older UI/clients)
+    /// defaults to no injection. Preferred over `env_keys` for secrets used
+    /// purely at the HTTP egress boundary (the dominant case — API keys).
+    #[serde(default)]
+    #[autosurgeon(missing = "Vec::new")]
+    inject: Vec<InjectGrant>,
     /// Where the app's data lives and what it contains, for humans.
     data_note: String,
+}
+
+/// One declared egress credential-injection grant in a listing (ADR-0005),
+/// shown next to Install and passed through to the registry on install.
+#[model]
+pub struct InjectGrant {
+    /// Outbound host the credential is attached to (also in `allow_hosts`).
+    host: String,
+    /// Header name (e.g. `X-Api-Key`), or empty for a bearer/query kind.
+    header: String,
+    /// `Authorization: Bearer <secret>` when true.
+    bearer: bool,
+    /// URL query parameter name, or empty.
+    query: String,
+    /// The `scheme://locator` secret reference the install passes through
+    /// (e.g. `env://CALORIENINJAS_API_KEY`) — a reference, never a value.
+    secret: String,
 }
 
 fn validate_sha256(digest: &str) -> Result<(), String> {
@@ -202,12 +230,15 @@ fn release_url(app: &str) -> String {
 /// data checked into the repo, not computed at runtime).
 impl Default for Marketplace {
     fn default() -> Self {
-        let manifest =
-            |allow_hosts: &[&str], env_keys: &[&str], data_note: &str| CapabilityManifest {
-                allow_hosts: allow_hosts.iter().map(ToString::to_string).collect(),
-                env_keys: env_keys.iter().map(ToString::to_string).collect(),
-                data_note: data_note.to_string(),
-            };
+        let manifest = |allow_hosts: &[&str],
+                        env_keys: &[&str],
+                        inject: Vec<InjectGrant>,
+                        data_note: &str| CapabilityManifest {
+            allow_hosts: allow_hosts.iter().map(ToString::to_string).collect(),
+            env_keys: env_keys.iter().map(ToString::to_string).collect(),
+            inject,
+            data_note: data_note.to_string(),
+        };
         Self {
             listings: vec![
                 Listing {
@@ -223,6 +254,7 @@ impl Default for Marketplace {
                     capabilities: manifest(
                         &[],
                         &[],
+                        Vec::new(),
                         "One automerge document of notes under $HOME/.notes, \
                          touched only by the host.",
                     ),
@@ -240,10 +272,22 @@ impl Default for Marketplace {
                     publisher: "tangram (first-party)".into(),
                     capabilities: manifest(
                         &["api.calorieninjas.com"],
-                        &["NUTRITION_STRATEGY", "CALORIENINJAS_API_KEY"],
+                        // NUTRITION_STRATEGY is a plain (non-secret) selector;
+                        // the API KEY is no longer an env grant — it is
+                        // injected by the host at the egress boundary
+                        // (ADR-0005), so it never enters the component.
+                        &["NUTRITION_STRATEGY"],
+                        vec![InjectGrant {
+                            host: "api.calorieninjas.com".into(),
+                            header: "X-Api-Key".into(),
+                            bearer: false,
+                            query: String::new(),
+                            secret: "env://CALORIENINJAS_API_KEY".into(),
+                        }],
                         "One automerge document of meals under $HOME/.nutrition, \
                          touched only by the host. Meal descriptions are sent to \
-                         api.calorieninjas.com when that strategy is enabled.",
+                         api.calorieninjas.com when that strategy is enabled; the API \
+                         key is injected host-side at egress (never held by the app).",
                     ),
                     import_audit: include_str!("../seed/nutrition.wit").trim().into(),
                 },
@@ -261,6 +305,7 @@ impl Default for Marketplace {
                     capabilities: manifest(
                         &[],
                         &[],
+                        Vec::new(),
                         "One automerge document of app specs under $HOME/.registry, \
                          touched only by the host. Its mutating actions are gated by \
                          TANGRAM_AUTH_TOKEN.",
@@ -312,6 +357,7 @@ mod tests {
             CapabilityManifest {
                 allow_hosts: vec!["api.example.com".into()],
                 env_keys: vec!["EXAMPLE_KEY".into()],
+                inject: Vec::new(),
                 data_note: "one doc".into(),
             },
         )
@@ -344,12 +390,26 @@ mod tests {
             nutrition.capabilities.allow_hosts,
             vec!["api.calorieninjas.com".to_string()]
         );
+        // The API key is now an egress-injection grant (ADR-0005), NOT an env
+        // key — the component never holds it. NUTRITION_STRATEGY (a non-secret
+        // selector) stays an env key.
+        assert!(
+            !nutrition
+                .capabilities
+                .env_keys
+                .contains(&"CALORIENINJAS_API_KEY".to_string()),
+            "the API key must not be an env grant anymore"
+        );
         assert!(
             nutrition
                 .capabilities
                 .env_keys
-                .contains(&"CALORIENINJAS_API_KEY".to_string())
+                .contains(&"NUTRITION_STRATEGY".to_string())
         );
+        let grant = &nutrition.capabilities.inject[0];
+        assert_eq!(grant.host, "api.calorieninjas.com");
+        assert_eq!(grant.header, "X-Api-Key");
+        assert_eq!(grant.secret, "env://CALORIENINJAS_API_KEY");
     }
 
     #[test]

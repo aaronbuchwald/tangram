@@ -116,20 +116,47 @@ impl AppRuntime {
     /// the converge loop downloaded into (`crate::fetch`).
     pub async fn build(
         engine: &wasmtime::Engine,
-        secrets: &SecretRegistry,
+        secrets: &Arc<SecretRegistry>,
         name: &str,
         spec: &AppSpec,
         component_path: &Path,
     ) -> anyhow::Result<Self> {
         let component_mtime = component_mtime(component_path);
         let env = spec.resolved_env(secrets, name).await;
-        let component =
-            ComponentHandle::instantiate(engine, component_path, name, &spec.allow_hosts, &env)
-                .await
-                .with_context(|| format!("instantiating component {}", component_path.display()))?;
+        let inject = spec.resolved_inject();
+        let component = ComponentHandle::instantiate(
+            engine,
+            component_path,
+            name,
+            &spec.allow_hosts,
+            &env,
+            inject,
+            secrets.clone(),
+        )
+        .await
+        .with_context(|| format!("instantiating component {}", component_path.display()))?;
 
-        let describe: Describe = serde_json::from_str(&component.describe().await?)
+        let mut describe: Describe = serde_json::from_str(&component.describe().await?)
             .context("parsing the component's describe() manifest")?;
+
+        // ADR-0005: when the app declares egress injection, the capabilities
+        // probe's "configured" signal is derived HOST-side from whether an
+        // injection secret resolves — NOT from the component seeing a secret
+        // env var (it no longer does). AND the component's `description_input`
+        // with that, so an app whose credential is missing or unresolvable
+        // reports `description_input: false` and stays offline/degraded
+        // cleanly. Apps with no injection rules are left exactly as the
+        // component reported (env-injected/native parity preserved).
+        if !spec.inject.is_empty() {
+            let configured = spec.any_inject_resolves(secrets, name).await;
+            if let Some(caps) = describe.capabilities.as_mut()
+                && let Some(di) = caps.get_mut("description_input")
+                && di.as_bool() == Some(true)
+                && !configured
+            {
+                *di = serde_json::Value::Bool(false);
+            }
+        }
 
         // A fresh install's document starts from the component's
         // deterministic genesis — byte-identical to a native instance's, so

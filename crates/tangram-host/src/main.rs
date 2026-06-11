@@ -98,7 +98,10 @@ pub struct Host {
     /// The secret-resolution seam (ADR-0004 Phase 10a): scheme → resolver.
     /// Phase 10a registers exactly one — `env://` — and resolves every spec
     /// secret reference (`${VAR}` sugar included) through it at converge.
-    pub secrets: secrets::SecretRegistry,
+    /// `Arc` so it can be shared into each component's `HostState` for
+    /// request-time egress injection (ADR-0005 / Phase 10b), where the value
+    /// is resolved host-side and never enters the component.
+    pub secrets: Arc<secrets::SecretRegistry>,
 }
 
 /// The bootstrap ("file") layer of one tenant's desired state: the explicit
@@ -128,6 +131,7 @@ fn tenant_bootstrap(
         data_dir: None,
         allow_hosts: Vec::new(),
         env: BTreeMap::new(),
+        inject: BTreeMap::new(),
         remote: None,
         remote_token: None,
         registry: true,
@@ -633,7 +637,7 @@ async fn main() -> anyhow::Result<()> {
         nudge: Arc::new(Notify::new()),
         gateway: mcp_gateway,
         fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
-        secrets: secrets::SecretRegistry::default(),
+        secrets: Arc::new(secrets::SecretRegistry::default()),
     });
     host.converge().await;
 

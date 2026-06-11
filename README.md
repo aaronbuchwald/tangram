@@ -197,8 +197,14 @@ ui = "apps/nutrition/ui"
 allow_hosts = ["api.calorieninjas.com"]     # the app's ENTIRE outbound grant
 
 [apps.nutrition.env]
-NUTRITION_STRATEGY = "calorieninjas"
-CALORIENINJAS_API_KEY = "${CALORIENINJAS_API_KEY}"   # ${VAR} expands from the host env / .env
+NUTRITION_STRATEGY = "calorieninjas"                 # a non-secret selector
+
+# Egress credential injection (ADR-0005): the HOST attaches the API key to the
+# component's outbound request at its http-fetch boundary, so the plaintext
+# never enters the component's address space. `secret` is an env://NAME ref
+# resolved from the host env / .env; the injected host must also be allowlisted.
+[apps.nutrition.inject]
+"api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
 ```
 
 Every app serves its full surface under one port, exactly like the shell:
@@ -238,7 +244,9 @@ curl -X POST http://127.0.0.1:8080/registry/api/actions/install_app \
        "component":"target/wasm32-wasip2/release/nutrition.wasm",
        "ui":"apps/nutrition/ui",
        "allow_hosts":["api.calorieninjas.com"],
-       "env":[{"key":"CALORIENINJAS_API_KEY","value":"${CALORIENINJAS_API_KEY}"}]}'
+       "env":[{"key":"NUTRITION_STRATEGY","value":"calorieninjas"}],
+       "inject":[{"host":"api.calorieninjas.com","header":"X-Api-Key",
+                  "secret":"env://CALORIENINJAS_API_KEY"}]}'
 ```
 
 The app is serving at `/nutrition/` in well under a second; `remove_app`
@@ -281,7 +289,11 @@ prominently next to the mechanical import audit (the
 `wasm-tools component wit` world block proving the component's closed
 world). The Install button posts the pinned url+sha and the manifest's
 grants to the local registry's `install_app` with your bearer token; env
-grants travel as `${KEY}` so the host expands secrets from its own `.env`.
+grants travel as `${KEY}` so the host expands secrets from its own `.env`,
+and egress credentials travel as `inject` rules (ADR-0005) — the secret
+reference (e.g. `env://CALORIENINJAS_API_KEY`) is resolved host-side and
+attached at the `http-fetch` boundary, so the plaintext never enters the
+installed component.
 The catalog seeds the first-party apps with real commit-time digests
 (refreshed per release by `apps/marketplace/seed/refresh.sh`); run it with
 `require_auth = true` so curation (`add_listing`/`remove_listing`) needs
@@ -323,10 +335,12 @@ Two rules make federation safe:
   (Phase 8), which fetch-and-verify anywhere. A peer that lacks a path-only
   entry reports a clear portability error in `GET /api/fleet`, keeps
   converging everything else, and never thrashes the shared document.
-- **Per-host secrets** — the replicated document carries only env KEYS and
-  `${VAR}` references, never values. Each host expands `${VAR}` from its own
-  environment; a peer missing the secret runs the app degraded (e.g.
-  nutrition → offline) or errors cleanly. Secret VALUES never sync.
+- **Per-host secrets** — the replicated document carries only env KEYS,
+  `${VAR}` / `scheme://locator` references, and `inject` rules, never values.
+  Each host resolves them from its own environment; a peer missing the secret
+  runs the app degraded (e.g. nutrition → offline) or errors cleanly. Secret
+  VALUES never sync — and with egress injection (ADR-0005) a credential never
+  even enters the component, only the host's memory for one outbound request.
 
 Runtime failures (fetch errors, missing artifacts, unresolved secrets) live
 only in `GET /api/fleet`, never written back to the registry document — the
@@ -670,7 +684,12 @@ the default expectation), otherwise `offline`:
   nothing until registered (`add_component_nutrition` / `add_ingredient`).
 - **`calorieninjas`** — resolves free text via the CalorieNinjas API
   (`CALORIENINJAS_API_KEY`), mapping every nutrient field the API returns
-  (calories, fiber, sodium, …) to per-100g rows.
+  (calories, fiber, sodium, …) to per-100g rows. Run as a WASM component
+  under `tangram-host`, the component issues the *bare* request and the host
+  injects the API key at its egress boundary (ADR-0005) — the key never
+  enters the component; under the host, "configured" is derived from whether
+  the injection secret resolves. The native binary self-authenticates from
+  its own `CALORIENINJAS_API_KEY`.
 - **`llm`** — asks Anthropic's `claude-opus-4-8` (structured output) for a
   comprehensive per-100g nutrient panel (`ANTHROPIC_API_KEY`).
 

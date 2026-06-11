@@ -10,7 +10,100 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-use crate::secrets::{SecretRegistry, resolve_value};
+use secrecy::SecretString;
+
+use crate::secrets::{SecretRef, SecretRegistry, resolve_value};
+
+/// One egress credential-injection rule (ADR-0005, RUNTIME_PLAN Phase 10b):
+/// the host attaches a credential to an outbound `http-fetch` request whose
+/// URL host matches the rule's key, just before performing the real request.
+/// The component issues the BARE (unauthenticated) request and never receives
+/// the plaintext secret. Keyed by exact host in `[apps.<app>.inject]`:
+///
+/// ```toml
+/// [apps.nutrition.inject]
+/// "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
+/// ```
+///
+/// Exactly one of `header` / `bearer` / `query` selects the injection KIND;
+/// `secret` is a `scheme://locator` reference resolved host-side through the
+/// [`SecretRegistry`] (ADR-0004). The injected host must ALSO be in the app's
+/// `allow_hosts` — injection composes with the allowlist, never bypasses it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectRule {
+    /// Inject the secret as this request HEADER (e.g. `X-Api-Key`).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Inject the secret as `Authorization: Bearer <secret>` when `true`.
+    #[serde(default)]
+    pub bearer: bool,
+    /// Inject the secret as this URL QUERY parameter (optional kind).
+    #[serde(default)]
+    pub query: Option<String>,
+    /// The `scheme://locator` secret reference (e.g.
+    /// `env://CALORIENINJAS_API_KEY`); resolved host-side at request time.
+    pub secret: String,
+}
+
+/// Where the credential goes on the outbound request — the resolved kind of
+/// an [`InjectRule`], validated once so the egress path is total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InjectKind {
+    /// `<name>: <secret>` request header.
+    Header(String),
+    /// `Authorization: Bearer <secret>`.
+    Bearer,
+    /// `?<name>=<secret>` URL query parameter.
+    Query(String),
+}
+
+impl InjectRule {
+    /// Validate that exactly one of `header` / `bearer` / `query` is set and
+    /// the secret reference is non-empty. Returns the resolved [`InjectKind`].
+    pub fn kind(&self) -> anyhow::Result<InjectKind> {
+        anyhow::ensure!(
+            !self.secret.trim().is_empty(),
+            "inject rule: secret reference must be non-empty"
+        );
+        let header = self.header.as_deref().filter(|h| !h.trim().is_empty());
+        let query = self.query.as_deref().filter(|q| !q.trim().is_empty());
+        match (header, self.bearer, query) {
+            (Some(name), false, None) => Ok(InjectKind::Header(name.to_string())),
+            (None, true, None) => Ok(InjectKind::Bearer),
+            (None, false, Some(name)) => Ok(InjectKind::Query(name.to_string())),
+            (None, false, None) => {
+                anyhow::bail!("inject rule: set exactly one of header / bearer / query (none set)")
+            }
+            _ => anyhow::bail!(
+                "inject rule: set exactly one of header / bearer / query (multiple set)"
+            ),
+        }
+    }
+
+    /// Resolve the rule's secret reference through the registry. `Ok(None)`
+    /// when the reference does not resolve (e.g. an unset env var) — the
+    /// egress path then skips injection and the app runs degraded (nutrition
+    /// → offline), never crashing and never logging the value.
+    pub async fn resolve_secret(
+        &self,
+        registry: &SecretRegistry,
+        context: &str,
+    ) -> Option<SecretString> {
+        match registry.resolve(&SecretRef::new(self.secret.clone())).await {
+            Ok(secret) => Some(secret),
+            Err(e) => {
+                // Name the reference, never the value (matches the env-seam
+                // warning shape). Missing/unresolvable → degraded, not fatal.
+                tracing::warn!(
+                    "{context}: inject secret {} did not resolve: {e:#}",
+                    self.secret
+                );
+                None
+            }
+        }
+    }
+}
 
 /// One app's spec: which component to run, what UI to serve, and what the
 /// component is granted (data dir, outbound hosts, environment).
@@ -52,6 +145,16 @@ pub struct AppSpec {
     /// extension point; Phase 10a ships only `env://`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Egress credential injection (ADR-0005, RUNTIME_PLAN Phase 10b): per
+    /// outbound HOST, a rule the host applies to the component's `http-fetch`
+    /// requests at the egress boundary — the component issues a BARE request
+    /// and never holds the plaintext secret. Keyed by exact host name (same
+    /// space as `allow_hosts`, and the host must ALSO be allowlisted). The
+    /// dominant secret path now; `env` injection remains for the rare secret
+    /// a component must compute on internally (which keeps in-sandbox
+    /// exposure — see ADR-0005 scope note).
+    #[serde(default)]
+    pub inject: BTreeMap<String, InjectRule>,
     /// Optional sync base of a peer to replicate with (the host dials out,
     /// exactly like a native app's TANGRAM_REMOTE).
     #[serde(default)]
@@ -194,6 +297,61 @@ impl AppSpec {
         resolved
     }
 
+    /// Validate every injection rule: each rule must name exactly one kind
+    /// with a non-empty secret reference, and its host must ALSO be in
+    /// `allow_hosts` — injection composes with the allowlist (ADR-0005), it
+    /// never grants reach the allowlist withheld. Called by the file/registry
+    /// loaders so a bad rule is a clear config error, not a silent miss.
+    pub fn validate_inject(&self) -> anyhow::Result<()> {
+        for (host, rule) in &self.inject {
+            rule.kind()
+                .with_context(|| format!("inject rule for host {host:?}"))?;
+            anyhow::ensure!(
+                self.allow_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(host)),
+                "inject rule for host {host:?} targets a host that is not in allow_hosts \
+                 (injection composes with the allowlist — add {host:?} to allow_hosts)"
+            );
+        }
+        Ok(())
+    }
+
+    /// The validated injection rules, keyed by lowercased host for matching
+    /// against an outbound request. Skips (warns on) any malformed rule so a
+    /// single bad entry can't take the app's egress down — `validate_inject`
+    /// already rejected those at load, this is the runtime safety net.
+    pub fn resolved_inject(&self) -> Vec<(String, InjectKind, InjectRule)> {
+        self.inject
+            .iter()
+            .filter_map(|(host, rule)| match rule.kind() {
+                Ok(kind) => Some((host.to_ascii_lowercase(), kind, rule.clone())),
+                Err(e) => {
+                    tracing::warn!("ignoring inject rule for host {host:?}: {e:#}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Whether this app has at least one injection rule whose secret resolves
+    /// — i.e. an egress credential is genuinely configured (ADR-0005). The
+    /// capabilities probe derives "configured" from this (host-side) instead
+    /// of from the component seeing an env var. `false` when there are no
+    /// rules or none resolve (→ the app stays offline/degraded, cleanly).
+    pub async fn any_inject_resolves(&self, registry: &SecretRegistry, app: &str) -> bool {
+        for (host, _kind, rule) in self.resolved_inject() {
+            if rule
+                .resolve_secret(registry, &format!("{app}: inject {host}"))
+                .await
+                .is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// The resolved `remote_token` (through the secret seam); empty → None.
     pub async fn resolved_remote_token(
         &self,
@@ -309,6 +467,8 @@ impl HostConfig {
             spec.component_source()
                 .map(|_| ())
                 .with_context(|| format!("app {name:?}"))?;
+            spec.validate_inject()
+                .with_context(|| format!("app {name:?}"))?;
         }
         for (tenant, spec) in &config.tenants.tenants {
             validate_name(tenant).with_context(|| format!("tenant name {tenant:?}"))?;
@@ -322,6 +482,9 @@ impl HostConfig {
                 app_spec
                     .component_source()
                     .map(|_| ())
+                    .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
+                app_spec
+                    .validate_inject()
                     .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 if let Some(dir) = &app_spec.data_dir {
                     crate::tenant::validate_tenant_data_dir(dir).with_context(|| {
@@ -627,5 +790,145 @@ mod tests {
         let env = config.apps["app"].resolved_env(&registry, "app").await;
         assert!(env.contains(&("LITERAL".into(), "as-is".into())));
         assert!(env.contains(&("EXPANDED".into(), "secret-value".into())));
+    }
+
+    #[tokio::test]
+    async fn injected_secret_is_not_in_the_component_env() {
+        // ADR-0005: the injected credential lives in the inject rule (applied
+        // host-side at egress), NEVER in the component's env. This pins the
+        // apps.toml-shaped nutrition spec: even with the key set in the HOST
+        // environment, `resolved_env` (what the component receives) does not
+        // carry CALORIENINJAS_API_KEY.
+        let registry = SecretRegistry::default();
+        let config = HostConfig::parse(
+            r#"
+            [apps.nutrition]
+            component = "n.wasm"
+            ui = "ui"
+            allow_hosts = ["api.calorieninjas.com"]
+            [apps.nutrition.env]
+            NUTRITION_STRATEGY = "calorieninjas"
+            [apps.nutrition.inject]
+            "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
+            "#,
+        )
+        .unwrap();
+        // Key present in the HOST env (where the resolver reads it).
+        unsafe { std::env::set_var("CALORIENINJAS_API_KEY", "host-only-secret") };
+        let env = config.apps["nutrition"]
+            .resolved_env(&registry, "nutrition")
+            .await;
+        assert!(
+            env.iter().all(|(k, _)| k != "CALORIENINJAS_API_KEY"),
+            "the API key must NOT be in the component env: {env:?}"
+        );
+        // The non-secret strategy selector IS still an env var.
+        assert!(env.contains(&("NUTRITION_STRATEGY".into(), "calorieninjas".into())));
+        // And the credential is genuinely configured (resolves) for egress.
+        assert!(
+            config.apps["nutrition"]
+                .any_inject_resolves(&registry, "nutrition")
+                .await
+        );
+        unsafe { std::env::remove_var("CALORIENINJAS_API_KEY") };
+    }
+
+    #[test]
+    fn parses_inject_rules_and_classifies_kinds() {
+        let config = HostConfig::parse(
+            r#"
+            [apps.nutrition]
+            component = "n.wasm"
+            ui = "ui"
+            allow_hosts = ["api.calorieninjas.com", "api.example.com", "q.example.com"]
+            [apps.nutrition.inject]
+            "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CN_KEY" }
+            "api.example.com" = { bearer = true, secret = "env://TOK" }
+            "q.example.com" = { query = "api_key", secret = "env://QK" }
+            "#,
+        )
+        .unwrap();
+        let inject = &config.apps["nutrition"].inject;
+        assert_eq!(
+            inject["api.calorieninjas.com"].kind().unwrap(),
+            InjectKind::Header("X-Api-Key".into())
+        );
+        assert_eq!(
+            inject["api.example.com"].kind().unwrap(),
+            InjectKind::Bearer
+        );
+        assert_eq!(
+            inject["q.example.com"].kind().unwrap(),
+            InjectKind::Query("api_key".into())
+        );
+    }
+
+    #[test]
+    fn inject_host_must_be_allowlisted() {
+        // A rule targeting a host NOT in allow_hosts is a parse error —
+        // injection composes with the allowlist (ADR-0005), never bypasses it.
+        let err = HostConfig::parse(
+            r#"
+            [apps.n]
+            component = "n.wasm"
+            ui = "ui"
+            allow_hosts = ["api.example.com"]
+            [apps.n.inject]
+            "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://K" }
+            "#,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("not in allow_hosts"), "{err:#}");
+    }
+
+    #[test]
+    fn inject_requires_exactly_one_kind() {
+        for body in [
+            // none
+            r#""api.example.com" = { secret = "env://K" }"#,
+            // two
+            r#""api.example.com" = { header = "X", bearer = true, secret = "env://K" }"#,
+            // empty secret
+            r#""api.example.com" = { header = "X", secret = "  " }"#,
+        ] {
+            let err = HostConfig::parse(&format!(
+                "[apps.n]\ncomponent = \"n.wasm\"\nui = \"ui\"\n\
+                 allow_hosts = [\"api.example.com\"]\n[apps.n.inject]\n{body}"
+            ))
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").contains("inject rule"),
+                "{body}: {err:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn any_inject_resolves_reflects_secret_presence() {
+        let registry = SecretRegistry::default();
+        let config = HostConfig::parse(
+            r#"
+            [apps.n]
+            component = "n.wasm"
+            ui = "ui"
+            allow_hosts = ["api.calorieninjas.com"]
+            [apps.n.inject]
+            "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://TANGRAM_TEST_INJECT_KEY" }
+            "#,
+        )
+        .unwrap();
+        let spec = &config.apps["n"];
+        // Unset → does not resolve → not configured (app stays offline).
+        unsafe { std::env::remove_var("TANGRAM_TEST_INJECT_KEY") };
+        assert!(!spec.any_inject_resolves(&registry, "n").await);
+        // Set → resolves → configured.
+        unsafe { std::env::set_var("TANGRAM_TEST_INJECT_KEY", "live-key") };
+        assert!(spec.any_inject_resolves(&registry, "n").await);
+        // The resolved rule is the X-Api-Key header on the lowercased host.
+        let resolved = spec.resolved_inject();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "api.calorieninjas.com");
+        assert_eq!(resolved[0].1, InjectKind::Header("X-Api-Key".into()));
+        unsafe { std::env::remove_var("TANGRAM_TEST_INJECT_KEY") };
     }
 }

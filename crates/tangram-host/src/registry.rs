@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::config::{AppSpec, validate_name};
+use crate::config::{AppSpec, InjectRule, validate_name};
 
 /// Where a desired app came from — reported by `GET /api/fleet`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,14 @@ struct RegistryEntry {
     allow_hosts: Vec<String>,
     #[serde(default)]
     env: Vec<EnvVar>,
+    /// Egress credential injection rules (ADR-0005, Phase 10b), one per
+    /// outbound host — the host applies the credential at the `http-fetch`
+    /// boundary so the component never holds the plaintext secret. The
+    /// `secret` is a `scheme://locator` reference resolved from the host's
+    /// environment, exactly like `env` values — secrets never enter the
+    /// replicated document.
+    #[serde(default)]
+    inject: Vec<InjectEntry>,
     #[serde(default = "default_true")]
     enabled: bool,
 }
@@ -79,6 +87,22 @@ struct RegistryEntry {
 struct EnvVar {
     key: String,
     value: String,
+}
+
+/// One injection rule in the registry document (model `Vec`, like `EnvVar`),
+/// mapped to the host's host-keyed [`InjectRule`].
+#[derive(serde::Deserialize)]
+struct InjectEntry {
+    /// Outbound host this rule applies to (must also be in `allow_hosts`).
+    host: String,
+    #[serde(default)]
+    header: Option<String>,
+    #[serde(default)]
+    bearer: bool,
+    #[serde(default)]
+    query: Option<String>,
+    /// `scheme://locator` secret reference, resolved host-side at egress.
+    secret: String,
 }
 
 fn default_true() -> bool {
@@ -181,6 +205,21 @@ pub fn parse_state(
                 Some(fed) => (Some(fed.app_remote(&entry.name)), fed.token.clone()),
                 None => (None, None),
             };
+            let inject: BTreeMap<String, InjectRule> = entry
+                .inject
+                .into_iter()
+                .map(|i| {
+                    (
+                        i.host,
+                        InjectRule {
+                            header: i.header,
+                            bearer: i.bearer,
+                            query: i.query,
+                            secret: i.secret,
+                        },
+                    )
+                })
+                .collect();
             let spec = AppSpec {
                 // Empty path in the replicated doc = "installed by URL".
                 component,
@@ -190,6 +229,7 @@ pub fn parse_state(
                 data_dir: entry.data_dir,
                 allow_hosts: entry.allow_hosts,
                 env: entry.env.into_iter().map(|e| (e.key, e.value)).collect(),
+                inject,
                 remote,
                 remote_token,
                 registry: false,
@@ -197,9 +237,14 @@ pub fn parse_state(
                 enabled: entry.enabled,
             };
             // Same gate as the file loader: exactly one component source,
-            // well-formed sha-256 — one bad install must not take down the
-            // rest of the fleet, so invalid entries are skipped, not fatal.
+            // well-formed sha-256, valid injection rules (each names one kind
+            // and targets an allowlisted host) — one bad install must not take
+            // down the rest of the fleet, so invalid entries are skipped.
             if let Err(e) = spec.component_source() {
+                tracing::warn!("{registry}: skipping entry {:?}: {e:#}", entry.name);
+                return None;
+            }
+            if let Err(e) = spec.validate_inject() {
                 tracing::warn!("{registry}: skipping entry {:?}: {e:#}", entry.name);
                 return None;
             }
@@ -284,6 +329,7 @@ mod tests {
             data_dir: None,
             allow_hosts: Vec::new(),
             env: BTreeMap::new(),
+            inject: BTreeMap::new(),
             remote: None,
             remote_token: None,
             registry,
@@ -328,6 +374,43 @@ mod tests {
         assert!(spec.enabled);
         assert!(!spec.registry, "registry entries never define registries");
         assert!(!spec.require_auth);
+    }
+
+    #[test]
+    fn parses_inject_rules_and_skips_bad_ones() {
+        let state = registry_state(json!([
+            {
+                "name": "nutrition",
+                "component": "nutrition.wasm",
+                "ui": "nutrition-ui",
+                "allow_hosts": ["api.calorieninjas.com"],
+                "inject": [
+                    { "host": "api.calorieninjas.com", "header": "X-Api-Key",
+                      "secret": "env://CALORIENINJAS_API_KEY" }
+                ]
+            },
+            // Inject targets a host NOT in allow_hosts → whole entry skipped.
+            {
+                "name": "bad-inject",
+                "component": "x.wasm",
+                "ui": "u",
+                "allow_hosts": ["api.example.com"],
+                "inject": [
+                    { "host": "evil.example.com", "header": "X", "secret": "env://K" }
+                ]
+            }
+        ]));
+        let entries = parse_state("registry", &state, None);
+        assert_eq!(entries.len(), 1, "the bad-inject entry is skipped");
+        let spec = &entries[0].spec;
+        assert_eq!(spec.inject.len(), 1);
+        let rule = &spec.inject["api.calorieninjas.com"];
+        assert_eq!(rule.header.as_deref(), Some("X-Api-Key"));
+        assert_eq!(rule.secret, "env://CALORIENINJAS_API_KEY");
+        assert_eq!(
+            rule.kind().unwrap(),
+            crate::config::InjectKind::Header("X-Api-Key".into())
+        );
     }
 
     #[test]

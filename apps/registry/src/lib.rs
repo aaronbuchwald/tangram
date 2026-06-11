@@ -54,6 +54,16 @@ pub struct AppSpec {
     /// time, so secrets stay in the host's `.env`, not in this replicated
     /// document.
     env: Vec<EnvVar>,
+    /// Egress credential-injection rules (ADR-0005, RUNTIME_PLAN Phase 10b):
+    /// per outbound host, a credential the HOST attaches to the component's
+    /// `http-fetch` requests at the egress boundary — so the component never
+    /// holds the plaintext secret. The `secret` is a `scheme://locator`
+    /// reference (e.g. `env://CALORIENINJAS_API_KEY`) resolved from the
+    /// host's environment, exactly like `env` values; the secret never enters
+    /// this replicated document. Additive field: older documents hydrate it
+    /// as an empty list.
+    #[autosurgeon(missing = "Vec::new")]
+    inject: Vec<Inject>,
     /// Disabled apps stay on record but are not run by the host.
     enabled: bool,
 }
@@ -64,6 +74,29 @@ pub struct AppSpec {
 pub struct EnvVar {
     key: String,
     value: String,
+}
+
+/// One egress credential-injection rule (`Vec`, like [`EnvVar`], for a
+/// deterministic model `Default`). The host applies the credential to
+/// outbound requests to `host` at its `http-fetch` boundary; exactly one of
+/// `header` / `bearer` / `query` selects the kind.
+#[model]
+pub struct Inject {
+    /// Outbound host this rule applies to (must also be in `allow_hosts`).
+    host: String,
+    /// Inject as this request header (e.g. `X-Api-Key`). Omitted for a
+    /// bearer/query rule.
+    #[serde(default)]
+    header: Option<String>,
+    /// Inject as `Authorization: Bearer <secret>` when true. Defaults false
+    /// so an install JSON naming only a header/query kind need not set it.
+    #[serde(default)]
+    bearer: bool,
+    /// Inject as this URL query parameter. Omitted for a header/bearer rule.
+    #[serde(default)]
+    query: Option<String>,
+    /// `scheme://locator` secret reference, resolved host-side at egress.
+    secret: String,
 }
 
 /// Same rule as the host's config validation: the name becomes a path
@@ -87,6 +120,54 @@ fn validate_env(env: &[EnvVar]) -> Result<(), String> {
         Some(_) => Err("env entries must have a non-empty key".into()),
         None => Ok(()),
     }
+}
+
+/// Each injection rule must name exactly one kind (header / bearer / query)
+/// with a non-empty secret reference, and target a host that is ALSO in
+/// `allow_hosts` — injection composes with the allowlist (ADR-0005). The host
+/// re-validates on its side, but rejecting here gives a clear error at the
+/// mutating action.
+fn validate_inject(inject: &[Inject], allow_hosts: &[String]) -> Result<(), String> {
+    for rule in inject {
+        if rule.host.trim().is_empty() {
+            return Err("inject entries must have a non-empty host".into());
+        }
+        if rule.secret.trim().is_empty() {
+            return Err(format!(
+                "inject rule for {:?}: secret must be non-empty",
+                rule.host
+            ));
+        }
+        let header = rule
+            .header
+            .as_deref()
+            .map(str::trim)
+            .filter(|h| !h.is_empty());
+        let query = rule
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
+        let kinds =
+            usize::from(header.is_some()) + usize::from(rule.bearer) + usize::from(query.is_some());
+        if kinds != 1 {
+            return Err(format!(
+                "inject rule for {:?}: set exactly one of header / bearer / query",
+                rule.host
+            ));
+        }
+        if !allow_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&rule.host))
+        {
+            return Err(format!(
+                "inject rule for {:?} targets a host not in allow_hosts (injection composes \
+                 with the allowlist — add it to allow_hosts)",
+                rule.host
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Same rule as the host's loader: exactly one component source — a local
@@ -140,8 +221,12 @@ impl Registry {
     /// outbound-network grant (exact host names; omit for no network).
     /// `env` entries with a value of the exact form `${VAR}` are expanded
     /// from the host's environment, so secrets can stay in the host's .env.
-    /// The app starts disabled=false only via `set_enabled`; new installs
-    /// are enabled and serving at /<name>/ within seconds.
+    /// `inject` declares egress credentials the HOST attaches to outbound
+    /// requests at its `http-fetch` boundary (ADR-0005) — each rule targets a
+    /// host in `allow_hosts` and references a `secret` (e.g.
+    /// `env://CALORIENINJAS_API_KEY`); the plaintext never enters the
+    /// component. The app starts disabled=false only via `set_enabled`; new
+    /// installs are enabled and serving at /<name>/ within seconds.
     #[allow(clippy::too_many_arguments)]
     pub fn install_app(
         &mut self,
@@ -153,6 +238,7 @@ impl Registry {
         data_dir: Option<String>,
         allow_hosts: Option<Vec<String>>,
         env: Option<Vec<EnvVar>>,
+        inject: Option<Vec<Inject>>,
     ) -> Result<(), String> {
         validate_name(&name)?;
         validate_component_source(&component, &component_url, &component_sha256)?;
@@ -161,6 +247,9 @@ impl Registry {
         }
         let env = env.unwrap_or_default();
         validate_env(&env)?;
+        let allow_hosts = allow_hosts.unwrap_or_default();
+        let inject = inject.unwrap_or_default();
+        validate_inject(&inject, &allow_hosts)?;
         let spec = AppSpec {
             name: name.clone(),
             component: component.unwrap_or_default(),
@@ -168,8 +257,9 @@ impl Registry {
             component_sha256,
             ui,
             data_dir,
-            allow_hosts: allow_hosts.unwrap_or_default(),
+            allow_hosts,
             env,
+            inject,
             enabled: true,
         };
         match self.apps.iter_mut().find(|a| a.name == name) {
@@ -222,7 +312,11 @@ impl Registry {
         name: String,
         allow_hosts: Vec<String>,
     ) -> Result<(), String> {
-        self.find_mut(&name)?.allow_hosts = allow_hosts;
+        let app = self.find_mut(&name)?;
+        // Injection composes with the allowlist: a new allowlist must still
+        // cover every host an injection rule targets (ADR-0005).
+        validate_inject(&app.inject, &allow_hosts)?;
+        app.allow_hosts = allow_hosts;
         Ok(())
     }
 
@@ -233,6 +327,20 @@ impl Registry {
     pub fn set_env(&mut self, name: String, env: Vec<EnvVar>) -> Result<(), String> {
         validate_env(&env)?;
         self.find_mut(&name)?.env = env;
+        Ok(())
+    }
+
+    /// Replace an installed app's egress credential-injection rules
+    /// (ADR-0005). Each rule names exactly one kind (header / bearer / query)
+    /// with a `secret` reference (e.g. `env://CALORIENINJAS_API_KEY`,
+    /// expanded from the HOST's environment) and targets a host that is also
+    /// in the app's `allow_hosts`. The host then attaches the credential at
+    /// its `http-fetch` egress boundary, so the component never holds the
+    /// plaintext secret. An empty list removes all injection.
+    pub fn set_inject(&mut self, name: String, inject: Vec<Inject>) -> Result<(), String> {
+        let app = self.find_mut(&name)?;
+        validate_inject(&inject, &app.allow_hosts)?;
+        app.inject = inject;
         Ok(())
     }
 
@@ -292,6 +400,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("install");
     }
@@ -321,6 +430,7 @@ mod tests {
             None,
             Some(vec!["api.example.com".into()]),
             None,
+            None,
         )
         .unwrap();
         let apps = reg.list_apps();
@@ -344,6 +454,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
         };
         assert!(install(&mut reg, "bad name", "c.wasm", "ui").is_err());
@@ -363,6 +474,7 @@ mod tests {
                     key: " ".into(),
                     value: "x".into()
                 }]),
+                None,
             )
             .is_err()
         );
@@ -381,6 +493,7 @@ mod tests {
                     url.map(Into::into),
                     sha.map(Into::into),
                     "apps/notes/ui".into(),
+                    None,
                     None,
                     None,
                     None,
@@ -462,5 +575,63 @@ mod tests {
         assert_eq!(app.env[0].value, "${CALORIENINJAS_API_KEY}");
         assert!(reg.set_component("ghost".into(), "x.wasm".into()).is_err());
         assert!(reg.set_component("nutrition".into(), "".into()).is_err());
+    }
+
+    fn inject_rule(host: &str) -> Inject {
+        Inject {
+            host: host.into(),
+            header: Some("X-Api-Key".into()),
+            bearer: false,
+            query: None,
+            secret: "env://CALORIENINJAS_API_KEY".into(),
+        }
+    }
+
+    #[test]
+    fn install_and_set_inject_validate_against_allow_hosts() {
+        let mut reg = Registry::default();
+        // Install with an injection rule on an allowlisted host: ok.
+        reg.install_app(
+            "nutrition".into(),
+            Some("target/nutrition.wasm".into()),
+            None,
+            None,
+            "apps/nutrition/ui".into(),
+            None,
+            Some(vec!["api.calorieninjas.com".into()]),
+            None,
+            Some(vec![inject_rule("api.calorieninjas.com")]),
+        )
+        .expect("install with inject");
+        let app = &reg.list_apps()[0];
+        assert_eq!(app.inject.len(), 1);
+        assert_eq!(app.inject[0].header.as_deref(), Some("X-Api-Key"));
+        assert_eq!(app.inject[0].secret, "env://CALORIENINJAS_API_KEY");
+
+        // Injecting to a host NOT in allow_hosts is rejected (composes with
+        // the allowlist, never bypasses it).
+        assert!(
+            reg.set_inject("nutrition".into(), vec![inject_rule("evil.example.com")])
+                .is_err()
+        );
+        // A rule with no kind, or with two kinds, is rejected.
+        let mut no_kind = inject_rule("api.calorieninjas.com");
+        no_kind.header = None;
+        assert!(reg.set_inject("nutrition".into(), vec![no_kind]).is_err());
+        let mut two_kinds = inject_rule("api.calorieninjas.com");
+        two_kinds.bearer = true;
+        assert!(reg.set_inject("nutrition".into(), vec![two_kinds]).is_err());
+
+        // Narrowing allow_hosts so it no longer covers an injected host is
+        // rejected — the rule would target a now-denied host.
+        assert!(
+            reg.set_allow_hosts("nutrition".into(), vec!["api.example.com".into()])
+                .is_err()
+        );
+        // Clearing injection first, then narrowing, is fine.
+        reg.set_inject("nutrition".into(), vec![]).unwrap();
+        reg.set_allow_hosts("nutrition".into(), vec!["api.example.com".into()])
+            .unwrap();
+        assert!(reg.list_apps()[0].inject.is_empty());
     }
 }
