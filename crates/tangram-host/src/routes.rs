@@ -27,7 +27,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::Host;
-use crate::app::{AppRuntime, DispatchError};
+use crate::app::AppRuntime;
 use crate::auth::{self, AuthGate};
 use crate::mcp::McpBridge;
 use crate::tenant::AppKey;
@@ -429,12 +429,7 @@ async fn run_action(
     match rt.dispatch(&name, args).await {
         Ok(result) => (StatusCode::OK, axum::Json(json!({ "result": result }))),
         Err(e) => {
-            let status = match &e {
-                DispatchError::Unknown(_) => StatusCode::NOT_FOUND,
-                DispatchError::BadArgs(_) => StatusCode::BAD_REQUEST,
-                DispatchError::Failed(_) => StatusCode::UNPROCESSABLE_ENTITY,
-                DispatchError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            };
+            let status = e.http_status();
             (status, axum::Json(json!({ "error": e.to_string() })))
         }
     }

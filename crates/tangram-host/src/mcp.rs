@@ -12,7 +12,7 @@ use rmcp::model::{
 };
 use rmcp::service::{RequestContext, RoleServer};
 
-use crate::app::{AppRuntime, DispatchError};
+use crate::app::{AppRuntime, DispatchError, McpErrorKind};
 
 #[derive(Clone)]
 pub struct McpBridge {
@@ -27,17 +27,31 @@ impl McpBridge {
             .actions
             .iter()
             .map(|a| {
-                let schema = match a.input_schema.clone() {
-                    serde_json::Value::Object(map) => map,
-                    _ => serde_json::Map::new(),
-                };
-                Tool::new(a.name.clone(), a.description.clone(), schema)
+                // B3: share the schema Arc — no deep clone of the JSON map.
+                Tool::new(
+                    a.name.clone(),
+                    a.description.clone(),
+                    Arc::clone(&a.input_schema),
+                )
             })
             .collect();
         Self {
             runtime,
             tools: Arc::new(tools),
         }
+    }
+}
+
+/// Map a [`DispatchError`] to the MCP protocol's two failure modes.
+/// Tool-level failures (bad args, domain errors) are returned as
+/// `CallToolResult::error` so the agent can read and recover from them —
+/// the same contract as the SDK's bridge. Unknown-tool and internal faults
+/// surface as JSON-RPC errors instead.
+fn dispatch_error_to_call_tool_result(e: DispatchError) -> Result<CallToolResult, ErrorData> {
+    match e.mcp_kind() {
+        McpErrorKind::ToolError => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        McpErrorKind::InvalidParams => Err(ErrorData::invalid_params(e.to_string(), None)),
+        McpErrorKind::InternalError => Err(ErrorData::internal_error(e.to_string(), None)),
     }
 }
 
@@ -76,18 +90,7 @@ impl ServerHandler for McpBridge {
                     serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
-            // Tool-level failures (bad args, domain errors) are reported as
-            // tool results so the agent can read and recover from them —
-            // same mapping as the SDK's bridge.
-            Err(e @ (DispatchError::BadArgs(_) | DispatchError::Failed(_))) => {
-                Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
-            }
-            Err(e @ DispatchError::Unknown(_)) => {
-                Err(ErrorData::invalid_params(e.to_string(), None))
-            }
-            Err(e @ DispatchError::Internal(_)) => {
-                Err(ErrorData::internal_error(e.to_string(), None))
-            }
+            Err(e) => dispatch_error_to_call_tool_result(e),
         }
     }
 }
