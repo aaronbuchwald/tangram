@@ -19,7 +19,10 @@ export interface VaultState {
 
 export interface FleetApp {
   name: string;
-  source: string;
+  // "file" = a bootstrap app from apps.toml (host-owned, not managed here);
+  // "registry" = installed via the registry app, so the shell can
+  // enable/disable/remove it through the registry's bearer-gated actions.
+  source: "file" | "registry";
   registry: boolean;
   require_auth: boolean;
   enabled: boolean;

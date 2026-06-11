@@ -116,6 +116,29 @@ body {
   padding: 0 4px;
 }
 
+/* app management controls (enable/disable, remove) — revealed on hover so the
+   list stays calm at rest, matching the vault row delete affordance */
+.app-row .label { cursor: pointer; }
+.app-ctls { display: none; align-items: center; gap: 2px; margin-left: auto; }
+.app-row:hover .app-ctls { display: flex; }
+.app-ctls .ctl {
+  background: transparent; border: 0; color: var(--faint);
+  font: 600 9px/1 var(--sans); letter-spacing: 0.1em; text-transform: uppercase;
+  cursor: pointer; padding: 2px 4px; border-radius: 4px;
+}
+.app-ctls .ctl:hover { color: var(--text); background: var(--panel-2); }
+.app-ctls .ctl.danger:hover { color: var(--red); }
+
+/* auth token row in the APPS section — the bearer the registry actions need */
+.manage { padding: 8px 8px 2px; }
+.tokenrow { display: grid; gap: 5px; }
+.tokenrow input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--text); font: 11px/1 var(--mono); padding: 6px 8px;
+}
+.tokenrow input::placeholder { color: var(--faint); font-family: var(--sans); }
+.tokenrow input:focus { outline: none; border-color: var(--blue); }
+
 /* ── main ── */
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabstrip {

@@ -14,6 +14,7 @@ import {
 } from "./api";
 import { MdEditor } from "./editor";
 import { renderMarkdown } from "./markdown";
+import { authToken, registry, setAuthToken } from "./manage";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -58,8 +59,20 @@ root.innerHTML = `
           <div class="tree" id="tree"></div>
         </section>
         <section class="side-section">
-          <div class="side-head"><span class="micro">Apps</span></div>
+          <div class="side-head">
+            <span class="micro">Apps</span>
+            <div class="side-actions">
+              <button class="ghost" id="open-marketplace" title="Browse the marketplace">+ install</button>
+            </div>
+          </div>
           <div class="applist" id="applist"></div>
+          <div class="manage" id="manage">
+            <div class="tokenrow">
+              <span class="micro">Auth token</span>
+              <input id="token" type="password" autocomplete="off"
+                     placeholder="TANGRAM_AUTH_TOKEN — required to manage apps" />
+            </div>
+          </div>
         </section>
       </aside>
       <main class="main">
@@ -76,9 +89,22 @@ const tabstripEl = document.getElementById("tabstrip")!;
 const contentEl = document.getElementById("content")!;
 const liveDot = document.getElementById("live-dot")!;
 const liveLabel = document.getElementById("live-label")!;
+const tokenInput = document.getElementById("token") as HTMLInputElement;
 
 document.getElementById("new-note")!.addEventListener("click", () => void newNote(""));
 document.getElementById("new-folder")!.addEventListener("click", () => void newFolder(""));
+
+// "+ install" / browse marketplace: the marketplace is itself an app, so the
+// sidebar's job is just the entry point — open it in a tab (Decision E). The
+// per-listing install flow lives in the marketplace app; we don't reimplement.
+document
+  .getElementById("open-marketplace")!
+  .addEventListener("click", () => tabs.openApp("marketplace"));
+
+// The bearer token is shared with the registry/marketplace UIs via the same
+// localStorage slot; mutating registry actions are gated on it host-side.
+tokenInput.value = authToken();
+tokenInput.addEventListener("change", () => setAuthToken(tokenInput.value));
 
 // ── sidebar: vault tree ──────────────────────────────────────────────────────
 
@@ -167,10 +193,49 @@ function renderApps() {
     const dot = el("span", `dot ${statusClass(app)}`);
     if (app.error) dot.title = app.error;
     row.appendChild(dot);
-    row.appendChild(el("span", "label", app.name));
+    const label = el("span", "label", app.name);
+    label.addEventListener("click", () => tabs.openApp(app.name));
+    row.appendChild(label);
     if (app.name === "tangram") row.appendChild(el("span", "tag", "shell"));
-    row.addEventListener("click", () => tabs.openApp(app.name));
+
+    // Management controls (Phase S2c): only registry-managed apps
+    // (source === "registry") can be toggled/removed — apps.toml bootstrap
+    // apps are host-owned and not in the registry's replicated doc, so the
+    // registry actions can't act on them (mirrors the standalone registry UI,
+    // which lists only registry-doc apps).
+    if (app.source === "registry") {
+      const ctls = el("div", "app-ctls");
+      const toggle = el("button", "ctl", app.enabled ? "disable" : "enable");
+      toggle.title = app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`;
+      toggle.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void manageApp(() => registry.setEnabled(app.name, !app.enabled));
+      });
+      ctls.appendChild(toggle);
+      const remove = el("button", "ctl danger", "remove");
+      remove.title = `Remove ${app.name}`;
+      remove.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`Remove ${app.name} from the fleet?`)) return;
+        void manageApp(() => registry.removeApp(app.name));
+      });
+      ctls.appendChild(remove);
+      row.appendChild(ctls);
+    }
     applistEl.appendChild(row);
+  }
+}
+
+// Run a registry mutation, then refresh the fleet so the change reflects in
+// the sidebar (and /api/fleet) without waiting for the 5s poll. Errors (most
+// commonly a missing/invalid token → 401) surface as an alert.
+async function manageApp(action: () => Promise<unknown>) {
+  try {
+    await action();
+    // The host converges in a beat; give it a moment, then refresh.
+    window.setTimeout(() => void refreshFleet(), 800);
+  } catch (e) {
+    window.alert(String(e instanceof Error ? e.message : e));
   }
 }
 
