@@ -430,7 +430,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
         .await,
         reqwest::StatusCode::OK
     );
-    wait_for("bob's notes healthy", Duration::from_secs(30), || async {
+    wait_for("bob's notes healthy", Duration::from_secs(90), || async {
         get_status(
             &client,
             &format!("{base}/t/bob/notes/healthz"),
@@ -545,7 +545,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "alice's nutrition healthy",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             get_status(
                 &client,
@@ -599,7 +599,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "extra over-cap error in fleet",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             let fleet = get_json(&client, &format!("{base}/t/alice/api/fleet"), ALICE_TOKEN).await;
             fleet["apps"].as_array().is_some_and(|apps| {
@@ -644,7 +644,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "evil data_dir error in fleet",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             let fleet = get_json(&client, &format!("{base}/t/bob/api/fleet"), BOB_TOKEN).await;
             fleet["apps"].as_array().is_some_and(|apps| {

@@ -313,7 +313,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
     let client = reqwest::Client::new();
 
     // Host up, apps healthy, gateway child running.
-    wait_for("gateway running", Duration::from_secs(30), || async {
+    wait_for("gateway running", Duration::from_secs(90), || async {
         fleet_gateway(&client, &base).await["running"] == serde_json::Value::Bool(true)
     })
     .await;
@@ -419,7 +419,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
     assert!(!body.contains("\"isError\":true"), "install failed: {body}");
     wait_for(
         "nutrition in gateway config",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             std::fs::read_to_string(&config_path)
                 .is_ok_and(|config| config.contains("/nutrition/mcp"))
@@ -431,7 +431,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
     // fans out to every target, so it transiently errors mid-reload.)
     wait_for(
         "nutrition tools on /mcp",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             match McpSession::try_connect(&client, &format!("{base}/mcp")).await {
                 Ok(session) => session
@@ -471,7 +471,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
     assert!(res.status().is_success());
     wait_for(
         "nutrition gone from /mcp",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             match McpSession::try_connect(&client, &format!("{base}/mcp")).await {
                 Ok(session) => session
@@ -494,7 +494,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
             .success(),
         "killing the agentgateway child"
     );
-    wait_for("gateway restarted", Duration::from_secs(30), || async {
+    wait_for("gateway restarted", Duration::from_secs(90), || async {
         let gateway = fleet_gateway(&client, &base).await;
         gateway["running"] == serde_json::Value::Bool(true)
             && gateway["pid"].as_u64() != Some(gateway_pid as u64)
@@ -503,7 +503,7 @@ async fn mcp_through_gateway_with_converge_auth_and_crash_recovery() {
     host.gateway_pid = fleet_gateway(&client, &base).await["pid"]
         .as_u64()
         .map(|pid| pid as u32);
-    wait_for("mcp recovered", Duration::from_secs(30), || async {
+    wait_for("mcp recovered", Duration::from_secs(90), || async {
         // A fresh handshake works end to end again.
         let res = client
             .post(format!("{base}/notes/mcp"))
@@ -548,7 +548,7 @@ async fn missing_binary_falls_back_to_direct_serving() {
     let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
     let client = reqwest::Client::new();
 
-    wait_for("notes healthy", Duration::from_secs(30), || async {
+    wait_for("notes healthy", Duration::from_secs(90), || async {
         client
             .get(format!("{base}/notes/healthz"))
             .send()

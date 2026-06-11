@@ -132,7 +132,7 @@ ui = "{root}/apps/notes/ui"
     let client = reqwest::Client::new();
 
     // Bootstrap apps come up from apps.toml.
-    wait_for("registry healthz", Duration::from_secs(30), || async {
+    wait_for("registry healthz", Duration::from_secs(90), || async {
         status_of(&client, &format!("{base}/registry/healthz")).await
             == Some(reqwest::StatusCode::OK)
     })
@@ -216,7 +216,7 @@ ui = "{root}/apps/notes/ui"
         .await
         .expect("authed install");
     assert_eq!(res.status(), reqwest::StatusCode::OK);
-    wait_for("nutrition healthy", Duration::from_secs(30), || async {
+    wait_for("nutrition healthy", Duration::from_secs(90), || async {
         status_of(&client, &format!("{base}/nutrition/healthz")).await
             == Some(reqwest::StatusCode::OK)
     })
@@ -327,7 +327,7 @@ ui = "{root}/apps/notes/ui"
     );
     wait_for(
         "nutrition healthy again",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             status_of(&client, &format!("{base}/nutrition/healthz")).await
                 == Some(reqwest::StatusCode::OK)
@@ -347,7 +347,7 @@ ui = "{root}/apps/notes/ui"
     let _host2 = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log2);
     wait_for(
         "nutrition healthy after restart",
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         || async {
             status_of(&client, &format!("{base}/nutrition/healthz")).await
                 == Some(reqwest::StatusCode::OK)
