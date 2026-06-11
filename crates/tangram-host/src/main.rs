@@ -32,6 +32,7 @@ mod mcp;
 mod registry;
 mod routes;
 mod runtime;
+mod secrets;
 mod tenant;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -94,6 +95,10 @@ pub struct Host {
     /// Downloads + verifies `component_url` artifacts into the immutable
     /// content-addressed cache (Phase 8 install-from-URL).
     pub fetcher: fetch::Fetcher,
+    /// The secret-resolution seam (ADR-0004 Phase 10a): scheme → resolver.
+    /// Phase 10a registers exactly one — `env://` — and resolves every spec
+    /// secret reference (`${VAR}` sugar included) through it at converge.
+    pub secrets: secrets::SecretRegistry,
 }
 
 /// The bootstrap ("file") layer of one tenant's desired state: the explicit
@@ -158,7 +163,7 @@ impl Host {
         let data_root = config.tenants.resolved_data_root();
         let mut tokens: BTreeMap<String, String> = BTreeMap::new();
         for (name, spec) in &config.tenants.tenants {
-            match spec.resolved_token(name) {
+            match spec.resolved_token(&self.secrets, name).await {
                 Some(token) => {
                     tokens.insert(name.clone(), token);
                 }
@@ -480,7 +485,8 @@ impl Host {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        match AppRuntime::build(&self.engine, &key.app, spec, &component_path).await {
+        match AppRuntime::build(&self.engine, &self.secrets, &key.app, spec, &component_path).await
+        {
             Ok(runtime) => {
                 let gate_token = gate_token.filter(|_| spec.registry || spec.require_auth);
                 let mut entry = AppEntry::new(runtime, gate_token);
@@ -627,6 +633,7 @@ async fn main() -> anyhow::Result<()> {
         nudge: Arc::new(Notify::new()),
         gateway: mcp_gateway,
         fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
+        secrets: secrets::SecretRegistry::default(),
     });
     host.converge().await;
 

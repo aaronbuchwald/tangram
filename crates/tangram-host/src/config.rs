@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
+use crate::secrets::{SecretRegistry, resolve_value};
+
 /// One app's spec: which component to run, what UI to serve, and what the
 /// component is granted (data dir, outbound hosts, environment).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -43,8 +45,11 @@ pub struct AppSpec {
     pub allow_hosts: Vec<String>,
     /// Environment variables handed to the component (e.g.
     /// NUTRITION_STRATEGY, CALORIENINJAS_API_KEY). A value of the exact form
-    /// `${VAR}` is expanded from the HOST's environment at converge time, so
-    /// secrets can stay in `.env` instead of `apps.toml`.
+    /// `${VAR}` is sugar for the secret reference `env://VAR`, resolved from
+    /// the HOST's environment at converge time through the secret-resolver
+    /// seam (ADR-0004, [`crate::secrets`]), so secrets stay in `.env` instead
+    /// of `apps.toml`. The `scheme://locator` reference family is the
+    /// extension point; Phase 10a ships only `env://`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Optional sync base of a peer to replicate with (the host dials out,
@@ -100,18 +105,15 @@ pub fn validate_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Expand one config value: the exact form `${VAR}` is replaced from the
-/// HOST's environment (missing host vars expand to empty, with a warning);
-/// anything else passes through as-is. Shared by app `env`, `remote_token`,
-/// and tenant `token` values, so secrets can stay in `.env`.
-pub fn expand_value(context: &str, value: &str) -> String {
-    match value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
-        Some(var) => std::env::var(var).unwrap_or_else(|_| {
-            tracing::warn!("{context}: references unset host var ${{{var}}}");
-            String::new()
-        }),
-        None => value.to_string(),
-    }
+/// Expand one config value through the secret-resolution seam (ADR-0004): the
+/// exact form `${VAR}` is sugar for `env://VAR` and the `scheme://…` family of
+/// references resolve through the [`SecretRegistry`]; anything else passes
+/// through as-is. A reference that fails to resolve (e.g. an unset host var)
+/// expands to empty with a warning — byte-identical to the pre-seam `${VAR}`
+/// behavior. Shared by app `env`, `remote_token`, and tenant `token` values,
+/// so secrets can stay in `.env`. The resolved value is never logged.
+pub async fn expand_value(registry: &SecretRegistry, context: &str, value: &str) -> String {
+    resolve_value(registry, context, value).await
 }
 
 /// Where an app's component bytes come from: a local path, or a URL whose
@@ -177,24 +179,30 @@ impl AppSpec {
         }
     }
 
-    /// The app's resolved env, with `${VAR}` values expanded from the host
-    /// environment (missing host vars expand to empty, with a warning).
-    pub fn resolved_env(&self, app: &str) -> Vec<(String, String)> {
-        self.env
-            .iter()
-            .map(|(key, value)| {
-                let resolved = expand_value(&format!("{app}: env {key}"), value);
-                (key.clone(), resolved)
-            })
-            .collect()
+    /// The app's resolved env, with each value resolved through the secret
+    /// seam (`${VAR}` sugar for `env://VAR`; unresolved → empty + warning).
+    pub async fn resolved_env(
+        &self,
+        registry: &SecretRegistry,
+        app: &str,
+    ) -> Vec<(String, String)> {
+        let mut resolved = Vec::with_capacity(self.env.len());
+        for (key, value) in &self.env {
+            let value = expand_value(registry, &format!("{app}: env {key}"), value).await;
+            resolved.push((key.clone(), value));
+        }
+        resolved
     }
 
-    /// The resolved `remote_token` (with `${VAR}` expansion); empty → None.
-    pub fn resolved_remote_token(&self, app: &str) -> Option<String> {
-        self.remote_token
-            .as_deref()
-            .map(|t| expand_value(&format!("{app}: remote_token"), t))
-            .filter(|t| !t.trim().is_empty())
+    /// The resolved `remote_token` (through the secret seam); empty → None.
+    pub async fn resolved_remote_token(
+        &self,
+        registry: &SecretRegistry,
+        app: &str,
+    ) -> Option<String> {
+        let token = self.remote_token.as_deref()?;
+        let token = expand_value(registry, &format!("{app}: remote_token"), token).await;
+        (!token.trim().is_empty()).then_some(token)
     }
 
     /// The app's data directory: explicit `data_dir`, else `$HOME/.<name>`
@@ -239,10 +247,10 @@ fn default_max_apps() -> usize {
 }
 
 impl TenantSpec {
-    /// The resolved bearer token (with `${VAR}` expansion); empty → None,
+    /// The resolved bearer token (through the secret seam); empty → None,
     /// which disables the tenant rather than running it open.
-    pub fn resolved_token(&self, tenant: &str) -> Option<String> {
-        let token = expand_value(&format!("tenant {tenant}: token"), &self.token);
+    pub async fn resolved_token(&self, registry: &SecretRegistry, tenant: &str) -> Option<String> {
+        let token = expand_value(registry, &format!("tenant {tenant}: token"), &self.token).await;
         (!token.trim().is_empty()).then_some(token)
     }
 }
@@ -432,8 +440,9 @@ mod tests {
         token = "literal-bob-token"
     "#;
 
-    #[test]
-    fn parses_tenants_alongside_apps() {
+    #[tokio::test]
+    async fn parses_tenants_alongside_apps() {
+        let registry = SecretRegistry::default();
         let config = HostConfig::parse(TENANTED).unwrap();
         assert_eq!(
             config.tenants.data_root,
@@ -461,16 +470,19 @@ mod tests {
 
         // Token resolution: ${VAR} expands; unset → None (tenant disabled).
         assert_eq!(
-            bob.resolved_token("bob").as_deref(),
+            bob.resolved_token(&registry, "bob").await.as_deref(),
             Some("literal-bob-token")
         );
         // Safety: test-local var name, nothing else reads it concurrently.
         unsafe { std::env::set_var("TANGRAM_TEST_ALICE_TOKEN_SET", "s3cret") };
         let mut alice2 = alice.clone();
         alice2.token = "${TANGRAM_TEST_ALICE_TOKEN_SET}".into();
-        assert_eq!(alice2.resolved_token("alice").as_deref(), Some("s3cret"));
+        assert_eq!(
+            alice2.resolved_token(&registry, "alice").await.as_deref(),
+            Some("s3cret")
+        );
         alice2.token = "${TANGRAM_TEST_ALICE_TOKEN_UNSET}".into();
-        assert_eq!(alice2.resolved_token("alice"), None);
+        assert_eq!(alice2.resolved_token(&registry, "alice").await, None);
 
         // No [tenants] section → empty map, single-tenant mode.
         let config = HostConfig::parse("[apps.a]\ncomponent = \"c\"\nui = \"u\"").unwrap();
@@ -596,8 +608,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn env_passthrough_expands_host_vars() {
+    #[tokio::test]
+    async fn env_passthrough_expands_host_vars() {
+        let registry = SecretRegistry::default();
         let config = HostConfig::parse(
             r#"
             [apps.app]
@@ -611,7 +624,7 @@ mod tests {
         .unwrap();
         // Safety: test-local var name, nothing else reads it concurrently.
         unsafe { std::env::set_var("TANGRAM_TEST_EXPANSION_VAR", "secret-value") };
-        let env = config.apps["app"].resolved_env("app");
+        let env = config.apps["app"].resolved_env(&registry, "app").await;
         assert!(env.contains(&("LITERAL".into(), "as-is".into())));
         assert!(env.contains(&("EXPANDED".into(), "secret-value".into())));
     }
