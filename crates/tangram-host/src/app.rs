@@ -177,13 +177,24 @@ impl AppRuntime {
             .map_err(|e| DispatchError::Internal(format!("internal error: bad result JSON: {e}")))
     }
 
-    /// The current state as JSON, rendered by the component.
-    pub async fn state_json(&self) -> Value {
+    /// The current state as JSON text, exactly as the component rendered it.
+    /// Served verbatim (after a syntax-only `RawValue` validation) rather than
+    /// parsed into a `Value` and re-serialized: even with serde_json's
+    /// `float_roundtrip` feature the round trip is wasted work, and without it
+    /// the reparse was lossy by 1 ULP (printed 30.599999999999998 as 30.6),
+    /// making replica convergence checks report false mismatches.
+    pub async fn state_json(&self) -> String {
         let doc_bytes = self.doc.save();
         match self.component.state_json(&doc_bytes).await {
-            Ok(json) => serde_json::from_str(&json)
-                .unwrap_or_else(|e| serde_json::json!({ "error": format!("bad state JSON: {e}") })),
-            Err(e) => serde_json::json!({ "error": format!("state-json failed: {e:#}") }),
+            Ok(json) => match serde_json::from_str::<&serde_json::value::RawValue>(&json) {
+                Ok(_) => json,
+                Err(e) => {
+                    serde_json::json!({ "error": format!("bad state JSON: {e}") }).to_string()
+                }
+            },
+            Err(e) => {
+                serde_json::json!({ "error": format!("state-json failed: {e:#}") }).to_string()
+            }
         }
     }
 }

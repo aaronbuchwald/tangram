@@ -120,8 +120,12 @@ async fn dispatch_app(State(host): State<Arc<Host>>, mut req: Request) -> Respon
 
 // ── per-app handlers (the SDK's derived surface, component-backed) ──────────
 
-async fn state(State(rt): State<Arc<AppRuntime>>) -> axum::Json<serde_json::Value> {
-    axum::Json(rt.state_json().await)
+async fn state(State(rt): State<Arc<AppRuntime>>) -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        rt.state_json().await,
+    )
+        .into_response()
 }
 
 /// The app's capabilities object from its `describe()` manifest (computed by
@@ -179,11 +183,7 @@ async fn events(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = WatchStream::new(rt.doc.subscribe()).then(move |_| {
         let rt = rt.clone();
-        async move {
-            Ok(Event::default()
-                .event("state")
-                .data(rt.state_json().await.to_string()))
-        }
+        async move { Ok(Event::default().event("state").data(rt.state_json().await)) }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
