@@ -59,6 +59,11 @@ cargo run -p tangram-shell                                # run all apps, one po
   probes, static assets). The store lock is never held across an await.
 - Model `Default` must be deterministic — it becomes the shared genesis
   commit. Use `Vec`, not `HashMap`.
+- Adding a field to an existing model: it must be `Option<T>` AND carry
+  `#[autosurgeon(missing = "Option::default")]` — the derived `Hydrate`
+  errors on the key missing from older documents without the attribute
+  (discovered when `updated_at_ms` was added to notes; see `Note` in
+  `apps/notes/src/lib.rs` for the pattern).
 - UI fetches use relative paths only: apps get prefix-mounted under the shell
   (`/notes/`, `/nutrition/`).
 - Never commit secrets; they belong in `.env` (gitignored).

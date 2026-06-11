@@ -16,9 +16,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # wasm32-wasip2: the tangram-host capabilities test builds and
+          # runs the notes/nutrition WASM components.
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: bash -n .agents/skills/local-replica/replica.sh .agents/skills/systemd-service/service.sh
       - run: cargo test
       - run: cargo build --release
 

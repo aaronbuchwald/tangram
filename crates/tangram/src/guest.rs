@@ -70,8 +70,21 @@ fn init() {
 }
 
 /// `describe()` export: the app manifest the host derives its routes and MCP
-/// tools from — name, MCP instructions, and the full action registry.
-pub fn describe<M: Model + Actions>(name: &str, instructions: &str) -> String {
+/// tools from — name, MCP instructions, the full action registry, and an
+/// optional `capabilities` object.
+///
+/// `capabilities` runs at instantiation (the host calls `describe()` once
+/// per instance) so an app can compute it from its granted environment —
+/// e.g. nutrition reports its active strategy exactly as its native
+/// `GET /api/capabilities` route does. `None` omits the key entirely: the
+/// host then serves no `/api/capabilities` route for the app (404), matching
+/// a native app without the custom probe.
+pub fn describe<M: Model + Actions>(
+    name: &str,
+    instructions: &str,
+    capabilities: impl FnOnce() -> Option<serde_json::Value>,
+) -> String {
+    init();
     let actions: Vec<_> = M::actions()
         .iter()
         .map(|a| {
@@ -83,12 +96,15 @@ pub fn describe<M: Model + Actions>(name: &str, instructions: &str) -> String {
             })
         })
         .collect();
-    json!({
+    let mut manifest = json!({
         "name": name,
         "instructions": instructions,
         "actions": actions,
-    })
-    .to_string()
+    });
+    if let Some(caps) = capabilities() {
+        manifest["capabilities"] = caps;
+    }
+    manifest.to_string()
 }
 
 /// `genesis()` export: the deterministic genesis bytes — same function the
@@ -138,14 +154,36 @@ pub fn state_json<M: Model + Actions>(doc: Vec<u8>) -> String {
 /// ```ignore
 /// tangram::export_component!(Notes { name: "notes", instructions: "..." });
 /// ```
+///
+/// An optional `capabilities` field (any expression callable as
+/// `FnOnce() -> Option<serde_json::Value>`) lets the app publish a
+/// capabilities object in its `describe()` manifest, computed from its
+/// granted environment at instantiation; the host serves it at
+/// `GET /<app>/api/capabilities`:
+///
+/// ```ignore
+/// tangram::export_component!(Nutrition {
+///     name: "nutrition",
+///     instructions: "...",
+///     capabilities: || Some(serde_json::json!({ "description_input": true })),
+/// });
+/// ```
 #[macro_export]
 macro_rules! export_component {
     ($model:ty { name: $name:expr, instructions: $instructions:expr $(,)? }) => {
+        $crate::export_component!($model {
+            name: $name,
+            instructions: $instructions,
+            capabilities: || ::std::option::Option::None,
+        });
+    };
+    ($model:ty { name: $name:expr, instructions: $instructions:expr,
+                 capabilities: $capabilities:expr $(,)? }) => {
         const _: () = {
             struct TangramComponent;
             impl $crate::guest::wit::exports::tangram::app::guest::Guest for TangramComponent {
                 fn describe() -> ::std::string::String {
-                    $crate::guest::describe::<$model>($name, $instructions)
+                    $crate::guest::describe::<$model>($name, $instructions, $capabilities)
                 }
                 fn genesis() -> ::std::vec::Vec<u8> {
                     $crate::guest::genesis::<$model>()

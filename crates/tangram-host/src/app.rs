@@ -20,6 +20,12 @@ pub struct Describe {
     #[serde(default)]
     pub instructions: Option<String>,
     pub actions: Vec<ActionInfo>,
+    /// Optional capabilities object, computed by the app at instantiation
+    /// (e.g. nutrition's active-strategy probe); served verbatim at
+    /// `GET /<app>/api/capabilities`. `None` = the app publishes no
+    /// capabilities and the route 404s, like a native app without the probe.
+    #[serde(default)]
+    pub capabilities: Option<Value>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
