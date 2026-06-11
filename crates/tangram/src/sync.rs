@@ -69,27 +69,6 @@ impl<M: Model + Actions> DocHandle for Store<M> {
     }
 }
 
-/// Adapts any [`DocHandle`] to the portable [`tangram_core::sync::SyncDoc`]
-/// seam (the native trait additionally carries `subscribe`, which the
-/// portable exchange logic doesn't need).
-struct AsSyncDoc<'a, D: ?Sized>(&'a D);
-
-impl<D: DocHandle + ?Sized> tangram_core::sync::SyncDoc for AsSyncDoc<'_, D> {
-    fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
-        self.0.generate_sync(state)
-    }
-    fn receive_sync(
-        &self,
-        state: &mut automerge::sync::State,
-        bytes: &[u8],
-    ) -> anyhow::Result<bool> {
-        self.0.receive_sync(state, bytes)
-    }
-    fn bump(&self) {
-        self.0.bump()
-    }
-}
-
 // ── server side ──────────────────────────────────────────────────────────────
 
 /// Handle one `POST /sync`: apply the client's message (if any), then return
@@ -100,7 +79,27 @@ pub fn handle_post<D: DocHandle + ?Sized>(
     session_id: &str,
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    tangram_core::sync::handle_post(&AsSyncDoc(store), sessions, session_id, body)
+    // `DocHandle` is a strict superset of `tangram_core::sync::SyncDoc`
+    // (it adds `subscribe`).  Rust's orphan rules prevent a blanket
+    // `impl SyncDoc for D: DocHandle`, so we use a local wrapper only at
+    // this single call site rather than a free-floating private adapter.
+    struct W<'a, D: ?Sized>(&'a D);
+    impl<D: DocHandle + ?Sized> tangram_core::sync::SyncDoc for W<'_, D> {
+        fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
+            self.0.generate_sync(state)
+        }
+        fn receive_sync(
+            &self,
+            state: &mut automerge::sync::State,
+            bytes: &[u8],
+        ) -> anyhow::Result<bool> {
+            self.0.receive_sync(state, bytes)
+        }
+        fn bump(&self) {
+            self.0.bump()
+        }
+    }
+    tangram_core::sync::handle_post(&W(store), sessions, session_id, body)
 }
 
 // ── client side ──────────────────────────────────────────────────────────────
