@@ -2547,6 +2547,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tangram",
  "tempfile",
  "tokio",
@@ -2567,6 +2568,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tangram-marketplace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "tangram",
+ "tokio",
 ]
 
 [[package]]

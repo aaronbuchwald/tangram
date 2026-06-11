@@ -15,8 +15,21 @@ use anyhow::Context;
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppSpec {
-    /// Path to the compiled `wasm32-wasip2` component.
-    pub component: PathBuf,
+    /// Path to the compiled `wasm32-wasip2` component on the host
+    /// filesystem. Exactly one of `component` / `component_url` is required.
+    #[serde(default)]
+    pub component: Option<PathBuf>,
+    /// Install-from-URL alternative to `component` (Phase 8): the host
+    /// downloads the artifact, verifies `component_sha256` BEFORE
+    /// instantiation, and caches it immutably under the host data root
+    /// keyed by hash — re-converging with the same hash never refetches.
+    #[serde(default)]
+    pub component_url: Option<String>,
+    /// REQUIRED with `component_url`: hex sha-256 of the artifact. A
+    /// mismatch is a converge error (visible in the fleet status) and the
+    /// app does not run.
+    #[serde(default)]
+    pub component_sha256: Option<String>,
     /// Directory of static UI files served at `/<app>/`.
     pub ui: PathBuf,
     /// Where the app's document lives. Default: `$HOME/.<app-name>` — and the
@@ -101,7 +114,69 @@ pub fn expand_value(context: &str, value: &str) -> String {
     }
 }
 
+/// Where an app's component bytes come from: a local path, or a URL whose
+/// artifact must hash to the pinned sha-256 (Phase 8 install-from-URL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentSource {
+    Path(PathBuf),
+    Url { url: String, sha256: String },
+}
+
+/// `component_sha256` format check: exactly 64 hex characters. Returns the
+/// lowercased digest so cache keys are canonical.
+pub fn validate_sha256(digest: &str) -> anyhow::Result<String> {
+    let digest = digest.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+        "component_sha256 must be 64 hex characters (a sha-256 digest), got {digest:?}"
+    );
+    Ok(digest)
+}
+
 impl AppSpec {
+    /// Validate and classify the spec's component source: exactly one of
+    /// `component` (local path) and `component_url` (+ a well-formed
+    /// `component_sha256`) must be set. Shared by the file loader, the
+    /// registry-entry parser, and the converge loop.
+    pub fn component_source(&self) -> anyhow::Result<ComponentSource> {
+        match (&self.component, &self.component_url) {
+            (Some(path), None) => {
+                anyhow::ensure!(
+                    self.component_sha256.is_none(),
+                    "component_sha256 is only valid with component_url \
+                     (local component paths are not hash-verified)"
+                );
+                anyhow::ensure!(
+                    !path.as_os_str().is_empty(),
+                    "component must be a non-empty path"
+                );
+                Ok(ComponentSource::Path(path.clone()))
+            }
+            (None, Some(url)) => {
+                anyhow::ensure!(
+                    url.starts_with("https://") || url.starts_with("http://"),
+                    "component_url must be http(s), got {url:?}"
+                );
+                let digest = self.component_sha256.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "component_url requires component_sha256 (the artifact is \
+                         verified before instantiation)"
+                    )
+                })?;
+                Ok(ComponentSource::Url {
+                    url: url.clone(),
+                    sha256: validate_sha256(digest)?,
+                })
+            }
+            (Some(_), Some(_)) => anyhow::bail!(
+                "set exactly one of component (local path) and component_url, not both"
+            ),
+            (None, None) => {
+                anyhow::bail!("set exactly one of component (local path) and component_url")
+            }
+        }
+    }
+
     /// The app's resolved env, with `${VAR}` values expanded from the host
     /// environment (missing host vars expand to empty, with a warning).
     pub fn resolved_env(&self, app: &str) -> Vec<(String, String)> {
@@ -221,8 +296,11 @@ impl HostConfig {
 
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let config: Self = toml::from_str(text)?;
-        for name in config.apps.keys() {
+        for (name, spec) in &config.apps {
             validate_name(name)?;
+            spec.component_source()
+                .map(|_| ())
+                .with_context(|| format!("app {name:?}"))?;
         }
         for (tenant, spec) in &config.tenants.tenants {
             validate_name(tenant).with_context(|| format!("tenant name {tenant:?}"))?;
@@ -233,6 +311,10 @@ impl HostConfig {
             );
             for (app, app_spec) in &spec.apps {
                 validate_name(app).with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
+                app_spec
+                    .component_source()
+                    .map(|_| ())
+                    .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 if let Some(dir) = &app_spec.data_dir {
                     crate::tenant::validate_tenant_data_dir(dir).with_context(|| {
                         format!("tenant {tenant:?} app {app:?}: data_dir {}", dir.display())
@@ -368,7 +450,10 @@ mod tests {
             alice.allow_hosts_ceiling,
             Some(vec!["api.calorieninjas.com".to_string()])
         );
-        assert_eq!(alice.apps["notes"].component, PathBuf::from("notes.wasm"));
+        assert_eq!(
+            alice.apps["notes"].component,
+            Some(PathBuf::from("notes.wasm"))
+        );
         let bob = &config.tenants.tenants["bob"];
         assert_eq!(bob.max_apps, 8, "max_apps defaults to 8");
         assert_eq!(bob.allow_hosts_ceiling, None);
@@ -424,6 +509,91 @@ mod tests {
         // Default bootstrap (no apps) requires a registry app in the file.
         let err = HostConfig::parse("[tenants.alice]\ntoken = \"x\"").unwrap_err();
         assert!(format!("{err:#}").contains("registry"), "{err:#}");
+    }
+
+    const GOOD_SHA: &str = "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3";
+
+    #[test]
+    fn component_source_requires_exactly_one_of_path_and_url() {
+        // Local path: ok, and sha256 alongside it is rejected.
+        let config = HostConfig::parse("[apps.a]\ncomponent = \"a.wasm\"\nui = \"u\"").unwrap();
+        assert_eq!(
+            config.apps["a"].component_source().unwrap(),
+            ComponentSource::Path(PathBuf::from("a.wasm"))
+        );
+        let err = HostConfig::parse(&format!(
+            "[apps.a]\ncomponent = \"a.wasm\"\ncomponent_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("component_url"), "{err:#}");
+
+        // URL + sha256: ok (the digest is canonicalized to lowercase).
+        let config = HostConfig::parse(&format!(
+            "[apps.a]\ncomponent_url = \"https://x.test/a.wasm\"\n\
+             component_sha256 = \"{}\"\nui = \"u\"",
+            GOOD_SHA.to_ascii_uppercase()
+        ))
+        .unwrap();
+        assert_eq!(
+            config.apps["a"].component_source().unwrap(),
+            ComponentSource::Url {
+                url: "https://x.test/a.wasm".into(),
+                sha256: GOOD_SHA.into()
+            }
+        );
+
+        // URL without sha256, both sources, neither source, bad scheme: all
+        // parse errors (the whole file is rejected, like other bad specs).
+        for (toml, needle) in [
+            (
+                "[apps.a]\ncomponent_url = \"https://x.test/a.wasm\"\nui = \"u\"".to_string(),
+                "requires component_sha256",
+            ),
+            (
+                format!(
+                    "[apps.a]\ncomponent = \"a.wasm\"\n\
+                     component_url = \"https://x.test/a.wasm\"\n\
+                     component_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
+                ),
+                "not both",
+            ),
+            ("[apps.a]\nui = \"u\"".to_string(), "exactly one"),
+            (
+                format!(
+                    "[apps.a]\ncomponent_url = \"ftp://x.test/a.wasm\"\n\
+                     component_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
+                ),
+                "http(s)",
+            ),
+        ] {
+            let err = HostConfig::parse(&toml).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{toml}: {err:#}");
+        }
+
+        // Tenant apps get the same validation.
+        let err =
+            HostConfig::parse("[tenants.alice]\ntoken = \"x\"\n[tenants.alice.apps.a]\nui = \"u\"")
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("exactly one"), "{err:#}");
+    }
+
+    #[test]
+    fn sha256_format_is_validated() {
+        assert_eq!(validate_sha256(GOOD_SHA).unwrap(), GOOD_SHA);
+        assert_eq!(
+            validate_sha256(&format!(" {} ", GOOD_SHA.to_ascii_uppercase())).unwrap(),
+            GOOD_SHA,
+            "trimmed and lowercased"
+        );
+        for bad in [
+            "",
+            "abc",
+            &GOOD_SHA[..63],
+            &format!("{GOOD_SHA}0"),
+            "g665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+        ] {
+            assert!(validate_sha256(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

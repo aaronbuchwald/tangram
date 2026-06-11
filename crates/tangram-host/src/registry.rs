@@ -47,7 +47,14 @@ struct RegistryState {
 #[derive(serde::Deserialize)]
 struct RegistryEntry {
     name: String,
+    /// Local component path. The registry model keeps this a plain string
+    /// for compatibility — empty means "use component_url instead".
+    #[serde(default)]
     component: PathBuf,
+    #[serde(default)]
+    component_url: Option<String>,
+    #[serde(default)]
+    component_sha256: Option<String>,
     ui: PathBuf,
     #[serde(default)]
     data_dir: Option<PathBuf>,
@@ -88,15 +95,18 @@ pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, Ap
                 tracing::warn!("{registry}: skipping registry entry: {e}");
                 return None;
             }
-            if entry.component.as_os_str().is_empty() || entry.ui.as_os_str().is_empty() {
+            if entry.ui.as_os_str().is_empty() {
                 tracing::warn!(
-                    "{registry}: skipping entry {:?}: component and ui must be non-empty",
+                    "{registry}: skipping entry {:?}: ui must be non-empty",
                     entry.name
                 );
                 return None;
             }
             let spec = AppSpec {
-                component: entry.component,
+                // Empty path in the replicated doc = "installed by URL".
+                component: (!entry.component.as_os_str().is_empty()).then_some(entry.component),
+                component_url: entry.component_url,
+                component_sha256: entry.component_sha256,
                 ui: entry.ui,
                 data_dir: entry.data_dir,
                 allow_hosts: entry.allow_hosts,
@@ -107,6 +117,13 @@ pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, Ap
                 require_auth: false,
                 enabled: entry.enabled,
             };
+            // Same gate as the file loader: exactly one component source,
+            // well-formed sha-256 — one bad install must not take down the
+            // rest of the fleet, so invalid entries are skipped, not fatal.
+            if let Err(e) = spec.component_source() {
+                tracing::warn!("{registry}: skipping entry {:?}: {e:#}", entry.name);
+                return None;
+            }
             Some((entry.name, spec))
         })
         .collect()
@@ -162,7 +179,9 @@ mod tests {
 
     fn file_spec(registry: bool) -> AppSpec {
         AppSpec {
-            component: "file.wasm".into(),
+            component: Some("file.wasm".into()),
+            component_url: None,
+            component_sha256: None,
             ui: "file-ui".into(),
             data_dir: None,
             allow_hosts: Vec::new(),
@@ -205,6 +224,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_url_entries_and_skips_invalid_sources() {
+        let sha = "a".repeat(64);
+        let state = registry_state(json!([
+            {
+                "name": "by-url",
+                "component_url": "https://example.test/by-url.wasm",
+                "component_sha256": sha,
+                "ui": "by-url-ui"
+            },
+            // url without sha, sha with a path, both sources: all skipped
+            { "name": "no-sha", "component_url": "https://example.test/x.wasm", "ui": "u" },
+            { "name": "sha-with-path", "component": "x.wasm", "component_sha256": sha, "ui": "u" },
+            { "name": "both", "component": "x.wasm",
+              "component_url": "https://example.test/x.wasm", "component_sha256": sha, "ui": "u" },
+            { "name": "bad-sha", "component_url": "https://example.test/x.wasm",
+              "component_sha256": "nothex", "ui": "u" },
+            { "name": "neither", "ui": "u" }
+        ]));
+        let entries = parse_state("registry", &state);
+        assert_eq!(entries.len(), 1);
+        let (name, spec) = &entries[0];
+        assert_eq!(name, "by-url");
+        assert_eq!(spec.component, None);
+        assert_eq!(
+            spec.component_source().unwrap(),
+            crate::config::ComponentSource::Url {
+                url: "https://example.test/by-url.wasm".into(),
+                sha256: sha,
+            }
+        );
+    }
+
+    #[test]
     fn parse_tolerates_non_registry_state() {
         assert!(parse_state("registry", &json!({"notes": []})).is_empty());
         assert!(parse_state("registry", &json!({"apps": "nope"})).is_empty());
@@ -216,7 +268,7 @@ mod tests {
         file.insert("registry".to_string(), file_spec(true));
         file.insert("notes".to_string(), file_spec(false));
         let mut installed = file_spec(false);
-        installed.component = "nutrition.wasm".into();
+        installed.component = Some("nutrition.wasm".into());
         let desired = merge(&file, vec![("nutrition".to_string(), installed)]);
         assert_eq!(desired.len(), 3);
         assert_eq!(desired["registry"].source, Source::File);
@@ -229,12 +281,12 @@ mod tests {
         let mut file = BTreeMap::new();
         file.insert("notes".to_string(), file_spec(false));
         let mut overriding = file_spec(false);
-        overriding.component = "other-notes.wasm".into();
+        overriding.component = Some("other-notes.wasm".into());
         let desired = merge(&file, vec![("notes".to_string(), overriding)]);
         assert_eq!(desired["notes"].source, Source::Registry);
         assert_eq!(
             desired["notes"].spec.component,
-            PathBuf::from("other-notes.wasm")
+            Some(PathBuf::from("other-notes.wasm"))
         );
     }
 

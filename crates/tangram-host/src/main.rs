@@ -26,6 +26,7 @@ mod app;
 mod auth;
 mod config;
 mod doc;
+mod fetch;
 mod gateway;
 mod mcp;
 mod registry;
@@ -90,6 +91,9 @@ pub struct Host {
     /// The MCP gateway (agentgateway child), when `[gateway]` is enabled and
     /// the binary was found. `None` = direct per-app /mcp serving.
     pub gateway: Option<Arc<gateway::Gateway>>,
+    /// Downloads + verifies `component_url` artifacts into the immutable
+    /// content-addressed cache (Phase 8 install-from-URL).
+    pub fetcher: fetch::Fetcher,
 }
 
 /// The bootstrap ("file") layer of one tenant's desired state: the explicit
@@ -113,6 +117,8 @@ fn tenant_bootstrap(
     };
     let registry = AppSpec {
         component: template.component.clone(),
+        component_url: template.component_url.clone(),
+        component_sha256: template.component_sha256.clone(),
         ui: template.ui.clone(),
         data_dir: None,
         allow_hosts: Vec::new(),
@@ -401,15 +407,35 @@ impl Host {
             apps.remove(key);
             return Err(msg);
         }
+        // Resolve the component to a local file first: a spec path as-is, a
+        // `component_url` through the verified content-addressed cache (a
+        // cache stat in steady state; the download + sha-256 gate runs only
+        // on a miss). A fetch failure or hash mismatch is this app's
+        // converge error — a running instance keeps serving, like a failed
+        // reload.
+        let component_path = match spec.component_source().map_err(|e| e.to_string())? {
+            config::ComponentSource::Path(path) => path,
+            config::ComponentSource::Url { url, sha256 } => self
+                .fetcher
+                .resolve(&key.to_string(), &url, &sha256)
+                .await
+                .map_err(|e| {
+                    if apps.contains_key(key) {
+                        format!("{e} (old instance still serving)")
+                    } else {
+                        e
+                    }
+                })?,
+        };
         let up_to_date = apps.get(key).is_some_and(|entry| {
             entry.runtime.spec == *spec
-                && entry.runtime.component_mtime == component_mtime(&spec.component)
+                && entry.runtime.component_mtime == component_mtime(&component_path)
         });
         if up_to_date {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        match AppRuntime::build(&self.engine, &key.app, spec).await {
+        match AppRuntime::build(&self.engine, &key.app, spec, &component_path).await {
             Ok(runtime) => {
                 let gate_token = gate_token.filter(|_| spec.registry || spec.require_auth);
                 let mut entry = AppEntry::new(runtime, gate_token);
@@ -555,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
         bind_loopback,
         nudge: Arc::new(Notify::new()),
         gateway: mcp_gateway,
+        fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
     });
     host.converge().await;
 

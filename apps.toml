@@ -1,7 +1,7 @@
 # Desired state for tangram-host (README "Run apps as WASM components").
 # Build the components first:
 #   cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
-#     --lib --target wasm32-wasip2 --release
+#     -p tangram-marketplace --lib --target wasm32-wasip2 --release
 # then: cargo run -p tangram-host --release -- apps.toml
 # Paths are relative to the directory you run the host from. Edits converge
 # live: add/remove/reload apps without restarting the host.
@@ -28,6 +28,15 @@ enabled = true
 component = "target/wasm32-wasip2/release/registry.wasm"
 ui = "apps/registry/ui"
 registry = true
+
+# The marketplace (RUNTIME_PLAN Phase 8): a catalog of installable apps with
+# pinned url+sha256 artifacts and capability manifests; its Install button
+# posts to the registry above. require_auth: browsing is open, curating the
+# catalog (add_listing/remove_listing) needs TANGRAM_AUTH_TOKEN.
+[apps.marketplace]
+component = "target/wasm32-wasip2/release/marketplace.wasm"
+ui = "apps/marketplace/ui"
+require_auth = true
 
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"
