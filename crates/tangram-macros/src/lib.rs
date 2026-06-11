@@ -73,110 +73,12 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
         if !matches!(method.vis, syn::Visibility::Public(_)) {
             continue;
         }
-        let sig = &method.sig;
-        let is_async = sig.asyncness.is_some();
-
-        // Sync actions take a receiver (`&mut self` mutates, `&self` reads).
-        // Async actions take a `Ctx<Self>` context handle as their first
-        // parameter instead of `self` (they run outside the store lock and
-        // mutate through the context, so they are presumed mutating).
-        let mutates = if is_async {
-            match sig.inputs.first() {
-                Some(FnArg::Typed(_)) => {}
-                _ => {
-                    return Err(syn::Error::new(
-                        sig.span(),
-                        "async tangram actions take a context handle as their first parameter \
-                         (e.g. `ctx: Ctx<Self>`) instead of `self`",
-                    ));
-                }
-            }
-            true
-        } else {
-            let Some(FnArg::Receiver(receiver)) = sig.inputs.first() else {
-                continue; // associated fn (no self/ctx) — not an action
-            };
-            receiver.mutability.is_some()
-        };
-
-        let fn_ident = &sig.ident;
-        let name_str = fn_ident.to_string();
-        let description = doc_comment(&method.attrs);
-        let args_ident = format_ident!("__TangramArgs_{}", fn_ident);
-
-        // Collect (ident, type) for every non-self parameter.
-        let mut fields = Vec::new();
-        let mut field_idents = Vec::new();
-        for arg in sig.inputs.iter().skip(1) {
-            let FnArg::Typed(pat_ty) = arg else { continue };
-            let Pat::Ident(pat_ident) = &*pat_ty.pat else {
-                return Err(syn::Error::new(
-                    pat_ty.span(),
-                    "tangram action parameters must be simple identifiers",
-                ));
-            };
-            let ident = &pat_ident.ident;
-            let ty = &*pat_ty.ty;
-            fields.push(quote! { pub #ident: #ty });
-            field_idents.push(ident.clone());
+        // `build_action_tokens` returns `None` for associated functions (no
+        // self/ctx receiver) — those are not actions, so we skip them.
+        if let Some((arg_struct, def)) = build_action_tokens(self_ty, method)? {
+            arg_structs.push(arg_struct);
+            defs.push(def);
         }
-
-        arg_structs.push(quote! {
-            #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
-            #[allow(non_camel_case_types)]
-            struct #args_ident {
-                #(#fields,)*
-            }
-        });
-
-        let call = if is_async {
-            quote! { Self::#fn_ident(ctx, #(args.#field_idents),*).await }
-        } else {
-            quote! { model.#fn_ident(#(args.#field_idents),*) }
-        };
-        // Result-returning actions propagate Err as an action failure.
-        let invoke = if returns_result(&sig.output) {
-            quote! {
-                let out = #call.map_err(|e| ::tangram::ActionError::failed(e.to_string()))?;
-            }
-        } else {
-            quote! { let out = #call; }
-        };
-
-        let handler = if is_async {
-            quote! {
-                ::tangram::ActionHandler::Async(|ctx, raw| ::std::boxed::Box::pin(async move {
-                    let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
-                        .map_err(::tangram::ActionError::bad_args)?;
-                    #invoke
-                    ::tangram::__private::serde_json::to_value(out)
-                        .map_err(::tangram::ActionError::internal)
-                }))
-            }
-        } else {
-            quote! {
-                ::tangram::ActionHandler::Sync(|model, raw| {
-                    let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
-                        .map_err(::tangram::ActionError::bad_args)?;
-                    #invoke
-                    ::tangram::__private::serde_json::to_value(out)
-                        .map_err(::tangram::ActionError::internal)
-                })
-            }
-        };
-
-        defs.push(quote! {
-            ::tangram::ActionDef {
-                name: #name_str,
-                description: #description,
-                mutates: #mutates,
-                input_schema: || {
-                    ::tangram::__private::serde_json::to_value(::schemars::schema_for!(#args_ident))
-                        .expect("action arg schema serializes")
-                },
-                handler: #handler,
-            }
-        });
     }
 
     Ok(quote! {
@@ -190,6 +92,162 @@ fn expand_actions(impl_block: &ItemImpl) -> syn::Result<TokenStream2> {
             }
         };
     })
+}
+
+/// Build the arg struct and `ActionDef` tokens for one public method.
+///
+/// Returns `None` for associated functions (no self/ctx receiver), which are
+/// not actions and should be skipped by the caller.
+fn build_action_tokens(
+    self_ty: &syn::Type,
+    method: &syn::ImplItemFn,
+) -> syn::Result<Option<(TokenStream2, TokenStream2)>> {
+    let sig = &method.sig;
+    let is_async = sig.asyncness.is_some();
+    let Some(mutates) = check_mutates(sig, is_async)? else {
+        return Ok(None);
+    };
+
+    let fn_ident = &sig.ident;
+    let name_str = fn_ident.to_string();
+    let description = doc_comment(&method.attrs);
+    let args_ident = format_ident!("__TangramArgs_{}", fn_ident);
+
+    let (fields, field_idents) = collect_method_params(sig)?;
+
+    let arg_struct = build_arg_struct(&args_ident, &fields);
+    let def = build_action_def(
+        self_ty,
+        fn_ident,
+        &name_str,
+        &description,
+        mutates,
+        is_async,
+        &args_ident,
+        &field_idents,
+        &sig.output,
+    );
+
+    Ok(Some((arg_struct, def)))
+}
+
+/// Determine whether an action mutates state and validate the receiver.
+///
+/// Returns `None` for associated functions (no self/ctx receiver) — those are
+/// not actions. Async actions always mutate (context-based); sync actions
+/// mutate iff the receiver is `&mut self`.
+fn check_mutates(sig: &syn::Signature, is_async: bool) -> syn::Result<Option<bool>> {
+    if is_async {
+        match sig.inputs.first() {
+            Some(FnArg::Typed(_)) => Ok(Some(true)),
+            _ => Err(syn::Error::new(
+                sig.span(),
+                "async tangram actions take a context handle as their first parameter \
+                 (e.g. `ctx: Ctx<Self>`) instead of `self`",
+            )),
+        }
+    } else {
+        let Some(FnArg::Receiver(receiver)) = sig.inputs.first() else {
+            return Ok(None); // associated fn — not an action
+        };
+        Ok(Some(receiver.mutability.is_some()))
+    }
+}
+
+/// Collect `(field token, ident)` pairs for every non-self parameter.
+fn collect_method_params(
+    sig: &syn::Signature,
+) -> syn::Result<(Vec<TokenStream2>, Vec<syn::Ident>)> {
+    let mut fields = Vec::new();
+    let mut field_idents = Vec::new();
+    for arg in sig.inputs.iter().skip(1) {
+        let FnArg::Typed(pat_ty) = arg else { continue };
+        let Pat::Ident(pat_ident) = &*pat_ty.pat else {
+            return Err(syn::Error::new(
+                pat_ty.span(),
+                "tangram action parameters must be simple identifiers",
+            ));
+        };
+        let ident = &pat_ident.ident;
+        let ty = &*pat_ty.ty;
+        fields.push(quote! { pub #ident: #ty });
+        field_idents.push(ident.clone());
+    }
+    Ok((fields, field_idents))
+}
+
+/// Emit the `#[derive(Deserialize, JsonSchema)]` argument struct.
+fn build_arg_struct(args_ident: &syn::Ident, fields: &[TokenStream2]) -> TokenStream2 {
+    quote! {
+        #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
+        #[allow(non_camel_case_types)]
+        struct #args_ident {
+            #(#fields,)*
+        }
+    }
+}
+
+/// Emit the `ActionDef { … }` literal for one action.
+#[allow(clippy::too_many_arguments)]
+fn build_action_def(
+    self_ty: &syn::Type,
+    fn_ident: &syn::Ident,
+    name_str: &str,
+    description: &str,
+    mutates: bool,
+    is_async: bool,
+    args_ident: &syn::Ident,
+    field_idents: &[syn::Ident],
+    output: &ReturnType,
+) -> TokenStream2 {
+    let call = if is_async {
+        quote! { #self_ty::#fn_ident(ctx, #(args.#field_idents),*).await }
+    } else {
+        quote! { model.#fn_ident(#(args.#field_idents),*) }
+    };
+    // Result-returning actions propagate Err as an action failure.
+    let invoke = if returns_result(output) {
+        quote! {
+            let out = #call.map_err(|e| ::tangram::ActionError::failed(e.to_string()))?;
+        }
+    } else {
+        quote! { let out = #call; }
+    };
+
+    let handler = if is_async {
+        quote! {
+            ::tangram::ActionHandler::Async(|ctx, raw| ::std::boxed::Box::pin(async move {
+                let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
+                    .map_err(::tangram::ActionError::bad_args)?;
+                #invoke
+                ::tangram::__private::serde_json::to_value(out)
+                    .map_err(::tangram::ActionError::internal)
+            }))
+        }
+    } else {
+        quote! {
+            ::tangram::ActionHandler::Sync(|model, raw| {
+                let args: #args_ident = ::tangram::__private::serde_json::from_value(raw)
+                    .map_err(::tangram::ActionError::bad_args)?;
+                #invoke
+                ::tangram::__private::serde_json::to_value(out)
+                    .map_err(::tangram::ActionError::internal)
+            })
+        }
+    };
+
+    quote! {
+        ::tangram::ActionDef {
+            name: #name_str,
+            description: #description,
+            mutates: #mutates,
+            input_schema: || {
+                ::tangram::__private::serde_json::to_value(::schemars::schema_for!(#args_ident))
+                    .expect("action arg schema serializes")
+            },
+            handler: #handler,
+        }
+    }
 }
 
 /// Extract a description from `#[doc = "..."]` attributes (doc comments).

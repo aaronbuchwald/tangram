@@ -109,9 +109,8 @@ impl<M: Model + Actions> App<M> {
         };
         // The env override wins over the builder value: apps bake in an
         // absolute compile-time UI path that doesn't exist inside containers.
-        let ui_dir = std::env::var("TANGRAM_UI_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| self.ui_dir.clone());
+        let ui_dir =
+            std::env::var("TANGRAM_UI_DIR").map_or_else(|_| self.ui_dir.clone(), PathBuf::from);
         let frame_ancestors = std::env::var("FRAME_ANCESTORS").unwrap_or_else(|_| "*".into());
         let csp = HeaderValue::from_str(&format!("frame-ancestors {frame_ancestors}"))
             .context("FRAME_ANCESTORS contains characters not valid in a header value")?;

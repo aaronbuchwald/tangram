@@ -4,6 +4,7 @@
 //! the host, not ambient).
 
 /// Milliseconds since the Unix epoch.
+#[must_use]
 pub fn now_ms() -> i64 {
     #[cfg(not(target_family = "wasm"))]
     {

@@ -49,6 +49,7 @@ impl<M: Model + Actions> Ctx<M> {
     }
 
     /// The current replicated state as JSON.
+    #[must_use]
     pub fn state_json(&self) -> serde_json::Value {
         self.store.state_json()
     }
@@ -177,6 +178,7 @@ impl<M: Model + Actions> Store<M> {
         autosurgeon::hydrate(&*doc).map_err(ActionError::internal)
     }
 
+    #[must_use]
     pub fn state_json(&self) -> serde_json::Value {
         match self.hydrate() {
             Ok(m) => serde_json::to_value(m).unwrap_or(serde_json::Value::Null),
@@ -265,7 +267,9 @@ impl<M: Model + Actions> Store<M> {
     /// Next pending sync message for the peer represented by `state`.
     pub fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
         let mut doc = self.doc.lock().expect("store lock");
-        doc.sync().generate_sync_message(state).map(|m| m.encode())
+        doc.sync()
+            .generate_sync_message(state)
+            .map(automerge::sync::Message::encode)
     }
 
     /// Apply a sync message from a peer. Returns true if the document changed
