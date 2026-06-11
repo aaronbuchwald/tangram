@@ -47,6 +47,40 @@ Note: `wrangler` is pinned to `~4.86` because newer releases require
 Node.js ≥ 22; bump it freely once your Node is current. `npm run check`
 type-checks (`tsc --noEmit`).
 
+## Testing
+
+The relay path is regression-tested end to end, no Cloudflare account needed
+(everything runs locally under `wrangler dev` / miniflare):
+
+```sh
+bash scripts/e2e-cloudflare-sync.sh                       # from the repo root
+# or, the same script through cargo:
+cargo test -p tangram-host -- --ignored e2e_cloudflare
+```
+
+The script builds `tangram-notes` (debug) and `npm ci`s this directory, then
+starts the relay on an ephemeral 19xxx port with an **isolated** `.wrangler`
+state dir (a mktemp scratch dir, removed on exit — repeated runs never share
+state) and asserts, in order:
+
+1. **Empty-relay genesis convergence** — a native instance pointed at the
+   relay (`TANGRAM_REMOTE=…/notes/sync`) adds a note; `GET /notes/api/state`
+   shows exactly that note (a forked genesis would shadow it into a rival
+   container — see the genesis rule in the protocol doc).
+2. **Bidirectional sync** — a second native instance converges through the
+   relay in both directions, with end-to-end propagation asserted < 5 s.
+3. **Restart persistence** — wrangler is killed and restarted on the same
+   state dir while both native peers are frozen (`SIGSTOP`), so the notes the
+   restarted relay serves provably come from persisted DO storage; sync then
+   resumes (a post-restart write propagates A→relay→B).
+4. **Clean teardown** — every spawned process is verified dead and the
+   scratch dirs removed; the script is safe to re-run and never touches a
+   live instance on `:8080`.
+
+CI runs this as the `e2e-cloudflare-sync` job (`.github/workflows/ci.yml`)
+on Node 22; locally it needs node ≥ 20.3 (the wrangler pin above), npm,
+curl, and jq.
+
 ## Deploy
 
 ```sh

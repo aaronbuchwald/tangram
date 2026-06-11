@@ -395,9 +395,11 @@ cargo run --release -p tangram-shell
 
 Two laptops pointed at the same relay converge through it with no machine of
 yours running in between. `npx wrangler dev` runs the same relay locally for
-testing (see [cloud/cloudflare/README.md](cloud/cloudflare/README.md)). The
-no-auth caveat above applies doubly: a deployed worker is on the public
-internet.
+testing (see [cloud/cloudflare/README.md](cloud/cloudflare/README.md)), and
+`bash scripts/e2e-cloudflare-sync.sh` regression-tests the whole relay path
+end to end under miniflare (genesis convergence, bidirectional sync, restart
+persistence — also a CI job). The no-auth caveat above applies doubly: a
+deployed worker is on the public internet.
 
 ## Configuration (env / `.env`)
 

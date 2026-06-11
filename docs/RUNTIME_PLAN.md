@@ -243,7 +243,11 @@ bootstrap + the registry's own entry — D2's import/export role).
   Replaces the always-on EC2 role for sync+persistence at near-zero idle
   cost. Validated under `wrangler dev`: native↔relay↔native convergence
   from an empty relay (genesis merges cleanly), state survives relay
-  restarts.
+  restarts. Since 2026-06-11 that validation is a repeatable regression
+  test, not a one-off: `scripts/e2e-cloudflare-sync.sh` (miniflare e2e —
+  genesis convergence, bidirectional sync < 5 s, restart persistence with
+  peers frozen) runs as the `e2e-cloudflare-sync` CI job and via
+  `cargo test -p tangram-host -- --ignored e2e_cloudflare`.
 - [ ] MCP surface via CF's Agents SDK (`McpAgent`) when full app logic moves.
 - Exit (met for sync): a laptop replica syncs through a DO relay with the
   EC2 box off.
