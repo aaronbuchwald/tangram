@@ -45,6 +45,19 @@ component = "target/wasm32-wasip2/release/marketplace.wasm"
 ui = "apps/marketplace/ui"
 require_auth = true
 
+# The tangram shell (RUNTIME_PLAN Phase S1; docs/design/tangram-shell-redesign.md,
+# ADR-0007): the Obsidian-style default view — a persistent sidebar (markdown
+# vault folder tree + the live apps list from GET /api/fleet) and a tabbed
+# main window that renders .md files or embeds other apps as iframes. Its
+# backend is an ordinary wasm component (a markdown vault in its replicated
+# document); its UI is the ONE app granted a build pipeline (ADR-0007) — the
+# `ui` below points at the committed Vite build output, not a single file.
+# Build the UI with: (cd apps/tangram/ui && npm ci && npm run build).
+# Making tangram the host's default `/` view is a deferred follow-up.
+[apps.tangram]
+component = "target/wasm32-wasip2/release/tangram_app.wasm"
+ui = "apps/tangram/ui/dist"
+
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"
 ui = "apps/notes/ui"

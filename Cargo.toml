@@ -10,6 +10,7 @@ members = [
     "apps/nutrition",
     "apps/registry",
     "apps/shell",
+    "apps/tangram",
 ]
 
 [workspace.package]

@@ -21,6 +21,10 @@ Thumbs.db
 node_modules/
 .wrangler/
 dist/
+# Exception (ADR-0007): the tangram shell app's built UI is COMMITTED — the
+# host serves it as the app's static UI dir and `cargo run -p tangram-host`
+# must work without a Node toolchain. CI rebuilds it and fails if it is stale.
+!apps/tangram/ui/dist/
 build/
 out/
 target/
