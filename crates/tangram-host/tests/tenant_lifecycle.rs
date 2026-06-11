@@ -19,39 +19,20 @@
 //!     --lib --target wasm32-wasip2 --release
 //! The test SKIPS (with a notice) when they are missing.
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use automerge::sync::SyncDoc as _;
 use tokio::sync::watch;
 
+mod support;
+use support::{HostProc, component, free_port, wait_for, workspace_root};
+
 const ALICE_TOKEN: &str = "alice-tenant-token";
 const BOB_TOKEN: &str = "bob-tenant-token";
 const HOST_TOKEN: &str = "top-level-host-token";
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
-fn component(name: &str) -> PathBuf {
-    workspace_root().join(format!("target/wasm32-wasip2/release/{name}.wasm"))
-}
-
-/// The spawned host, killed on drop so a failing test never leaks a server.
-struct HostProc(Child);
-
-impl Drop for HostProc {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc {
     let log_file = std::fs::File::create(log).expect("log file");
@@ -71,29 +52,6 @@ fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc
         .spawn()
         .expect("spawn tangram-host");
     HostProc(child)
-}
-
-async fn wait_for<F, Fut>(what: &str, timeout: Duration, mut check: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        if check().await {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 /// GET `url`, optionally with a bearer token, returning the status.

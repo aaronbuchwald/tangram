@@ -17,25 +17,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
+
+mod support;
+use support::{component, free_port, wait_for, workspace_root};
 
 const TOKEN: &str = "test-gateway-token";
 const ALICE_TOKEN: &str = "alice-gateway-token";
 const BOB_TOKEN: &str = "bob-gateway-token";
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
-fn component(name: &str) -> PathBuf {
-    workspace_root().join(format!("target/wasm32-wasip2/release/{name}.wasm"))
-}
 
 fn agentgateway_on_path() -> bool {
     std::env::var_os("PATH").is_some_and(|path| {
@@ -43,9 +34,9 @@ fn agentgateway_on_path() -> bool {
     })
 }
 
-/// The spawned host, killed on drop so a failing test never leaks a server
-/// (the host's agentgateway child is `kill_on_drop` in the host itself, but
-/// SIGKILL on the host orphans it — so also kill the recorded child pid).
+/// The spawned host, killed on drop so a failing test never leaks a server.
+/// Gateway-specific variant: also kills the recorded agentgateway child pid,
+/// because SIGKILL on the host orphans the supervised child process.
 struct HostProc {
     child: Child,
     gateway_pid: Option<u32>,
@@ -83,29 +74,6 @@ fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc
         child,
         gateway_pid: None,
     }
-}
-
-async fn wait_for<F, Fut>(what: &str, timeout: Duration, mut check: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        if check().await {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 async fn fleet_gateway(client: &reqwest::Client, base: &str) -> serde_json::Value {
