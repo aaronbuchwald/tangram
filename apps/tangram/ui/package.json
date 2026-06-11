@@ -1,0 +1,21 @@
+{
+  "name": "tangram-shell-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Frontend bundle for the tangram shell app (ADR-0007 build exception).",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.4",
+    "marked": "^15.0.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

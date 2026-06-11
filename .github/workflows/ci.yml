@@ -46,13 +46,44 @@ jobs:
       # them (they self-skip when missing, so build them to make them run).
       - run: >
           cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry
-          -p tangram-marketplace --lib --target wasm32-wasip2 --release
+          -p tangram-marketplace -p tangram-app-tangram --lib
+          --target wasm32-wasip2 --release
       - run: cargo test
       # tangram-core is the portable half of the SDK (RUNTIME_PLAN Phase 1):
       # it must keep building without tokio/hyper/axum/reqwest/rmcp for
       # non-native hosts (WASI components, Cloudflare, browsers).
       - run: cargo build -p tangram-core --target wasm32-wasip2
       - run: cargo build --release
+
+  # The shell frontend (ADR-0007): the `tangram` app is the ONE app with a
+  # build pipeline — npm + Vite producing a `dist/` the host serves as its
+  # UI dir. This job installs from the committed lockfile, typechecks, and
+  # builds; then it asserts the COMMITTED `dist/` matches a fresh build, so
+  # the bundle the host serves can never silently drift from the source.
+  # (Mirrors how the Cloudflare TS Worker is type-checked + built in CI.)
+  shell-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/tangram/ui/package-lock.json
+      - run: npm ci
+        working-directory: apps/tangram/ui
+      - run: npm run typecheck
+        working-directory: apps/tangram/ui
+      - run: npm run build
+        working-directory: apps/tangram/ui
+      # The committed dist/ must equal a fresh build — fail loudly if stale.
+      - name: committed dist/ is up to date
+        run: |
+          if ! git diff --quiet -- apps/tangram/ui/dist; then
+            echo "::error::apps/tangram/ui/dist is stale — run 'npm run build' in apps/tangram/ui and commit the result."
+            git --no-pager diff --stat -- apps/tangram/ui/dist
+            exit 1
+          fi
 
   # Miniflare e2e for the Cloudflare sync relay (RUNTIME_PLAN Phase 4):
   # two native tangram-notes instances converge through `wrangler dev`,

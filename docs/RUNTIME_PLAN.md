@@ -51,6 +51,16 @@ tokio + rmcp's streamable HTTP server, which don't target WASI today. The
 move would be a `wasi:http` adapter inside the SDK — contract-compatible by
 construction, not needed now.
 
+**UI-authoring exception (ADR-0007), narrow and one-app-only:** ordinary apps
+keep the strict single-file, no-build UI; the **first-party `tangram` shell
+app** may build its UI with a bundler (a `dist/` from Vite/esbuild). Only the
+*authoring* rule is waived — the built output is still a self-contained `ui/`
+of static files served identically, so the *runtime* contract (relative
+paths, prefix-mountable, iframable, no host FS) is unchanged. The shell's
+**backend is a normal wasm component** under the unchanged capability
+contract. "No feature may violate the contract" still binds every non-shell
+app. See `apps/tangram/` and [ADR-0007](adr/0007-shell-build-pipeline-exception.md).
+
 ## Components
 
 ```
@@ -609,6 +619,35 @@ hosted use of the remote, and OAuth-connected local instances.
   (`tests/egress_injection.rs`, self-skips without components / live key)
   proving capabilities gating, env isolation, and that the host-injected
   request authenticates while a sibling app with no rule cannot.
+- [x] **Phase S1 — tangram shell (foundational slice)** — delivered 2026-06-11.
+  A new first-party app `tangram` (crate `tangram-app-tangram`, on-host name
+  `tangram`): the Obsidian-style shell. Design:
+  [docs/design/tangram-shell-redesign.md](design/tangram-shell-redesign.md);
+  build-pipeline carve-out: [ADR-0007](adr/0007-shell-build-pipeline-exception.md);
+  iframe/composition model: [docs/design/app-composability-research.md](design/app-composability-research.md).
+  - Backend: a normal wasm component (native + wasm32-wasip2) — a markdown
+    **vault** (flat deterministic `Vec<MdFile>`, folders derived from
+    `/`-separated paths, `.keep` sentinels for empty folders) in its
+    replicated Automerge document; create/rename/delete files+folders and
+    read/write bodies as registered actions. `Default` seeds one
+    deterministic welcome note. (`apps/tangram/src/lib.rs`.)
+  - Frontend: the ONE app with a build pipeline (ADR-0007) — Vite + TS
+    bundling marked + DOMPurify and the shell chrome; committed `ui/dist/`
+    served as the app's UI dir, all asset URLs relative. Persistent left
+    sidebar (vault folder tree + the live `GET /api/fleet` apps list) and a
+    tab strip whose tabs render a `.md` file (textarea editor + rendered
+    preview) or embed an app as `<iframe src="../<app>/">`. (`apps/tangram/ui/`,
+    `apps/tangram/README.md`.)
+  - Host wiring: `[apps.tangram]` in apps.toml (`ui = "apps/tangram/ui/dist"`);
+    no host index/default-route change. CI: a `shell-frontend` job
+    (npm ci + typecheck + build + committed-dist freshness check); the wasm
+    component added to the `check` job's component build.
+  - **Deferred follow-ups** (NOT in S1; see `apps/tangram/README.md`):
+    CodeMirror 6 live-preview editing (S4); marketplace WASM-blob upload +
+    content-addressed hosting behind the default-off `[artifacts]` gate (S3);
+    folding registry/marketplace management into the sidebar; making `tangram`
+    the default `/` route; postMessage shell↔app coordination + app-in-note
+    (composability); split/docking panes; multi-tenant/federated shell views.
 
 Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →

@@ -1,0 +1,6 @@
+node_modules/
+*.tsbuildinfo
+# NOTE: dist/ is intentionally COMMITTED (un-ignored at the repo root for this
+# one app) — the host serves it as this app's static UI dir, so
+# `cargo run -p tangram-host` works without a Node toolchain. CI rebuilds it
+# and fails if the committed output is stale (the shell-frontend job).

@@ -2528,6 +2528,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-app-tangram"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "tangram",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-core"
 version = "0.1.0"
 dependencies = [
