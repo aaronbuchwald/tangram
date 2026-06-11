@@ -91,7 +91,7 @@ async fn run_action<M: Model + Actions>(
     Path(name): Path<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    let args = body.map(|Json(v)| v).unwrap_or_else(|| json!({}));
+    let args = body.map_or_else(|| json!({}), |Json(v)| v);
     match store.dispatch(&name, args).await {
         Ok(result) => (StatusCode::OK, Json(json!({ "result": result }))),
         Err(e) => {

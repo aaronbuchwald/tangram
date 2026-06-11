@@ -62,7 +62,7 @@ impl<M: Model + Actions> DocHandle for Store<M> {
         Store::receive_sync(self, state, bytes)
     }
     fn bump(&self) {
-        Store::bump(self)
+        Store::bump(self);
     }
     fn subscribe(&self) -> watch::Receiver<u64> {
         Store::subscribe(self)
@@ -96,7 +96,7 @@ pub fn handle_post<D: DocHandle + ?Sized>(
             self.0.receive_sync(state, bytes)
         }
         fn bump(&self) {
-            self.0.bump()
+            self.0.bump();
         }
     }
     tangram_core::sync::handle_post(&W(store), sessions, session_id, body)

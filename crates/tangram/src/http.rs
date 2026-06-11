@@ -38,12 +38,14 @@ impl Request {
         Self::new("POST", url)
     }
 
+    #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
     /// JSON request body (sets `Content-Type: application/json`).
+    #[must_use]
     pub fn json(self, value: &serde_json::Value) -> Self {
         let mut req = self.header("content-type", "application/json");
         req.body = value.to_string().into_bytes();
@@ -60,6 +62,7 @@ pub struct Response {
 }
 
 impl Response {
+    #[must_use]
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
@@ -71,6 +74,7 @@ impl Response {
 }
 
 /// Percent-encode a string for use inside a URL query value.
+#[must_use]
 pub fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {

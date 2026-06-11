@@ -1,4 +1,4 @@
-//! The platform-portable core of the Tangram SDK (RUNTIME_PLAN Phase 1):
+//! The platform-portable core of the Tangram SDK (`RUNTIME_PLAN` Phase 1):
 //! everything an app's derived surfaces need that does NOT depend on a
 //! particular runtime or HTTP stack — the action registry, the automerge
 //! document store and its single dispatch path, the sync-protocol

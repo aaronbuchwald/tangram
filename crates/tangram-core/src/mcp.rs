@@ -112,6 +112,7 @@ impl Response {
     }
 
     /// Every header the response needs, ready to copy onto the transport.
+    #[must_use]
     pub fn headers(&self) -> Vec<(&'static str, String)> {
         let mut headers = Vec::new();
         match &self.body {
@@ -462,8 +463,7 @@ mod tests {
         };
         let data = body
             .lines()
-            .filter_map(|l| l.strip_prefix("data: "))
-            .next()
+            .find_map(|l| l.strip_prefix("data: "))
             .expect("data line");
         serde_json::from_str(data).expect("valid JSON in SSE data")
     }
