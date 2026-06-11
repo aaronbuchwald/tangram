@@ -283,3 +283,35 @@ Exit: registry action or MCP tool call → new sandbox serving in seconds.
   (k8s NetworkPolicy is cleaner) — both inherited only if/when Track G runs
   third-party apps; WASM grants make egress allowlists first-class on the
   spine.
+
+## Beyond Phase 4 — product backlog (added 2026-06-11)
+
+Target end-state, as decided by the owner: **(1)** WASM apps under one
+orchestrator (single command, single port, file- AND registry-defined desired
+state, all MCP behind one agentgateway instance) with app-state syncing across
+remote host, local host, and Cloudflare (miniflare-tested, deployable);
+**(2)** multi-tenancy with OAuth sign-in on Cloudflare — account creation,
+hosted use of the remote, and OAuth-connected local instances.
+
+- **Phase 5 — multi-tenancy mode**: tenant namespace in routing
+  (`/t/<tenant>/<app>/`), per-(tenant, app) docs/data dirs/grants, per-tenant
+  registry; auth-principal seam. Single port and single process preserved.
+- **Phase 6 — identity**: OAuth accounts on the CF side (account == tenant),
+  device-flow/PAT tokens for local replicas' sync + MCP auth; replaces the
+  Phase-3 shared bearer with per-user credentials.
+- **Phase 7 — CF app runtime**: upgrade Cloudflare from sync relay to full
+  app host — spike `jco`-transpiled tangram:app components with a Worker-side
+  host shim over DO storage (fallback: workers-rs + tangram-core); record the
+  choice as ADR-0002. Serves UI/api/sync/mcp per (tenant, app); miniflare e2e
+  extended to the full surface. Prereq: the tangram-core split.
+- **Phase 8 — marketplace**: a Tangram app cataloging installable apps with
+  REQUIRED capability manifests displayed alongside the mechanical import
+  audit ("what can this app actually do"); install via registry with
+  URL+sha256-verified artifacts; seeded with the first-party apps.
+  **TODO, explicitly not now**: third-party submissions — automated
+  capability verification (manifest ⊆ audited imports), sandboxed smoke-run,
+  and an LLM behavioral sanity check gating listing approval.
+
+Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
+(agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →
+Phase 5 → {Phase 6, Phase 7 in parallel} → Phase 8 (CF surface after 7).
