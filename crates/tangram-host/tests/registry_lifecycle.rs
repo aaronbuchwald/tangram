@@ -14,33 +14,14 @@
 //! The test SKIPS (with a notice) when they are missing, so a plain
 //! `cargo test` without the wasm target still passes.
 
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod support;
+use support::{HostProc, component, free_port, status_of, wait_for, workspace_root};
+
 const TOKEN: &str = "test-fleet-token";
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .to_path_buf()
-}
-
-fn component(name: &str) -> PathBuf {
-    workspace_root().join(format!("target/wasm32-wasip2/release/{name}.wasm"))
-}
-
-/// The spawned host, killed on drop so a failing test never leaks a server.
-struct HostProc(Child);
-
-impl Drop for HostProc {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc {
     let log_file = std::fs::File::create(log).expect("log file");
@@ -58,33 +39,6 @@ fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc
         .spawn()
         .expect("spawn tangram-host");
     HostProc(child)
-}
-
-async fn wait_for<F, Fut>(what: &str, timeout: Duration, mut check: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        if check().await {
-            return;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn status_of(client: &reqwest::Client, url: &str) -> Option<reqwest::StatusCode> {
-    client.get(url).send().await.ok().map(|r| r.status())
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral")
-        .local_addr()
-        .expect("local addr")
-        .port()
 }
 
 #[tokio::test]

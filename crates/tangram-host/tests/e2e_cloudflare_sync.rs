@@ -13,8 +13,13 @@
 use std::path::Path;
 use std::process::Command;
 
+// This test is `#[ignore]`d so it does not run in the default `cargo test`
+// suite (which has no node/npm available). It is exercised by the dedicated
+// CI e2e job, or locally with:
+//   cargo test -p tangram-host -- --ignored e2e_cloudflare_sync
 #[test]
-#[ignore = "spawns wrangler dev (miniflare) + two native instances; needs node >= 20.3 and npm"]
+#[ignore = "spawns wrangler dev (miniflare) + two native instances; needs node >= 20.3 and npm; \
+            run via the CI e2e job or with: cargo test -p tangram-host -- --ignored e2e_cloudflare_sync"]
 fn e2e_cloudflare_sync() {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/e2e-cloudflare-sync.sh")
