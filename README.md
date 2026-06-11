@@ -54,7 +54,11 @@ descriptions; parameters become JSON-schema'd arguments.
 ## Workspace layout
 
 ```
-crates/tangram          the SDK: CRDT store, sync, web + MCP surfaces, App builder
+crates/tangram          the SDK: native tokio/axum host (web + sync + MCP transports,
+                        App builder) over tangram-core, plus the WASM guest adapter
+crates/tangram-core     the portable core: action registry, CRDT store + dispatch,
+                        sync sessions/framing, sans-io streamable-HTTP MCP server —
+                        no tokio/hyper; compiles to wasm32-wasip2 (CI-checked)
 crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram

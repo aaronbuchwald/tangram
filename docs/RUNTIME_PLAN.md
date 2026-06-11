@@ -117,10 +117,23 @@ construction, not needed now.
 
 ### Phase 1 (rev 2) — tangram-core split + transport neutrality
 Pure-win prep that every target needs (native, WASI, Cloudflare, browser):
-- [ ] Split the SDK: `tangram-core` (model/action dispatch, automerge store
+- [x] Split the SDK: `tangram-core` (model/action dispatch, automerge store
   logic, sync-protocol state machine, streamable-HTTP MCP protocol — no
   tokio/hyper) vs. host adapters (the existing tokio/axum host moves behind
-  the seam unchanged for users).
+  the seam unchanged for users) — delivered 2026-06-11.
+  `crates/tangram-core` holds the action registry, `Store`/`Ctx` + dispatch
+  (change signal is a plain callback; the native host wires it to a watch
+  channel), the sync session/framing server core, and a **sans-io
+  streamable-HTTP MCP server** (`tangram_core::mcp`) that replaced rmcp in
+  the SDK: rmcp 1.7's wire behavior was captured from a live app as golden
+  (`crates/tangram-core/tests/fixtures/rmcp-golden.json`), the same
+  end-to-end suite (`crates/tangram/tests/mcp.rs`) passed against rmcp and
+  then against the new layer, and the live bar was the real Claude Code
+  client (`claude mcp add --transport http …` → connected; agent
+  `tools/call` writes landed in the doc). `crates/tangram` no longer
+  depends on rmcp at all (tangram-host's rmcp bridge is swapped in a
+  follow-up); CI enforces that `tangram-core` keeps compiling for
+  wasm32-wasip2 with no tokio/hyper/axum/reqwest/rmcp.
 - [x] Move sync off WebSockets to an HTTP transport (SSE pokes down + POST
   exchanges up) — delivered 2026-06-10: wire contract in
   [SYNC_PROTOCOL.md](SYNC_PROTOCOL.md), implemented in the SDK

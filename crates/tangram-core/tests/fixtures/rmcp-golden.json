@@ -1,0 +1,352 @@
+{
+  "captured_from": "rmcp 1.7.0 via tangram App (notes)",
+  "exchanges": [
+    {
+      "name": "initialize",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 0, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"claude-code\", \"version\": \"2.0.0\"}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": "4624fc74-a1a4-462c-b70d-df75777492f2",
+        "body": "data: \nid: 0\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"rmcp\",\"version\":\"1.7.0\"},\"instructions\":\"A shared, replicated notes list. Notes you add are visible to humans in the web UI and on every synced device.\"}}\n\n"
+      }
+    },
+    {
+      "name": "notifications/initialized",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}"
+      },
+      "response": {
+        "status": 202,
+        "content_type": null,
+        "session_id": null,
+        "body": ""
+      }
+    },
+    {
+      "name": "tools/list",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "MCP-Protocol-Version": "2025-06-18",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\"}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0/0\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"add_note\",\"description\":\"Add a note with the given body text. Returns the new note's id.\\nThe note's title is its first line; there is no separate title field.\",\"inputSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"title\":\"__TangramArgs_add_note\",\"type\":\"object\"}},{\"name\":\"update_note\",\"description\":\"Replace the entire body text of an existing note (last-writer-wins;\\nthere is no partial/merge editing) and stamp its last-edited time.\\nThe first line of the text serves as the note's title. Errors if no\\nnote has the given id.\",\"inputSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"id\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"id\",\"text\"],\"title\":\"__TangramArgs_update_note\",\"type\":\"object\"}},{\"name\":\"list_notes\",\"description\":\"List all notes, most recently edited first (notes never edited sort\\nby creation time).\",\"inputSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"__TangramArgs_list_notes\",\"type\":\"object\"}},{\"name\":\"delete_note\",\"description\":\"Delete a note by id. Errors if no note has the given id.\",\"inputSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"],\"title\":\"__TangramArgs_delete_note\",\"type\":\"object\"}},{\"name\":\"create_note\",\"description\":\"Create a new empty note and return its id. Use `update_note` to fill\\nin the body afterwards. This is how the editor UI starts a note.\",\"inputSchema\":{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"__TangramArgs_create_note\",\"type\":\"object\"}}]}}\nid: 1/0\n\n"
+      }
+    },
+    {
+      "name": "tools/call success",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"add_note\", \"arguments\": {\"text\": \"golden\"}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0/1\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"\\\"3ccef90a-6325-4fa5-9dc2-547af06bd49e\\\"\"}],\"isError\":false}}\nid: 1/1\n\n"
+      }
+    },
+    {
+      "name": "tools/call tool-error",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"delete_note\", \"arguments\": {\"id\": \"nope\"}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0/2\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"no note with id nope\"}],\"isError\":true}}\nid: 1/2\n\n"
+      }
+    },
+    {
+      "name": "tools/call unknown tool",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"tools/call\", \"params\": {\"name\": \"nope_tool\", \"arguments\": {}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0/3\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":-32602,\"message\":\"unknown action: nope_tool\"}}\nid: 1/3\n\n"
+      }
+    },
+    {
+      "name": "ping",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"ping\"}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0/4\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}\nid: 1/4\n\n"
+      }
+    },
+    {
+      "name": "request without session",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 6, \"method\": \"tools/list\"}"
+      },
+      "response": {
+        "status": 422,
+        "content_type": null,
+        "session_id": null,
+        "body": "Unexpected message, expect initialize request"
+      }
+    },
+    {
+      "name": "request with unknown session",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "not-a-real-session"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 6, \"method\": \"tools/list\"}"
+      },
+      "response": {
+        "status": 404,
+        "content_type": null,
+        "session_id": null,
+        "body": "Not Found: Session not found"
+      }
+    },
+    {
+      "name": "initialize without accept",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 0, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"claude-code\", \"version\": \"2.0.0\"}}}"
+      },
+      "response": {
+        "status": 406,
+        "content_type": null,
+        "session_id": null,
+        "body": "Not Acceptable: Client must accept both application/json and text/event-stream"
+      }
+    },
+    {
+      "name": "initialize accept json only",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 0, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"claude-code\", \"version\": \"2.0.0\"}}}"
+      },
+      "response": {
+        "status": 406,
+        "content_type": null,
+        "session_id": null,
+        "body": "Not Acceptable: Client must accept both application/json and text/event-stream"
+      }
+    },
+    {
+      "name": "malformed json",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{not json"
+      },
+      "response": {
+        "status": 415,
+        "content_type": null,
+        "session_id": null,
+        "body": "fail to deserialize request body key must be a string at line 1 column 2"
+      }
+    },
+    {
+      "name": "wrong content type",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "text/plain",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/list\"}"
+      },
+      "response": {
+        "status": 415,
+        "content_type": null,
+        "session_id": null,
+        "body": "Unsupported Media Type: Content-Type must be application/json"
+      }
+    },
+    {
+      "name": "get stream",
+      "request": {
+        "method": "GET",
+        "headers": {
+          "Accept": "text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": null,
+        "body": "data: \nid: 0\nretry: 3000\n\n"
+      }
+    },
+    {
+      "name": "get stream without session",
+      "request": {
+        "method": "GET",
+        "headers": {
+          "Accept": "text/event-stream"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 400,
+        "content_type": null,
+        "session_id": null,
+        "body": "Bad Request: Session ID is required"
+      }
+    },
+    {
+      "name": "get stream without accept",
+      "request": {
+        "method": "GET",
+        "headers": {
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 406,
+        "content_type": null,
+        "session_id": null,
+        "body": "Not Acceptable: Client must accept text/event-stream"
+      }
+    },
+    {
+      "name": "delete session",
+      "request": {
+        "method": "DELETE",
+        "headers": {
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": null
+      },
+      "response": {
+        "status": 202,
+        "content_type": null,
+        "session_id": null,
+        "body": ""
+      }
+    },
+    {
+      "name": "request after delete",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream",
+          "Mcp-Session-Id": "4624fc74-a1a4-462c-b70d-df75777492f2"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 8, \"method\": \"tools/list\"}"
+      },
+      "response": {
+        "status": 404,
+        "content_type": null,
+        "session_id": null,
+        "body": "Not Found: Session not found"
+      }
+    },
+    {
+      "name": "initialize 2025-03-26",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 0, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-03-26\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"x\", \"version\": \"1\"}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": "13688528-83ad-4d30-87f1-a96f314f3a85",
+        "body": "data: \nid: 0\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"rmcp\",\"version\":\"1.7.0\"},\"instructions\":\"A shared, replicated notes list. Notes you add are visible to humans in the web UI and on every synced device.\"}}\n\n"
+      }
+    },
+    {
+      "name": "initialize unsupported version",
+      "request": {
+        "method": "POST",
+        "headers": {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/event-stream"
+        },
+        "body": "{\"jsonrpc\": \"2.0\", \"id\": 0, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"9999-01-01\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"x\", \"version\": \"1\"}}}"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "session_id": "2314eb0a-98e7-4cd8-bf34-70819283966f",
+        "body": "data: \nid: 0\nretry: 3000\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"rmcp\",\"version\":\"1.7.0\"},\"instructions\":\"A shared, replicated notes list. Notes you add are visible to humans in the web UI and on every synced device.\"}}\n\n"
+      }
+    }
+  ]
+}

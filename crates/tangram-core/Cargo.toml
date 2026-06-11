@@ -1,0 +1,20 @@
+[package]
+name = "tangram-core"
+version.workspace = true
+edition.workspace = true
+
+# The platform-portable half of the Tangram SDK (RUNTIME_PLAN Phase 1 /
+# ADR-0001): action registry, automerge store + dispatch, the sync-protocol
+# session/framing logic, and a sans-io streamable-HTTP MCP server. No
+# tokio/hyper/axum/reqwest/rmcp — this crate must keep compiling for
+# wasm32-wasip2 (CI-enforced) so future hosts (WASI, Cloudflare workers-rs,
+# browsers) can serve Tangram surfaces from it.
+[dependencies]
+anyhow.workspace = true
+automerge.workspace = true
+autosurgeon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -8,16 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::http::{HeaderValue, header};
-use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
-};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::action::Actions;
-use crate::store::{Ctx, Store};
-use crate::{Model, mcp, sync, web};
+use crate::store::Store;
+use crate::{Ctx, Model, mcp, sync, web};
 
 /// Builder + runtime for a Tangram app.
 ///
@@ -126,23 +123,18 @@ impl<M: Model + Actions> App<M> {
             tokio::spawn(sync::run_remote(remote, store.clone()));
         }
 
-        let mcp_service = StreamableHttpService::new(
-            {
-                let bridge = mcp::McpBridge::new(store.clone(), self.instructions.clone());
-                move || Ok(bridge.clone())
-            },
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default(),
-        );
-
         let router = web::router(store.clone(), ui_dir)
-            .nest_service("/mcp", mcp_service)
+            .merge(mcp::router(
+                store.clone(),
+                self.name.clone(),
+                self.instructions.clone(),
+            ))
             .layer(SetResponseHeaderLayer::overriding(
                 header::CONTENT_SECURITY_POLICY,
                 csp,
             ))
             .layer(TraceLayer::new_for_http());
-        Ok((router, Ctx::new(store)))
+        Ok((router, store.ctx()))
     }
 
     /// The per-app remote from the environment: `TANGRAM_REMOTE_<NAME>`.
