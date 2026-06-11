@@ -46,9 +46,13 @@ interface guest {
 
     /// Describe the app: JSON
     ///   {"name","instructions","actions":[{"name","description","mutates",
-    ///    "input-schema"}..]}
+    ///    "input-schema"}..],"capabilities"?:{..}}
     /// — everything the host needs to derive the HTTP action routes and the
-    /// MCP tool list.
+    /// MCP tool list. The optional `capabilities` object is computed by the
+    /// app at instantiation (e.g. from its granted env vars) and served
+    /// verbatim by the host at `GET /<app>/api/capabilities`; when absent
+    /// the host serves no capabilities route for the app, matching a native
+    /// app without the custom probe.
     describe: func() -> string;
 
     /// The deterministic genesis document bytes: fixed `tangram-genesis!`

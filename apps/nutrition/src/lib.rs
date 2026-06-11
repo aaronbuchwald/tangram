@@ -560,6 +560,17 @@ fn now_ms() -> i64 {
     tangram::time::now_ms()
 }
 
+/// The capabilities object reported by `GET /api/capabilities` — ONE
+/// constructor for both the native route (`api.rs`) and the WASM
+/// component's `describe()` manifest, so the two surfaces are identical by
+/// construction.
+pub(crate) fn capabilities_json(strategy: Strategy) -> serde_json::Value {
+    serde_json::json!({
+        "strategy": strategy.name(),
+        "description_input": strategy.can_resolve(),
+    })
+}
+
 /// MCP instructions, shared between the native app builder and the WASM
 /// component's `describe()` export.
 const INSTRUCTIONS: &str = "A replicated nutrition tracker. Log meals via log_meal: either \
@@ -594,9 +605,17 @@ pub fn with_api(router: axum::Router, _ctx: Ctx<Nutrition>) -> axum::Router {
 
 // Compiled for wasm32-wasip2, the same model + actions become a Tangram
 // component (`tangram-host` owns the platform around it; strategy HTTP goes
-// through the host's allowlist-enforced `http-fetch` import).
+// through the host's allowlist-enforced `http-fetch` import). The
+// capabilities object is computed at instantiation from the env vars the
+// host grants the component, exactly as the native `api.rs` route computes
+// it at startup — the host serves it at `GET /nutrition/api/capabilities`.
 #[cfg(target_family = "wasm")]
 tangram::export_component!(Nutrition {
     name: "nutrition",
     instructions: INSTRUCTIONS,
+    capabilities: || {
+        let (strategy, reason) = Strategy::from_env_with_reason();
+        tracing::info!("nutrition strategy: {} ({reason})", strategy.name());
+        Some(capabilities_json(strategy))
+    },
 });

@@ -50,6 +50,7 @@ impl AppEntry {
         let router = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/api/state", get(state))
+            .route("/api/capabilities", get(capabilities))
             .route("/api/actions", get(list_actions))
             .route("/api/actions/{name}", axum::routing::post(run_action))
             .route("/api/events", get(events))
@@ -121,6 +122,16 @@ async fn dispatch_app(State(host): State<Arc<Host>>, mut req: Request) -> Respon
 
 async fn state(State(rt): State<Arc<AppRuntime>>) -> axum::Json<serde_json::Value> {
     axum::Json(rt.state_json().await)
+}
+
+/// The app's capabilities object from its `describe()` manifest (computed by
+/// the component at instantiation from its granted env). Apps that publish
+/// none get a 404, matching a native app without the custom probe route.
+async fn capabilities(State(rt): State<Arc<AppRuntime>>) -> Response {
+    match &rt.describe.capabilities {
+        Some(caps) => axum::Json(caps.clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn list_actions(State(rt): State<Arc<AppRuntime>>) -> axum::Json<serde_json::Value> {

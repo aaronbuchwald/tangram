@@ -206,6 +206,15 @@ grants no `allow_hosts` simply cannot reach the network: nutrition's
 description-based `log_meal` then fails with an error saying which host to
 grant in `apps.toml`.
 
+Custom capability probes survive the cutover too: a component can publish an
+optional `capabilities` object in its `describe()` manifest, computed at
+instantiation from the env vars its spec grants, and the host serves it at
+`GET /<app>/api/capabilities` (404 for apps that publish none). Nutrition
+uses this to report its active strategy with the exact same JSON as its
+native route — same env, same bytes — so its UI offers description-based
+logging under the host as well (pinned by
+`crates/tangram-host/tests/capabilities.rs`).
+
 ## Getting started: a persistent remote + a local replica
 
 The day-to-day setup: a remote box runs the apps permanently; your laptop
@@ -272,6 +281,14 @@ TANGRAM_REMOTE_NOTES=http://127.0.0.1:8080/notes/sync \
 TANGRAM_REMOTE_NUTRITION=http://127.0.0.1:8080/nutrition/sync \
 cargo run --release -p tangram-shell
 ```
+
+To run the replica on the WASM runtime instead of the native shell, pass
+`--wasm`: `replica.sh connect --wasm` builds the components plus the release
+`tangram-host`, generates a replica `apps.toml` (per-app data dirs under
+`--data-dir`, per-app `remote` pointing at the remote base, nutrition's
+allowlist and `${VAR}` env grants mirroring the native strategy selection),
+and serves the same surfaces on `--bind`. `status`/`stop` work for either
+mode — the pid file (`replica.pid` vs `replica-wasm.pid`) distinguishes them.
 
 ### 4. Point your local MCP at the replica
 

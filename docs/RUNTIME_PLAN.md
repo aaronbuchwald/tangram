@@ -176,9 +176,13 @@ capability at all — the host is the only thing touching `$HOME/.<app-name>`.
   `/<app>/mcp` routed through it (later phase; the host serves MCP directly
   for now).
 - `tangram-shell` stays as zero-dependency dev mode (unchanged, verified).
-- Known gap: custom native routes (nutrition's `GET /api/capabilities`
-  probe) don't exist in the component world; its UI degrades gracefully to
-  components-only input. Needs a `describe()`-level capability story later.
+- [x] Capabilities parity (the former known gap): `describe()` carries an
+  optional `capabilities` object, computed by the app at instantiation from
+  its granted env (nutrition derives it exactly as its native
+  `GET /api/capabilities` route does — one shared constructor), and the
+  host serves it at `GET /<app>/api/capabilities` (404 for apps that
+  publish none, matching a native app without the probe). Byte-for-byte
+  parity native↔host is pinned by `crates/tangram-host/tests/capabilities.rs`.
 - Exit met: edit `apps.toml` → component live at `/<app>/` in well under a
   second; remove → gone; same binary + config on any Linux/macOS host.
 

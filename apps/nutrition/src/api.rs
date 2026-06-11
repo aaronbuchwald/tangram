@@ -8,22 +8,19 @@
 
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::json;
 
 use crate::strategy::Strategy;
 
 /// The capabilities route. Resolves (and logs) the active strategy once at
-/// startup.
+/// startup. The JSON body comes from [`crate::capabilities_json`] — the same
+/// constructor the WASM component publishes through `describe()`, so the
+/// native route and `tangram-host`'s `GET /<app>/api/capabilities` answer
+/// identically for the same environment.
 pub fn routes() -> Router {
     let (strategy, reason) = Strategy::from_env_with_reason();
     tracing::info!("nutrition strategy: {} ({reason})", strategy.name());
     Router::new().route(
         "/api/capabilities",
-        get(move || async move {
-            Json(json!({
-                "strategy": strategy.name(),
-                "description_input": strategy.can_resolve(),
-            }))
-        }),
+        get(move || async move { Json(crate::capabilities_json(strategy)) }),
     )
 }
