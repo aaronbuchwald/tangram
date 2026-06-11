@@ -12,6 +12,18 @@
 # entries win on name collision. Set TANGRAM_AUTH_TOKEN (.env) to gate the
 # registry's mutating routes — required for any non-loopback BIND_ADDR.
 
+# MCP through agentgateway (optional, RUNTIME_PLAN D3). The host runs the
+# binary as a supervised child on an internal loopback port and routes
+# /<app>/mcp through it, plus the aggregate /mcp endpoint (every app's tools
+# on one session, namespaced <app>_<tool>). Its config is GENERATED from the
+# merged desired state on every converge — never edit it by hand. Missing
+# binary → the host logs a warning and serves /<app>/mcp directly (no
+# aggregate endpoint). This section is read at startup; restart to change it.
+[gateway]
+enabled = true
+# binary = "/usr/local/bin/agentgateway"  # default: `agentgateway` on $PATH
+# port = 19200                            # internal port; default: auto
+
 [apps.registry]
 component = "target/wasm32-wasip2/release/registry.wasm"
 ui = "apps/registry/ui"

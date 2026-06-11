@@ -112,14 +112,38 @@ impl AppEntry {
 }
 
 /// The root router: index page, fleet status, plus the dynamic
-/// `/<app>/...` dispatcher.
-pub fn root_router(host: Arc<Host>) -> Router {
+/// `/<app>/...` dispatcher. With `via_gateway` (the PUBLIC listener when the
+/// host runs an agentgateway child), MCP paths — per-app `/<app>/mcp` and
+/// the aggregate `/mcp` — are reverse-proxied through the gateway; the
+/// INTERNAL loopback listener always serves apps directly (it is what the
+/// gateway targets, so it must never proxy back — that would loop).
+pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/fleet", get(fleet))
+        .route("/mcp", axum::routing::any(aggregate_mcp))
         .fallback(dispatch_app)
-        .with_state(host)
+        .with_state((host, via_gateway))
+}
+
+/// The aggregate MCP endpoint: every app's tools on ONE session, namespaced
+/// `<app>_<tool>` — agentgateway's multiplexing. Without a gateway there is
+/// nothing to aggregate and the route 404s (per-app `/<app>/mcp` still
+/// serves directly).
+async fn aggregate_mcp(
+    State((host, via_gateway)): State<(Arc<Host>, bool)>,
+    req: Request,
+) -> Response {
+    match host.gateway.as_ref().filter(|_| via_gateway) {
+        Some(gateway) => gateway.proxy(req).await,
+        None => (
+            StatusCode::NOT_FOUND,
+            "no aggregate /mcp endpoint (enable [gateway] in apps.toml); \
+             per-app MCP is at /<app>/mcp",
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/fleet` — live host-level status for every desired app:
@@ -127,7 +151,7 @@ pub fn root_router(host: Arc<Host>) -> Router {
 /// running, healthy (the live instance answers a state probe), and the
 /// last converge error if it failed to start. This is observation of THIS
 /// host — deliberately not part of the registry's replicated document.
-async fn fleet(State(host): State<Arc<Host>>) -> axum::Json<serde_json::Value> {
+async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_json::Value> {
     let statuses = host.fleet.read().await.clone();
     let apps = host.apps.read().await;
     let mut out = Vec::with_capacity(statuses.len());
@@ -148,13 +172,24 @@ async fn fleet(State(host): State<Arc<Host>>) -> axum::Json<serde_json::Value> {
             "error": status.error,
         }));
     }
-    axum::Json(json!({ "apps": out }))
+    // Host-level MCP gateway observation (null = direct serving).
+    let gateway = host.gateway.as_ref().map(|gw| {
+        json!({
+            "running": gw.running(),
+            "pid": gw.child_pid(),
+            "port": gw.port,
+        })
+    });
+    axum::Json(json!({ "apps": out, "gateway": gateway }))
 }
 
 /// Route `/<app>` and `/<app>/...` to the app's router, resolved against the
 /// LIVE app table — this is what makes apps.toml edits take effect without
 /// restarting the host.
-async fn dispatch_app(State(host): State<Arc<Host>>, mut req: Request) -> Response {
+async fn dispatch_app(
+    State((host, via_gateway)): State<(Arc<Host>, bool)>,
+    mut req: Request,
+) -> Response {
     let path = req.uri().path().to_string();
     let Some(without_slash) = path.strip_prefix('/') else {
         return StatusCode::NOT_FOUND.into_response();
@@ -176,6 +211,18 @@ async fn dispatch_app(State(host): State<Arc<Host>>, mut req: Request) -> Respon
         // The app UIs fetch relative paths, so the prefix must end with a
         // slash for them to resolve (same redirect the shell serves).
         return Redirect::permanent(&format!("/{name}/")).into_response();
+    }
+
+    // The MCP plane goes through agentgateway when the host runs one: the
+    // gateway hairpins to this app's endpoint on the INTERNAL listener
+    // (whose router has via_gateway = false), where the bearer gate on
+    // mutating tools still applies — the gateway forwards Authorization.
+    if via_gateway
+        && (rest == "/mcp" || rest.starts_with("/mcp/"))
+        && let Some(gateway) = host.gateway.as_ref()
+    {
+        // Path untouched: agentgateway matches the same /<app>/mcp prefix.
+        return gateway.proxy(req).await;
     }
 
     // Strip the `/<app>` prefix and forward to the app's router.
@@ -294,7 +341,7 @@ async fn sync_events(
 
 // ── index ────────────────────────────────────────────────────────────────────
 
-async fn index(State(host): State<Arc<Host>>) -> Html<String> {
+async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
     let apps = host.apps.read().await;
     let cards: String = apps
         .values()
