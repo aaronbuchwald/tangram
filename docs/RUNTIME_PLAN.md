@@ -511,7 +511,53 @@ hosted use of the remote, and OAuth-connected local instances.
     approval on automated capability verification (manifest ⊆ audited
     imports), a sandboxed smoke-run, and an LLM behavioral sanity check.
     Until then the catalog is operator-curated via `add_listing`.
+- [x] **Phase 9 — federated fleet state** — delivered 2026-06-11. Installing
+  or removing an app on ANY tangram-host propagates to all of them
+  (FULL-PROPAGATION, owner-approved). The insight: the registry app is already
+  a replicated CRDT whose document IS the fleet's desired state, and the host
+  already converges from it — so "install on one → runs on all" is just making
+  the registry DOCUMENT sync between hosts and relying on the existing
+  converge. Phase 8's `component_url` + `component_sha256` is what makes a
+  synced entry portable (fetch-and-verify-anywhere, not a host-local path).
+  - Registry document sync was already wired by construction (a registry app
+    is an `AppSpec`, so it can carry `remote`; the host already starts the
+    dial-out sync client for any spec with a `remote` AND already re-converges
+    on a registry doc change — action, MCP call, or **sync from a peer**).
+    Federation = setting `remote = "<peer>/registry/sync"` on the registry app.
+    A federated registry additionally DERIVES each installed app's own sync
+    remote (`<base>/<app>/sync`, carrying the registry's `remote_token`), so
+    one `remote` setting replicates both the fleet membership and each app's
+    data (`registry::Federation` / `sync_base`).
+  - Portability enforcement: a federated registry's entries are seen by every
+    peer, so a local `component` PATH is host-local. Entries are tagged
+    `federated` through the merge (`registry::RegistryDesired`); a peer that
+    lacks a path-only entry reports a clear PORTABILITY fleet error
+    (`Host::ensure_app`), keeps converging everything else, and never thrashes
+    the shared doc. Use `component_url` + `component_sha256` for portable
+    installs (a parse-time warning nudges toward it).
+  - Per-host secrets: the replicated document carries env KEYS and `${VAR}`
+    references only; each host expands them from its own environment, so a peer
+    missing a secret runs the app degraded (nutrition → offline) or errors
+    cleanly — secret VALUES never sync.
+  - Anti-flap / idempotence: runtime failures (fetch errors, missing
+    artifacts, unresolved secrets) live ONLY in `GET /api/fleet`, never written
+    back to the registry document. The document is desired state, so two hosts
+    converging the same doc cannot oscillate (the converge is already
+    idempotent for up-to-date apps).
+  - `.agents/skills/local-replica` `--wasm` is now federated registry-bootstrap:
+    it starts one registry app pointed at `<remote>/registry/sync` and lets
+    convergence pull the rest of the fleet down (fetched+verified via the
+    Phase-8 cache, data via the derived per-app remotes); the native path is
+    unchanged.
+  - Pinned by `crates/tangram-host/tests/federated_fleet.rs` (two hosts on
+    19xxx; self-skips without the wasm components): install-by-url on A → runs
+    on BOTH (~0.7–2.3 s), a note on A replicates to B via the derived remote,
+    remove on B → gone on A, both restart → fleet restored from the persisted
+    synced docs, a path-only entry → clear portability fleet error while the
+    rest stays healthy, and a `${SECRET}` unset on B → degraded with no leak
+    and no converge crash. Registry/tenant/gateway/marketplace tests stay green.
 
 Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →
-Phase 5 → {Phase 6, Phase 7 in parallel} → Phase 8 (CF surface after 7).
+Phase 5 → {Phase 6, Phase 7 in parallel} → Phase 8 (CF surface after 7) →
+Phase 9 (federated fleet over the registry doc).

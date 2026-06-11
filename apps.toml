@@ -28,6 +28,13 @@ enabled = true
 component = "target/wasm32-wasip2/release/registry.wasm"
 ui = "apps/registry/ui"
 registry = true
+# Federate the fleet (RUNTIME_PLAN Phase 9; README "Federated fleet"): give
+# the registry a `remote` and install/remove on ANY host propagates to all —
+# the registry document syncs and each host's converge follows. Federated
+# entries should use component_url+component_sha256 (portable everywhere);
+# a local `component` path is host-local and fleet-errors on peers.
+# remote = "https://other-host:8080/registry/sync"
+# remote_token = "${TANGRAM_REMOTE_TOKEN}"   # for a private peer
 
 # The marketplace (RUNTIME_PLAN Phase 8): a catalog of installable apps with
 # pinned url+sha256 artifacts and capability manifests; its Install button

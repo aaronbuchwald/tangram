@@ -192,7 +192,9 @@ impl Host {
         for (name, spec) in config.apps.iter().filter(|(_, s)| s.registry && s.enabled) {
             let key = AppKey::top(name);
             let gate = self.auth_token.as_deref();
-            if let Err(e) = self.ensure_app(&mut apps, &key, spec, gate).await {
+            // A registry app is file-controlled — its own component path is
+            // local-authoritative, never a federated entry.
+            if let Err(e) = self.ensure_app(&mut apps, &key, spec, gate, false).await {
                 errors.insert(key, e);
             }
         }
@@ -212,6 +214,7 @@ impl Host {
                         Desired {
                             spec: s.clone(),
                             source: Source::File,
+                            federated: false,
                         },
                     )
                 })
@@ -236,7 +239,7 @@ impl Host {
                 ) {
                     Ok(effective) => {
                         if let Err(e) = self
-                            .ensure_app(&mut apps, &key, &effective, Some(token))
+                            .ensure_app(&mut apps, &key, &effective, Some(token), false)
                             .await
                         {
                             errors.insert(key, e);
@@ -253,29 +256,45 @@ impl Host {
         // The registry layer of desired state: every running registry app's
         // replicated spec list, scoped to where the registry lives — a
         // tenant's registry drives THAT tenant's desired state only, so app
-        // names colliding across tenants are non-events.
-        let mut top_entries = Vec::new();
-        let mut tenant_entries: BTreeMap<String, Vec<(String, AppSpec)>> = BTreeMap::new();
-        let registry_keys: Vec<AppKey> = config
+        // names colliding across tenants are non-events. A registry whose
+        // `remote` is set is FEDERATED: its document syncs with a peer, so
+        // (Phase 9) every entry it carries is tagged `federated`, a
+        // local-`component` PATH entry is flagged non-portable, and each
+        // installed app gets a derived `<base>/<app>/sync` remote so its
+        // OWN document replicates with the same peer (one `remote` syncs both
+        // desired state and data).
+        let mut top_entries: Vec<registry::RegistryDesired> = Vec::new();
+        let mut tenant_entries: BTreeMap<String, Vec<registry::RegistryDesired>> = BTreeMap::new();
+        // (key, federation coordinates) for every registry app, top-level and
+        // per tenant. `Some` ⇒ federated; the sync base + token derive the
+        // installed apps' per-document remotes.
+        let federation_of = |spec: &AppSpec| -> Option<registry::Federation> {
+            spec.remote.as_deref().map(|remote| registry::Federation {
+                base: registry::sync_base(remote),
+                token: spec.remote_token.clone(),
+            })
+        };
+        let registry_keys: Vec<(AppKey, Option<registry::Federation>)> = config
             .apps
             .iter()
             .filter(|(_, s)| s.registry)
-            .map(|(n, _)| AppKey::top(n))
+            .map(|(n, s)| (AppKey::top(n), federation_of(s)))
             .chain(tenant_file.iter().flat_map(|(tname, layer)| {
                 layer
                     .iter()
                     .filter(|(_, s)| s.registry)
-                    .map(move |(n, _)| AppKey::tenant(tname, n))
+                    .map(move |(n, s)| (AppKey::tenant(tname, n), federation_of(s)))
             }))
             .collect();
-        for key in registry_keys {
+        for (key, federation) in registry_keys {
             if let Some(entry) = apps.get(&key) {
                 // state_json is verbatim component output (a String since the
                 // float-rendering fix); the registry layer needs the parsed
                 // tree to walk specs — exact now that float_roundtrip is on.
                 match serde_json::from_str(&entry.runtime.state_json().await) {
                     Ok(state) => {
-                        let parsed = registry::parse_state(&key.to_string(), &state);
+                        let parsed =
+                            registry::parse_state(&key.to_string(), &state, federation.as_ref());
                         match &key.tenant {
                             Some(tname) => tenant_entries
                                 .entry(tname.clone())
@@ -299,7 +318,7 @@ impl Host {
             let entries = tenant_entries.remove(tname).unwrap_or_default();
             // The registry doc's list order is install order — max_apps
             // evicts the NEWEST excess install, never an earlier one.
-            let install_order: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+            let install_order: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
             let merged = registry::merge(layer, entries);
             let tenant_spec = &config.tenants.tenants[tname];
             let tenant_root = data_root.join(tname);
@@ -344,7 +363,10 @@ impl Host {
                 None => self.auth_token.as_deref(),
                 Some(tname) => tokens.get(tname).map(String::as_str),
             };
-            if let Err(e) = self.ensure_app(&mut apps, key, &want.spec, gate).await {
+            if let Err(e) = self
+                .ensure_app(&mut apps, key, &want.spec, gate, want.federated)
+                .await
+            {
                 errors.insert(key.clone(), e);
             }
         }
@@ -397,6 +419,7 @@ impl Host {
         key: &AppKey,
         spec: &AppSpec,
         gate_token: Option<&str>,
+        federated: bool,
     ) -> Result<(), String> {
         if spec.registry && key.tenant.is_none() && self.auth_token.is_none() && !self.bind_loopback
         {
@@ -414,7 +437,29 @@ impl Host {
         // converge error — a running instance keeps serving, like a failed
         // reload.
         let component_path = match spec.component_source().map_err(|e| e.to_string())? {
-            config::ComponentSource::Path(path) => path,
+            config::ComponentSource::Path(path) => {
+                // Portability gate (Phase 9): a federated registry's entries
+                // are seen by every peer, so a local component PATH is
+                // host-local. A peer that lacks the path reports a clear
+                // fleet error (artifact missing) — NOT a bare "file not
+                // found" — and never mutates the shared document; it keeps
+                // converging everything else. The host that wrote the entry
+                // (where the path exists) runs it normally.
+                if federated && !path.exists() {
+                    let msg = format!(
+                        "federated registry entry points at a local component path that does \
+                         not exist on this host ({}) — local paths are not portable across a \
+                         federated fleet; reinstall with component_url + component_sha256",
+                        path.display()
+                    );
+                    tracing::error!("{key}: {msg}");
+                    if apps.contains_key(key) {
+                        return Err(format!("{msg} (old instance still serving)"));
+                    }
+                    return Err(msg);
+                }
+                path
+            }
             config::ComponentSource::Url { url, sha256 } => self
                 .fetcher
                 .resolve(&key.to_string(), &url, &sha256)

@@ -28,33 +28,48 @@ Pass the user's arguments through: $ARGUMENTS
   coexist with a primary instance in the same checkout.
 - `--env KEY=VALUE` (repeatable, connect only): extra environment exported to
   the started replica, e.g. `--env NUTRITION_STRATEGY=offline`. In `--wasm`
-  mode the variable is additionally granted to the nutrition component (as a
-  `${KEY}` reference in the generated `apps.toml`, so the value never lands
-  in a file).
+  mode it is passed straight to the host process, where `${KEY}` references in
+  the synced registry doc expand — so the value resolves locally and never
+  lands in a file or the replicated document.
 - `--wasm` (connect only): run the replica as WASM components under
-  `tangram-host` instead of the native shell.
+  `tangram-host`, FEDERATED with the remote (RUNTIME_PLAN Phase 9). It starts
+  only a registry app pointed at `<remote>/registry/sync` and lets
+  convergence pull the rest of the fleet down; an install/remove on ANY host
+  propagates fleet-wide.
 
 ## Behavior
 
 `connect` verifies the remote is reachable (clear error telling the user to
 start their SSH tunnel if not), builds the release shell, starts it in the
 background (pid file + log in the data dir; replaces a previous replica),
-waits until both apps' states converge with the remote, and prints the local
+waits until the apps' states converge with the remote, and prints the local
 and remote URLs plus the `claude mcp add` commands for pointing local MCP at
-the replica. `status` reports process/tunnel health and per-app sync
+the replica. The native (default) path is unchanged: notes + nutrition over
+`TANGRAM_REMOTE_*`. `status` reports process/tunnel health and per-app sync
 convergence. `stop` sends SIGINT to the replica.
 
-`connect --wasm` does the same against the WASM runtime: it builds the
-notes/nutrition components (`wasm32-wasip2`, release) and the release
-`tangram-host`, generates `<data-dir>/apps.toml` (per-app scratch data dirs
-under the data dir, per-app `remote` pointing at the configured remote base,
-nutrition's `api.calorieninjas.com` allowlist, and `${VAR}` env grants for
-whichever of `NUTRITION_STRATEGY`/`CALORIENINJAS_API_KEY`/`ANTHROPIC_*` are
-set in the environment or the repo `.env` — mirroring the native shell's
-strategy selection), then runs the host on `--bind`. The pid file
-distinguishes the modes (`replica.pid` = native shell, `replica-wasm.pid` =
-wasm host), so `status` and `stop` work on either, and `connect` in either
-mode replaces a running replica of the other.
+`connect --wasm` is FEDERATED registry-bootstrap (RUNTIME_PLAN Phase 9): it
+builds only the registry component (`wasm32-wasip2`, release) and the release
+`tangram-host`, generates `<data-dir>/apps.toml` with a single registry app
+whose `remote` is `<remote>/registry/sync`, then runs the host on `--bind`.
+The host syncs the registry DOCUMENT with the remote (the fleet's desired
+state) and converges the rest of the fleet from it — each app fetched and
+sha256-verified from its pinned `component_url` via the Phase-8
+content-addressed cache, and each app's OWN document replicated through a
+derived `<remote>/<app>/sync` remote. So one `remote` setting syncs both the
+fleet membership AND the data, and an install/remove on any host propagates
+everywhere. Offline fallback is whatever the persisted registry doc and the
+component cache already hold. The replica's app list is discovered from its
+`/api/fleet`, so `status`/`stop`/convergence track whatever the fleet
+currently runs. Per-host secrets stay per-host: the synced doc carries only
+env KEYS and `${VAR}` references; their VALUES must be in this host's
+environment / `.env` to resolve (whichever of
+`NUTRITION_STRATEGY`/`CALORIENINJAS_API_KEY`/`ANTHROPIC_*` are set are passed
+through to the host process), and a missing one runs that app degraded
+(nutrition → offline), never leaking. The pid file distinguishes the modes
+(`replica.pid` = native shell, `replica-wasm.pid` = wasm host), so `status`
+and `stop` work on either, and `connect` in either mode replaces a running
+replica of the other.
 
 Both `connect` and `status` also compare the local and remote nutrition
 `/api/capabilities`: if the remote can resolve meal descriptions

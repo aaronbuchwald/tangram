@@ -33,6 +33,15 @@ impl Source {
 pub struct Desired {
     pub spec: AppSpec,
     pub source: Source,
+    /// This entry came from a FEDERATED registry — one whose document syncs
+    /// with a peer (`remote` set). Used to enforce portability (Phase 9): a
+    /// federated registry's entries are seen by every peer, so a
+    /// local-`component` PATH (meaningful only on the host that wrote it) is
+    /// non-portable. A peer that lacks the path reports a
+    /// portability-flavored fleet error (see `Host::ensure_app`) rather than
+    /// a bare "file not found", and NEVER mutates the shared document — the
+    /// doc is desired state; runtime failures live only in `/api/fleet`.
+    pub federated: bool,
 }
 
 /// The registry model's state shape (apps/registry). Tolerant: defaults for
@@ -76,10 +85,59 @@ fn default_true() -> bool {
     true
 }
 
+/// A federated registry's sync coordinates (Phase 9), derived from the
+/// registry app's own `remote` (`<base>/registry/sync` → `base`). When a
+/// registry federates, every app it lists not only converges fleet-wide but
+/// also replicates its OWN document with the same peer: the host derives each
+/// installed app's sync remote as `<base>/<app>/sync` (carrying the
+/// registry's `remote_token`), so one `remote` setting syncs both the desired
+/// state AND the app data across the fleet. Apps installed BY url+hash become
+/// portable; their documents converge through these derived remotes.
+#[derive(Debug, Clone)]
+pub struct Federation {
+    /// The peer's sync base (no trailing slash, `/registry/sync` stripped).
+    pub base: String,
+    /// The bearer presented on every derived per-app sync remote (the
+    /// registry's resolved `remote_token`), for private peers.
+    pub token: Option<String>,
+}
+
+impl Federation {
+    /// Derive `<base>/<app>/sync` for an installed app — the remote its
+    /// document replicates with, matching the registry's own peer.
+    fn app_remote(&self, app: &str) -> String {
+        format!("{}/{app}/sync", self.base)
+    }
+}
+
+/// Strip a registry app's `remote` (`…/registry/sync`) to the peer's sync
+/// base, so per-app remotes can be derived as `<base>/<app>/sync`. A remote
+/// that doesn't end in `/registry/sync` is used as-is (best effort).
+pub fn sync_base(registry_remote: &str) -> String {
+    let trimmed = registry_remote.trim_end_matches('/');
+    trimmed
+        .strip_suffix("/registry/sync")
+        .or_else(|| trimmed.strip_suffix("/registry"))
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
 /// Parse a registry app's `state-json` into validated app specs. Invalid
 /// entries (bad name, empty component/ui) are skipped with a warning — one
-/// bad install must not take down the rest of the fleet.
-pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, AppSpec)> {
+/// bad install must not take down the rest of the fleet. `federation` is
+/// `Some` when the registry federates (its `remote` is set): on a federated
+/// registry a local-`component` PATH entry is flagged non-portable (Phase 9)
+/// — it works only on the host that wrote it; peers report a clear fleet
+/// error — AND each installed app gets a derived `remote` (`<base>/<app>/
+/// sync`) so its document replicates with the same peer. The entry is still
+/// returned (so the writing host runs it); the warning and the portability
+/// error path live downstream.
+pub fn parse_state(
+    registry: &str,
+    state: &serde_json::Value,
+    federation: Option<&Federation>,
+) -> Vec<RegistryDesired> {
+    let federated = federation.is_some();
     let parsed: RegistryState = match serde_json::from_value(state.clone()) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -102,17 +160,38 @@ pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, Ap
                 );
                 return None;
             }
+            let component = (!entry.component.as_os_str().is_empty()).then_some(entry.component);
+            // Portability advisory (Phase 9): a federated registry's document
+            // is seen by every peer, so a local path means nothing on a peer.
+            // We warn but do not skip — the writing host runs it fine; a peer
+            // that lacks the path surfaces a clear fleet error in ensure_app.
+            if federated && component.is_some() {
+                tracing::warn!(
+                    "{registry}: entry {:?} uses a local component PATH in a FEDERATED \
+                     registry — this is host-local and will fleet-error on peers that lack \
+                     the path; use component_url + component_sha256 for a portable install",
+                    entry.name
+                );
+            }
+            // A federated registry's apps replicate their OWN documents with
+            // the same peer: derive `<base>/<app>/sync` (with the registry's
+            // bearer). This is what turns "the fleet runs everywhere" into "a
+            // replica that also has the data" from one `remote` setting.
+            let (remote, remote_token) = match federation {
+                Some(fed) => (Some(fed.app_remote(&entry.name)), fed.token.clone()),
+                None => (None, None),
+            };
             let spec = AppSpec {
                 // Empty path in the replicated doc = "installed by URL".
-                component: (!entry.component.as_os_str().is_empty()).then_some(entry.component),
+                component,
                 component_url: entry.component_url,
                 component_sha256: entry.component_sha256,
                 ui: entry.ui,
                 data_dir: entry.data_dir,
                 allow_hosts: entry.allow_hosts,
                 env: entry.env.into_iter().map(|e| (e.key, e.value)).collect(),
-                remote: None,
-                remote_token: None,
+                remote,
+                remote_token,
                 registry: false,
                 require_auth: false,
                 enabled: entry.enabled,
@@ -124,7 +203,11 @@ pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, Ap
                 tracing::warn!("{registry}: skipping entry {:?}: {e:#}", entry.name);
                 return None;
             }
-            Some((entry.name, spec))
+            Some(RegistryDesired {
+                name: entry.name,
+                spec,
+                federated,
+            })
         })
         .collect()
 }
@@ -139,7 +222,7 @@ pub fn parse_state(registry: &str, state: &serde_json::Value) -> Vec<(String, Ap
 ///   document — that stays under the operator's file-level control.
 pub fn merge(
     file: &BTreeMap<String, AppSpec>,
-    registry_entries: Vec<(String, AppSpec)>,
+    registry_entries: Vec<RegistryDesired>,
 ) -> BTreeMap<String, Desired> {
     let mut desired: BTreeMap<String, Desired> = file
         .iter()
@@ -149,27 +232,42 @@ pub fn merge(
                 Desired {
                     spec: spec.clone(),
                     source: Source::File,
+                    // The file layer is local-authoritative, never "federated
+                    // desired state from a peer".
+                    federated: false,
                 },
             )
         })
         .collect();
-    for (name, spec) in registry_entries {
-        if file.get(&name).is_some_and(|f| f.registry) {
+    for entry in registry_entries {
+        if file.get(&entry.name).is_some_and(|f| f.registry) {
             tracing::warn!(
-                "registry entry {name:?} collides with a registry app in apps.toml — \
-                 ignored (registry apps are file-controlled)"
+                "registry entry {:?} collides with a registry app in apps.toml — \
+                 ignored (registry apps are file-controlled)",
+                entry.name
             );
             continue;
         }
         desired.insert(
-            name,
+            entry.name,
             Desired {
-                spec,
+                spec: entry.spec,
                 source: Source::Registry,
+                federated: entry.federated,
             },
         );
     }
     desired
+}
+
+/// One spec parsed out of a registry document, tagged with whether the
+/// registry it came from is federated (its `remote` is set). Federation is a
+/// per-registry property, so every entry from one document shares it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegistryDesired {
+    pub name: String,
+    pub spec: AppSpec,
+    pub federated: bool,
 }
 
 #[cfg(test)]
@@ -198,6 +296,15 @@ mod tests {
         json!({ "apps": entries })
     }
 
+    /// A registry entry as it arrives at `merge` (non-federated by default).
+    fn entry(name: &str, spec: AppSpec) -> RegistryDesired {
+        RegistryDesired {
+            name: name.to_string(),
+            spec,
+            federated: false,
+        }
+    }
+
     #[test]
     fn parses_entries_and_skips_invalid_ones() {
         let state = registry_state(json!([
@@ -212,9 +319,9 @@ mod tests {
             { "name": "bad name", "component": "x.wasm", "ui": "u" },
             { "name": "noview", "component": "", "ui": "u" }
         ]));
-        let entries = parse_state("registry", &state);
+        let entries = parse_state("registry", &state, None);
         assert_eq!(entries.len(), 1);
-        let (name, spec) = &entries[0];
+        let RegistryDesired { name, spec, .. } = &entries[0];
         assert_eq!(name, "nutrition");
         assert_eq!(spec.allow_hosts, vec!["api.calorieninjas.com".to_string()]);
         assert_eq!(spec.env.get("K").map(String::as_str), Some("${V}"));
@@ -242,9 +349,9 @@ mod tests {
               "component_sha256": "nothex", "ui": "u" },
             { "name": "neither", "ui": "u" }
         ]));
-        let entries = parse_state("registry", &state);
+        let entries = parse_state("registry", &state, None);
         assert_eq!(entries.len(), 1);
-        let (name, spec) = &entries[0];
+        let RegistryDesired { name, spec, .. } = &entries[0];
         assert_eq!(name, "by-url");
         assert_eq!(spec.component, None);
         assert_eq!(
@@ -258,8 +365,64 @@ mod tests {
 
     #[test]
     fn parse_tolerates_non_registry_state() {
-        assert!(parse_state("registry", &json!({"notes": []})).is_empty());
-        assert!(parse_state("registry", &json!({"apps": "nope"})).is_empty());
+        assert!(parse_state("registry", &json!({"notes": []}), None).is_empty());
+        assert!(parse_state("registry", &json!({"apps": "nope"}), None).is_empty());
+    }
+
+    #[test]
+    fn federated_path_entry_is_tagged_for_portability() {
+        let state = registry_state(json!([
+            { "name": "path-app", "component": "local.wasm", "ui": "u" },
+            {
+                "name": "url-app",
+                "component_url": "https://example.test/u.wasm",
+                "component_sha256": "a".repeat(64),
+                "ui": "u"
+            }
+        ]));
+        // Federated: every entry is tagged federated; the path entry is the
+        // non-portable one (the warning fires; the entry is still returned),
+        // and each app gets a derived `<base>/<app>/sync` remote so its
+        // document replicates with the registry's peer.
+        let fed = Federation {
+            base: "https://peer.test".into(),
+            token: Some("${TOK}".into()),
+        };
+        let entries = parse_state("registry", &state, Some(&fed));
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.federated));
+        let path_app = entries.iter().find(|e| e.name == "path-app").unwrap();
+        assert!(path_app.spec.component.is_some(), "path entry kept");
+        let url_app = entries.iter().find(|e| e.name == "url-app").unwrap();
+        assert_eq!(
+            url_app.spec.remote.as_deref(),
+            Some("https://peer.test/url-app/sync"),
+            "the app's own document replicates with the registry's peer"
+        );
+        assert_eq!(
+            url_app.spec.remote_token.as_deref(),
+            Some("${TOK}"),
+            "the registry's bearer reference (not a value) rides along"
+        );
+        // Non-federated: same parse, but nothing is flagged federated and no
+        // per-app remote is derived.
+        let entries = parse_state("registry", &state, None);
+        assert!(entries.iter().all(|e| !e.federated));
+        assert!(entries.iter().all(|e| e.spec.remote.is_none()));
+    }
+
+    #[test]
+    fn sync_base_strips_the_registry_sync_suffix() {
+        assert_eq!(
+            sync_base("https://host:8080/registry/sync"),
+            "https://host:8080"
+        );
+        assert_eq!(
+            sync_base("https://host/t/alice/registry/sync/"),
+            "https://host/t/alice"
+        );
+        // A base that isn't the conventional registry endpoint is used as-is.
+        assert_eq!(sync_base("https://host/weird"), "https://host/weird");
     }
 
     #[test]
@@ -269,7 +432,7 @@ mod tests {
         file.insert("notes".to_string(), file_spec(false));
         let mut installed = file_spec(false);
         installed.component = Some("nutrition.wasm".into());
-        let desired = merge(&file, vec![("nutrition".to_string(), installed)]);
+        let desired = merge(&file, vec![entry("nutrition", installed)]);
         assert_eq!(desired.len(), 3);
         assert_eq!(desired["registry"].source, Source::File);
         assert_eq!(desired["notes"].source, Source::File);
@@ -282,7 +445,7 @@ mod tests {
         file.insert("notes".to_string(), file_spec(false));
         let mut overriding = file_spec(false);
         overriding.component = Some("other-notes.wasm".into());
-        let desired = merge(&file, vec![("notes".to_string(), overriding)]);
+        let desired = merge(&file, vec![entry("notes", overriding)]);
         assert_eq!(desired["notes"].source, Source::Registry);
         assert_eq!(
             desired["notes"].spec.component,
@@ -296,7 +459,7 @@ mod tests {
         file.insert("notes".to_string(), file_spec(false));
         let mut disabled = file_spec(false);
         disabled.enabled = false;
-        let desired = merge(&file, vec![("notes".to_string(), disabled)]);
+        let desired = merge(&file, vec![entry("notes", disabled)]);
         // present (so the fleet reports it) but not enabled (so it won't run)
         assert!(!desired["notes"].spec.enabled);
         assert_eq!(desired["notes"].source, Source::Registry);
@@ -308,7 +471,7 @@ mod tests {
         file.insert("registry".to_string(), file_spec(true));
         let mut hostile = file_spec(false);
         hostile.enabled = false;
-        let desired = merge(&file, vec![("registry".to_string(), hostile)]);
+        let desired = merge(&file, vec![entry("registry", hostile)]);
         assert_eq!(desired["registry"].source, Source::File);
         assert!(desired["registry"].spec.enabled);
         assert!(desired["registry"].spec.registry);

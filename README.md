@@ -290,6 +290,48 @@ explicitly recorded TODO (see `apps/marketplace/README.md` and RUNTIME_PLAN
 Phase 8): automated manifest⊆imports verification, a sandboxed smoke-run,
 and an LLM behavioral check must gate approval first.
 
+### Federated fleet: install on one host, run on all (Phase 9)
+
+A registry is already a replicated CRDT whose document IS the fleet's desired
+state, and the host already converges from it — so federating the fleet is
+just pointing one host's registry at another's. Give the registry app a
+`remote` (its document syncs like any app's):
+
+```toml
+[apps.registry]
+component = "target/wasm32-wasip2/release/registry.wasm"
+ui = "apps/registry/ui"
+registry = true
+remote = "https://other-host:8080/registry/sync"   # ← federate
+# remote_token = "${TANGRAM_REMOTE_TOKEN}"          # for a private peer
+```
+
+Now `install_app` / `remove_app` / `set_enabled` on ANY host propagates to
+every host in the fleet (FULL-PROPAGATION): the registry document merges, and
+each host's existing converge brings the running set in line within seconds.
+A federated registry additionally derives each installed app's OWN sync
+remote (`<base>/<app>/sync`), so one `remote` setting replicates both the
+fleet membership AND each app's data. (This is what `replica.sh connect
+--wasm` now uses — start one registry, get the whole fleet; see the
+`local-replica` skill.)
+
+Two rules make federation safe:
+
+- **Portability** — a federated registry's entries are seen by every peer, so
+  a local `component` PATH (meaningful only on the host that wrote it) is
+  non-portable. Install federated apps with `component_url` + `component_sha256`
+  (Phase 8), which fetch-and-verify anywhere. A peer that lacks a path-only
+  entry reports a clear portability error in `GET /api/fleet`, keeps
+  converging everything else, and never thrashes the shared document.
+- **Per-host secrets** — the replicated document carries only env KEYS and
+  `${VAR}` references, never values. Each host expands `${VAR}` from its own
+  environment; a peer missing the secret runs the app degraded (e.g.
+  nutrition → offline) or errors cleanly. Secret VALUES never sync.
+
+Runtime failures (fetch errors, missing artifacts, unresolved secrets) live
+only in `GET /api/fleet`, never written back to the registry document — the
+document is desired state, so two hosts converging the same doc cannot fight.
+
 ### Auth: bearer token on mutating routes
 
 Set `TANGRAM_AUTH_TOKEN` (env or `.env`). Registry apps — and any app with

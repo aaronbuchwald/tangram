@@ -266,6 +266,7 @@ mod tests {
         let entry = |source| Desired {
             spec: spec(),
             source,
+            federated: false,
         };
         let mut desired = BTreeMap::new();
         desired.insert("registry".to_string(), entry(Source::File));
