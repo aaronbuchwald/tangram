@@ -22,6 +22,7 @@ tangram-core = { path = "crates/tangram-core" }
 tangram-macros = { path = "crates/tangram-macros" }
 
 anyhow = "1"
+async-trait = "0.1"
 automerge = "0.10"
 autosurgeon = "0.12"
 axum = "0.8"
@@ -32,6 +33,7 @@ notify = "8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"

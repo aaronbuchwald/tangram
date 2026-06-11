@@ -2228,6 +2228,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "secrecy"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2537,6 +2546,7 @@ name = "tangram-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "automerge",
  "axum",
  "base64",
@@ -2545,6 +2555,7 @@ dependencies = [
  "notify",
  "reqwest",
  "rmcp",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",

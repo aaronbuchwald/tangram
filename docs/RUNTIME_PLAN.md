@@ -556,6 +556,21 @@ hosted use of the remote, and OAuth-connected local instances.
     synced docs, a path-only entry → clear portability fleet error while the
     rest stays healthy, and a `${SECRET}` unset on B → degraded with no leak
     and no converge crash. Registry/tenant/gateway/marketplace tests stay green.
+- [x] **Phase 10a — secret-resolver seam** — delivered 2026-06-11 (ADR-0004).
+  A spec secret is now a `scheme://locator` *reference* resolved host-side at
+  converge through a `SecretResolver` trait + scheme registry
+  (`crates/tangram-host/src/secrets.rs`), into a `secrecy::SecretString`
+  (redacted `Debug`, zeroize-on-drop, never logged). Phase 10a ships EXACTLY
+  ONE resolver — `EnvResolver` for `env://NAME` (the host process env, today's
+  source) — and rewrites the existing `${VAR}` expansion so `${VAR}` is sugar
+  for `env://VAR`. Behavior is byte-identical: a missing var still expands to
+  empty → app runs degraded (nutrition → offline); an unknown scheme is a
+  clear error. Resolution still INJECTS the value into the component env in
+  10a (ADR-0005 / Phase 10b is what later moves it to the egress boundary so
+  the component never sees plaintext). The federated/tenant/nutrition flows are
+  unaffected (regression tests stay green); new unit tests cover env:// resolve,
+  ${VAR}→env:// equivalence, unknown-scheme error, missing-var degradation, and
+  SecretString Debug redaction.
 
 Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →

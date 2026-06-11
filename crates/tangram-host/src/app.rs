@@ -12,6 +12,7 @@ use tangram::sync::DocHandle as _;
 use crate::config::AppSpec;
 use crate::doc::AppDoc;
 use crate::runtime::ComponentHandle;
+use crate::secrets::SecretRegistry;
 
 /// The component's `describe()` manifest, parsed.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -115,12 +116,13 @@ impl AppRuntime {
     /// the converge loop downloaded into (`crate::fetch`).
     pub async fn build(
         engine: &wasmtime::Engine,
+        secrets: &SecretRegistry,
         name: &str,
         spec: &AppSpec,
         component_path: &Path,
     ) -> anyhow::Result<Self> {
         let component_mtime = component_mtime(component_path);
-        let env = spec.resolved_env(name);
+        let env = spec.resolved_env(secrets, name).await;
         let component =
             ComponentHandle::instantiate(engine, component_path, name, &spec.allow_hosts, &env)
                 .await
@@ -138,11 +140,18 @@ impl AppRuntime {
         let genesis = component.genesis().await.context("component genesis()")?;
         let doc = Arc::new(AppDoc::open(doc_path, &genesis)?);
 
-        let remote_task = spec.remote.clone().map(|remote| {
-            tracing::info!("{name}: replicating with {remote}");
-            let token = spec.resolved_remote_token(name);
-            tokio::spawn(tangram::sync::run_remote(remote, token, doc.clone()))
-        });
+        let remote_task = match spec.remote.clone() {
+            Some(remote) => {
+                tracing::info!("{name}: replicating with {remote}");
+                let token = spec.resolved_remote_token(secrets, name).await;
+                Some(tokio::spawn(tangram::sync::run_remote(
+                    remote,
+                    token,
+                    doc.clone(),
+                )))
+            }
+            None => None,
+        };
 
         Ok(Self {
             name: name.to_string(),
