@@ -1,0 +1,77 @@
+/// The MCP protocol machine as a component (ADR-0002): a thin WIT facade
+/// over `tangram_core::mcp::McpServer` so the Cloudflare Worker serves
+/// `/mcp` through the exact sans-io state machine every other Tangram host
+/// uses, instead of a TypeScript reimplementation of the wire contract.
+///
+/// The component is pure protocol: no I/O imports at all (the wasip2 std
+/// plumbing — random for session ids — is the only thing it touches).
+/// Sessions and pending tool calls live in component memory; a Durable
+/// Object restart resets them, which MCP clients recover from by
+/// re-initializing (same recovery as an rmcp server restart).
+package tangram:mcp;
+
+interface machine {
+    /// An incoming HTTP exchange on the /mcp endpoint, reduced to the parts
+    /// the protocol cares about (tangram_core::mcp::Request).
+    record http-request {
+        /// HTTP method, uppercase (POST, GET, DELETE).
+        method: string,
+        accept: option<string>,
+        content-type: option<string>,
+        session-id: option<string>,
+        body: list<u8>,
+    }
+
+    /// How to frame the response body (tangram_core::mcp::Body).
+    enum body-kind {
+        /// No body (202 Accepted).
+        empty,
+        /// text/plain transport error.
+        text,
+        /// A complete text/event-stream body; close after sending.
+        sse-message,
+        /// An endless text/event-stream: send `body`, then hold the
+        /// connection open (keep-alive comments are the embedder's job).
+        sse-stream,
+    }
+
+    record http-response {
+        status: u16,
+        /// Mcp-Session-Id header to set (issued by initialize).
+        session-id: option<string>,
+        body-kind: body-kind,
+        body: string,
+    }
+
+    /// A validated tools/call the embedder must execute and resolve.
+    record tool-call {
+        /// Opaque handle for resolve(); pending calls are dropped if never
+        /// resolved.
+        token: u64,
+        name: string,
+        args-json: string,
+    }
+
+    variant handled {
+        response(http-response),
+        tool-call(tool-call),
+    }
+
+    /// Configure the server identity and tool list (tools-json:
+    /// `[{"name","description","input_schema"}...]`). Resets all protocol
+    /// state; call once per instance.
+    init: func(name: string, version: string, instructions: option<string>, tools-json: string) -> result<_, string>;
+
+    /// Drive one HTTP exchange through the protocol.
+    handle: func(request: http-request) -> handled;
+
+    /// Resolve a pending tool call into its HTTP response. `outcome` is one
+    /// of ok | fail | unknown-tool | internal-error (the Tangram action
+    /// error contract: domain failures are tool results, only unknown tools
+    /// and internal faults are JSON-RPC errors).
+    resolve: func(token: u64, outcome: string, text: string) -> result<http-response, string>;
+}
+
+world mcp {
+    export machine;
+}

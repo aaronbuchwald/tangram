@@ -198,6 +198,12 @@ else
     log "cloud/cloudflare node_modules up to date (skipping npm ci)"
 fi
 
+# Since Phase 7 the Worker bundles the jco-transpiled app components
+# (ADR-0002), so they must exist for wrangler to start. This script's
+# assertions are unchanged: it still pins the sync-relay wire behavior.
+log "building + transpiling the app components (build-components.sh)…"
+bash "$CF_DIR/build-components.sh" >/dev/null
+
 pick_port RELAY_PORT
 pick_port INSPECTOR_PORT
 pick_port PORT_A

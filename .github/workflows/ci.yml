@@ -27,9 +27,18 @@ jobs:
       - run: |
           for f in .agents/skills/local-replica/replica.sh \
                    .agents/skills/systemd-service/service.sh \
-                   scripts/e2e-cloudflare-sync.sh; do
+                   scripts/e2e-cloudflare-sync.sh \
+                   scripts/e2e-cloudflare-apps.sh \
+                   cloud/cloudflare/build-components.sh; do
             bash -n "$f"
           done
+      # mcp-core is a standalone crate (cloud/cloudflare/mcp-core, ADR-0002):
+      # tangram-core's sans-io MCP machine as a component for the CF Worker.
+      # Built for real by the e2e jobs; lint it here.
+      - run: cargo fmt --check --manifest-path cloud/cloudflare/mcp-core/Cargo.toml
+      - run: >
+          cargo clippy --manifest-path cloud/cloudflare/mcp-core/Cargo.toml
+          --target wasm32-wasip2 -- -D warnings
       # The wasm components first: tangram-host's registry_lifecycle
       # integration test spawns the real host against them (it self-skips
       # when they're missing, so build them to make it actually run).
@@ -53,6 +62,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # the Worker bundles the jco-transpiled wasm32-wasip2 app
+          # components (ADR-0002), built by the script's prerequisites
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       # wrangler is pinned to ~4.86 (last line supporting Node 20.3+, which
       # this matches for parity with the dev box); Node 22 here also covers
@@ -63,6 +76,31 @@ jobs:
           cache: npm
           cache-dependency-path: cloud/cloudflare/package-lock.json
       - run: bash scripts/e2e-cloudflare-sync.sh
+
+  # Miniflare e2e for the Cloudflare APP RUNTIME (RUNTIME_PLAN Phase 7 /
+  # ADR-0002): the Worker hosts the jco-transpiled app components and the
+  # script asserts the full surface — UI, genesis byte-parity with native,
+  # action dispatch, SSE, MCP through the tangram-core machine, a native
+  # replica syncing bidirectionally with the miniflare-hosted app, and
+  # nutrition's offline fallback + http-fetch allowlist enforcement.
+  e2e-cloudflare-apps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloud/cloudflare/package-lock.json
+      - run: bash scripts/e2e-cloudflare-apps.sh
+      # Type-check the Worker against the generated component bindings
+      # (dist/components, produced by the e2e's build step).
+      - run: npx tsc --noEmit
+        working-directory: cloud/cloudflare
 
   # Phase 0 of docs/RUNTIME_PLAN.md: static musl binaries + scratch images.
   # Build-only (no push) — proves the sandbox packaging keeps working.
