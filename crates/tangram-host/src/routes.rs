@@ -487,9 +487,14 @@ async fn sync_events(
 /// their (authenticated) tenant index at `/t/<tenant>/`.
 async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
     let apps = host.apps.read().await;
-    let cards: String = apps
-        .keys()
-        .filter(|key| key.tenant.is_none())
+    // Deterministic order — alphabetical by app name — so this host, a local
+    // replica, and the Cloudflare worker all list apps identically. The live
+    // table is a HashMap, whose iteration order is otherwise non-deterministic
+    // across processes and even across runs (hash-seed randomization).
+    let mut keys: Vec<_> = apps.keys().filter(|key| key.tenant.is_none()).collect();
+    keys.sort_by(|a, b| a.app.cmp(&b.app));
+    let cards: String = keys
+        .into_iter()
         .map(|key| app_card(&key.route_prefix(), &key.app))
         .collect();
     index_page(
@@ -503,9 +508,14 @@ async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
 /// dispatcher): just their apps, linked under their namespace.
 async fn tenant_index(host: &Arc<Host>, tenant: &str) -> Response {
     let apps = host.apps.read().await;
-    let cards: String = apps
+    // Deterministic order — alphabetical by app name (same rule as `index`).
+    let mut keys: Vec<_> = apps
         .keys()
         .filter(|key| key.tenant.as_deref() == Some(tenant))
+        .collect();
+    keys.sort_by(|a, b| a.app.cmp(&b.app));
+    let cards: String = keys
+        .into_iter()
         .map(|key| app_card(&key.route_prefix(), &key.app))
         .collect();
     index_page(

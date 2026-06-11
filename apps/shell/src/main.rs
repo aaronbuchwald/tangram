@@ -11,7 +11,9 @@ use axum::response::{Html, Redirect};
 use axum::routing::get;
 use tracing_subscriber::EnvFilter;
 
-/// The apps this shell hosts, as (prefix, title, blurb).
+/// The apps this shell hosts, as (prefix, title, blurb). Kept alphabetical by
+/// prefix — the deterministic listing order all hosts/replicas agree on (same
+/// rule as tangram-host's index and the Cloudflare worker).
 const APPS: &[(&str, &str, &str)] = &[
     ("notes", "Notes", "a replicated notes list"),
     ("nutrition", "Nutrition", "a replicated nutrition tracker"),

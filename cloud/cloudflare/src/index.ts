@@ -466,10 +466,15 @@ async function handleTenant(
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    // Sorted alphabetically — the deterministic listing order every
+    // host/replica agrees on (matches tangram-host's index and the shell), so
+    // a CF-hosted home page lists apps in the same order regardless of how
+    // APPS is configured.
     const apps = (env.APPS ?? "")
       .split(",")
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
     if (url.pathname.startsWith("/auth/")) return handleAuth(request, env);
     if (url.pathname === "/account" || url.pathname.startsWith("/account/")) {
