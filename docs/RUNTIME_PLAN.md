@@ -608,3 +608,26 @@ Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →
 Phase 5 → {Phase 6, Phase 7 in parallel} → Phase 8 (CF surface after 7) →
 Phase 9 (federated fleet over the registry doc).
+
+## Decision: base-fleet federation is file-first (2026-06-11)
+
+A host's BASE fleet (the apps in `apps.toml`, `source: file`) is **per-host
+bootstrap config and does not federate**. Federation (Phase 9) syncs the
+registry *document* — i.e. apps installed at runtime via `install_app`, which
+carry `component_url` + `sha256` and are therefore portable. The base fleet
+stays file-defined; a **dev replica** (which has the repo) mirrors it by
+building the components locally (`replica.sh --wasm` reads the repo `apps.toml`
+and builds each app — see that skill).
+
+**Deferred (not built):** making a host's base fleet arrive on a **zero-build
+client** (a phone, a browser, or a stranger's machine that cannot compile)
+purely over sync. That requires the host to *register* its base apps in the
+registry document with fetchable `component_url` + `sha256` (the "registry-
+first" model) **plus an artifact-hosting pipeline** (components published to
+GitHub releases / an `/artifacts` route / R2-CDN with verified hashes,
+refreshed per release). This is a prerequisite *of* the Cloudflare multi-tenant
+SaaS / browser-client milestone, not an independent feature, and should be
+designed alongside that artifact pipeline (and the per-client "run here?"
+opt-in question) rather than bolted on. For the canonical self-hosted
+deployment (a server + the owner's own devices, all with the repo), file-first
++ local-build replicas is the correct fit and already works.
