@@ -30,6 +30,7 @@ jobs:
                    scripts/e2e-cloudflare-sync.sh \
                    scripts/e2e-cloudflare-apps.sh \
                    scripts/e2e-cloudflare-identity.sh \
+                   apps/marketplace/seed/refresh.sh \
                    cloud/cloudflare/build-components.sh; do
             bash -n "$f"
           done
@@ -40,12 +41,12 @@ jobs:
       - run: >
           cargo clippy --manifest-path cloud/cloudflare/mcp-core/Cargo.toml
           --target wasm32-wasip2 -- -D warnings
-      # The wasm components first: tangram-host's registry_lifecycle
-      # integration test spawns the real host against them (it self-skips
-      # when they're missing, so build them to make it actually run).
+      # The wasm components first: tangram-host's registry_lifecycle and
+      # marketplace_lifecycle integration tests spawn the real host against
+      # them (they self-skip when missing, so build them to make them run).
       - run: >
           cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry
-          --lib --target wasm32-wasip2 --release
+          -p tangram-marketplace --lib --target wasm32-wasip2 --release
       - run: cargo test
       # tangram-core is the portable half of the SDK (RUNTIME_PLAN Phase 1):
       # it must keep building without tokio/hyper/axum/reqwest/rmcp for

@@ -186,7 +186,9 @@ mod tests {
 
     fn spec() -> AppSpec {
         AppSpec {
-            component: "app.wasm".into(),
+            component: Some("app.wasm".into()),
+            component_url: None,
+            component_sha256: None,
             ui: "ui".into(),
             data_dir: None,
             allow_hosts: vec!["api.calorieninjas.com".into(), "evil.example.com".into()],

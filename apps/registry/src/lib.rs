@@ -27,7 +27,19 @@ pub struct AppSpec {
     /// Unique app name; becomes the path prefix (`/<name>/...`).
     name: String,
     /// Path to the compiled `wasm32-wasip2` component, resolved by the host.
+    /// Empty when the app is installed by URL (`component_url`).
     component: String,
+    /// Install-from-URL alternative to `component` (RUNTIME_PLAN Phase 8):
+    /// the HOST downloads the artifact, verifies `component_sha256` before
+    /// instantiation, and caches it immutably by hash. Additive fields:
+    /// older documents hydrate them as `None`.
+    #[autosurgeon(missing = "Option::default")]
+    component_url: Option<String>,
+    /// Hex sha-256 the downloaded artifact must hash to — REQUIRED with
+    /// `component_url`. A mismatch is a converge error on the host and the
+    /// app does not run.
+    #[autosurgeon(missing = "Option::default")]
+    component_sha256: Option<String>,
     /// Directory of static UI files served at `/<name>/`.
     ui: String,
     /// Where the app's document lives. `None` = the host default,
@@ -77,30 +89,73 @@ fn validate_env(env: &[EnvVar]) -> Result<(), String> {
     }
 }
 
+/// Same rule as the host's loader: exactly one component source — a local
+/// path, or a URL pinned to a well-formed sha-256 digest.
+fn validate_component_source(
+    component: &Option<String>,
+    url: &Option<String>,
+    sha256: &Option<String>,
+) -> Result<(), String> {
+    let component = component
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    match (component, url.as_deref()) {
+        (Some(_), None) => match sha256 {
+            None => Ok(()),
+            Some(_) => Err("component_sha256 is only valid with component_url \
+                            (local component paths are not hash-verified)"
+                .into()),
+        },
+        (None, Some(url)) => {
+            if !url.starts_with("https://") && !url.starts_with("http://") {
+                return Err(format!("component_url must be http(s), got {url:?}"));
+            }
+            let digest = sha256.as_deref().unwrap_or("").trim();
+            if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(
+                    "component_url requires component_sha256: 64 hex characters \
+                     (the host verifies the artifact before instantiation)"
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+        (Some(_), Some(_)) => {
+            Err("set exactly one of component (local path) and component_url, not both".into())
+        }
+        (None, None) => Err("set exactly one of component (local path) and component_url".into()),
+    }
+}
+
 #[actions]
 impl Registry {
     /// Install an app on the host fleet, or replace its spec if the name is
-    /// already installed. `component` is the path to a compiled
-    /// wasm32-wasip2 component and `ui` a directory of static files, both
-    /// resolved on the HOST's filesystem. `allow_hosts` is the app's entire
+    /// already installed. Give the component as EITHER `component` (path to
+    /// a compiled wasm32-wasip2 component on the HOST's filesystem) OR
+    /// `component_url` + `component_sha256` (the host downloads the
+    /// artifact, verifies the sha-256 BEFORE running it, and caches it by
+    /// hash — e.g. a marketplace listing). `ui` is a directory of static
+    /// files on the host. `allow_hosts` is the app's entire
     /// outbound-network grant (exact host names; omit for no network).
     /// `env` entries with a value of the exact form `${VAR}` are expanded
     /// from the host's environment, so secrets can stay in the host's .env.
     /// The app starts disabled=false only via `set_enabled`; new installs
     /// are enabled and serving at /<name>/ within seconds.
+    #[allow(clippy::too_many_arguments)]
     pub fn install_app(
         &mut self,
         name: String,
-        component: String,
+        component: Option<String>,
+        component_url: Option<String>,
+        component_sha256: Option<String>,
         ui: String,
         data_dir: Option<String>,
         allow_hosts: Option<Vec<String>>,
         env: Option<Vec<EnvVar>>,
     ) -> Result<(), String> {
         validate_name(&name)?;
-        if component.trim().is_empty() {
-            return Err("component must be a non-empty path to a .wasm component".into());
-        }
+        validate_component_source(&component, &component_url, &component_sha256)?;
         if ui.trim().is_empty() {
             return Err("ui must be a non-empty directory path".into());
         }
@@ -108,7 +163,9 @@ impl Registry {
         validate_env(&env)?;
         let spec = AppSpec {
             name: name.clone(),
-            component,
+            component: component.unwrap_or_default(),
+            component_url,
+            component_sha256,
             ui,
             data_dir,
             allow_hosts: allow_hosts.unwrap_or_default(),
@@ -144,11 +201,16 @@ impl Registry {
 
     /// Point an installed app at a different compiled component path (e.g.
     /// after rebuilding to a new location). The host reloads the app live.
+    /// Clears any component_url/component_sha256 source — the local path
+    /// becomes the app's single component source.
     pub fn set_component(&mut self, name: String, component: String) -> Result<(), String> {
         if component.trim().is_empty() {
             return Err("component must be a non-empty path to a .wasm component".into());
         }
-        self.find_mut(&name)?.component = component;
+        let app = self.find_mut(&name)?;
+        app.component = component;
+        app.component_url = None;
+        app.component_sha256 = None;
         Ok(())
     }
 
@@ -223,7 +285,9 @@ mod tests {
     fn install(reg: &mut Registry, name: &str) {
         reg.install_app(
             name.into(),
-            format!("target/{name}.wasm"),
+            Some(format!("target/{name}.wasm")),
+            None,
+            None,
             format!("apps/{name}/ui"),
             None,
             None,
@@ -250,7 +314,9 @@ mod tests {
         reg.set_enabled("notes".into(), false).unwrap();
         reg.install_app(
             "notes".into(),
-            "elsewhere/notes.wasm".into(),
+            Some("elsewhere/notes.wasm".into()),
+            None,
+            None,
             "apps/notes/ui".into(),
             None,
             Some(vec!["api.example.com".into()]),
@@ -268,33 +334,28 @@ mod tests {
     #[test]
     fn validation_rejects_bad_specs() {
         let mut reg = Registry::default();
-        assert!(
+        let install = |reg: &mut Registry, name: &str, component: &str, ui: &str| {
             reg.install_app(
-                "bad name".into(),
-                "c.wasm".into(),
-                "ui".into(),
+                name.into(),
+                Some(component.into()),
                 None,
                 None,
-                None
+                ui.into(),
+                None,
+                None,
+                None,
             )
-            .is_err()
-        );
-        assert!(
-            reg.install_app("".into(), "c.wasm".into(), "ui".into(), None, None, None)
-                .is_err()
-        );
-        assert!(
-            reg.install_app("ok".into(), "  ".into(), "ui".into(), None, None, None)
-                .is_err()
-        );
-        assert!(
-            reg.install_app("ok".into(), "c.wasm".into(), "".into(), None, None, None)
-                .is_err()
-        );
+        };
+        assert!(install(&mut reg, "bad name", "c.wasm", "ui").is_err());
+        assert!(install(&mut reg, "", "c.wasm", "ui").is_err());
+        assert!(install(&mut reg, "ok", "  ", "ui").is_err());
+        assert!(install(&mut reg, "ok", "c.wasm", "").is_err());
         assert!(
             reg.install_app(
                 "ok".into(),
-                "c.wasm".into(),
+                Some("c.wasm".into()),
+                None,
+                None,
                 "ui".into(),
                 None,
                 None,
@@ -306,6 +367,65 @@ mod tests {
             .is_err()
         );
         assert!(reg.list_apps().is_empty());
+    }
+
+    #[test]
+    fn install_by_url_requires_exactly_one_source_and_a_sha() {
+        let mut reg = Registry::default();
+        let sha = "a".repeat(64);
+        let by_url =
+            |reg: &mut Registry, component: Option<&str>, url: Option<&str>, sha: Option<&str>| {
+                reg.install_app(
+                    "marketplace-notes".into(),
+                    component.map(Into::into),
+                    url.map(Into::into),
+                    sha.map(Into::into),
+                    "apps/notes/ui".into(),
+                    None,
+                    None,
+                    None,
+                )
+            };
+        // url + well-formed sha-256 → ok; component stays empty in the doc.
+        by_url(
+            &mut reg,
+            None,
+            Some("https://example.test/notes.wasm"),
+            Some(&sha),
+        )
+        .expect("url install");
+        let app = &reg.list_apps()[0];
+        assert_eq!(app.component, "");
+        assert_eq!(
+            app.component_url.as_deref(),
+            Some("https://example.test/notes.wasm")
+        );
+        assert_eq!(app.component_sha256.as_deref(), Some(sha.as_str()));
+
+        // Bad shapes are rejected: url without sha, malformed sha, both
+        // sources, neither source, non-http scheme, sha with a local path.
+        assert!(by_url(&mut reg, None, Some("https://x.test/a.wasm"), None).is_err());
+        assert!(by_url(&mut reg, None, Some("https://x.test/a.wasm"), Some("beef")).is_err());
+        assert!(
+            by_url(
+                &mut reg,
+                Some("c.wasm"),
+                Some("https://x.test/a.wasm"),
+                Some(&sha)
+            )
+            .is_err()
+        );
+        assert!(by_url(&mut reg, None, None, None).is_err());
+        assert!(by_url(&mut reg, None, Some("ftp://x.test/a.wasm"), Some(&sha)).is_err());
+        assert!(by_url(&mut reg, Some("c.wasm"), None, Some(&sha)).is_err());
+
+        // set_component switches the app to a single local-path source.
+        reg.set_component("marketplace-notes".into(), "local/notes.wasm".into())
+            .unwrap();
+        let app = &reg.list_apps()[0];
+        assert_eq!(app.component, "local/notes.wasm");
+        assert_eq!(app.component_url, None);
+        assert_eq!(app.component_sha256, None);
     }
 
     #[test]

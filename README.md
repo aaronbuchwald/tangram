@@ -178,7 +178,7 @@ file, socket, or non-granted host at all.
 ```sh
 rustup target add wasm32-wasip2                                       # once
 cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
-  --lib --target wasm32-wasip2 --release                              # → target/wasm32-wasip2/release/{notes,nutrition,registry}.wasm
+  -p tangram-marketplace --lib --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace}.wasm
 cargo run -p tangram-host --release -- apps.toml
 ```
 
@@ -248,6 +248,47 @@ back after a host restart (and converge onto every replica of the registry
 doc). Live per-app status — running/healthy/error, file- vs
 registry-sourced — is a host-level observation, not replicated state:
 `GET /api/fleet`.
+
+### Install from URL: hash-verified artifacts (Phase 8)
+
+Instead of a local `component` path, a spec — in `apps.toml` or through
+`install_app` — can name `component_url` + `component_sha256` (exactly one
+source; the sha-256 is required with the URL). The host downloads the
+artifact, verifies the digest **before instantiation**, and caches it
+immutably, content-addressed by hash, under
+`$HOME/.tangram-host/components/<sha256>.wasm` — re-converging on the same
+hash (including across host restarts) never refetches. A fetch failure or
+hash mismatch is a converge error visible in `GET /api/fleet` and the app
+does not run (nothing unverified ever reaches the cache):
+
+```sh
+curl -X POST http://127.0.0.1:8080/registry/api/actions/install_app \
+  -H "Authorization: Bearer $TANGRAM_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"notes",
+       "component_url":"https://github.com/aaronbuchwald/tangram/releases/download/v0.1.0/notes.wasm",
+       "component_sha256":"<sha256 of the artifact>",
+       "ui":"apps/notes/ui"}'
+```
+
+### The marketplace app: a catalog with capability manifests (Phase 8)
+
+`apps/marketplace` is the catalog in front of that mechanism — itself an
+ordinary Tangram app at `/marketplace/`. Every listing pins its artifact
+(url + sha-256) and carries a REQUIRED capability manifest — outbound
+hosts, env keys, data note: exactly what an install will grant — rendered
+prominently next to the mechanical import audit (the
+`wasm-tools component wit` world block proving the component's closed
+world). The Install button posts the pinned url+sha and the manifest's
+grants to the local registry's `install_app` with your bearer token; env
+grants travel as `${KEY}` so the host expands secrets from its own `.env`.
+The catalog seeds the first-party apps with real commit-time digests
+(refreshed per release by `apps/marketplace/seed/refresh.sh`); run it with
+`require_auth = true` so curation (`add_listing`/`remove_listing`) needs
+the token while browsing stays open. Third-party submissions are an
+explicitly recorded TODO (see `apps/marketplace/README.md` and RUNTIME_PLAN
+Phase 8): automated manifest⊆imports verification, a sandboxed smoke-run,
+and an LLM behavioral check must gate approval first.
 
 ### Auth: bearer token on mutating routes
 

@@ -81,6 +81,9 @@ impl DispatchError {
 pub struct AppRuntime {
     pub name: String,
     pub spec: AppSpec,
+    /// The local component file actually instantiated: the spec's path, or
+    /// the verified cache slot of a `component_url` spec.
+    pub component_path: std::path::PathBuf,
     /// Component file mtime at instantiation — converge reloads on change.
     pub component_mtime: Option<SystemTime>,
     pub component: ComponentHandle,
@@ -107,17 +110,21 @@ pub fn component_mtime(path: &Path) -> Option<SystemTime> {
 impl AppRuntime {
     /// Instantiate the component, open (or genesis) the document, parse the
     /// manifest, and start the optional dial-out sync client.
+    /// `component_path` is the resolved LOCAL file: the spec's `component`
+    /// path, or — for `component_url` specs — the hash-verified cache slot
+    /// the converge loop downloaded into (`crate::fetch`).
     pub async fn build(
         engine: &wasmtime::Engine,
         name: &str,
         spec: &AppSpec,
+        component_path: &Path,
     ) -> anyhow::Result<Self> {
-        let component_mtime = component_mtime(&spec.component);
+        let component_mtime = component_mtime(component_path);
         let env = spec.resolved_env(name);
         let component =
-            ComponentHandle::instantiate(engine, &spec.component, name, &spec.allow_hosts, &env)
+            ComponentHandle::instantiate(engine, component_path, name, &spec.allow_hosts, &env)
                 .await
-                .with_context(|| format!("instantiating component {}", spec.component.display()))?;
+                .with_context(|| format!("instantiating component {}", component_path.display()))?;
 
         let describe: Describe = serde_json::from_str(&component.describe().await?)
             .context("parsing the component's describe() manifest")?;
@@ -140,6 +147,7 @@ impl AppRuntime {
         Ok(Self {
             name: name.to_string(),
             spec: spec.clone(),
+            component_path: component_path.to_path_buf(),
             component_mtime,
             component,
             doc,
