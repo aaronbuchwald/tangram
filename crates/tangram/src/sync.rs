@@ -5,14 +5,21 @@
 //! The server is not special — it's just another peer that happens to be
 //! reachable. The same interface is served by the Cloudflare Durable-Object
 //! relay in `cloud/cloudflare/`, so a replica cannot tell them apart.
+//!
+//! The transport-free protocol logic (per-peer sessions, the one-exchange
+//! server core, response framing, poke parsing) lives in
+//! [`tangram_core::sync`]; this module adds the native transports — the
+//! axum-served side via [`handle_post`] and the reqwest dial-out client.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use futures_util::StreamExt;
 use tokio::sync::watch;
+
+pub use tangram_core::sync::Sessions;
+use tangram_core::sync::{drain_pokes, normalize_remote, parse_frames};
 
 use crate::Model;
 use crate::action::Actions;
@@ -20,7 +27,7 @@ use crate::store::Store;
 
 /// The document surface the sync protocol runs over. The SDK's typed
 /// [`Store`] implements it, and so does `tangram-host`'s untyped per-app
-/// document — both sides of the protocol (server `handle_post` and client
+/// document — both sides of the protocol (server [`handle_post`] and client
 /// [`run_remote`]) are generic over this seam, so one implementation serves
 /// native apps and host-managed WASM components identically.
 ///
@@ -62,24 +69,28 @@ impl<M: Model + Actions> DocHandle for Store<M> {
     }
 }
 
+/// Adapts any [`DocHandle`] to the portable [`tangram_core::sync::SyncDoc`]
+/// seam (the native trait additionally carries `subscribe`, which the
+/// portable exchange logic doesn't need).
+struct AsSyncDoc<'a, D: ?Sized>(&'a D);
+
+impl<D: DocHandle + ?Sized> tangram_core::sync::SyncDoc for AsSyncDoc<'_, D> {
+    fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
+        self.0.generate_sync(state)
+    }
+    fn receive_sync(
+        &self,
+        state: &mut automerge::sync::State,
+        bytes: &[u8],
+    ) -> anyhow::Result<bool> {
+        self.0.receive_sync(state, bytes)
+    }
+    fn bump(&self) {
+        self.0.bump()
+    }
+}
+
 // ── server side ──────────────────────────────────────────────────────────────
-
-/// Sessions idle longer than this are evicted. Losing a session is harmless:
-/// the next POST starts from a fresh `automerge::sync::State` and the
-/// protocol re-converges (it just costs an extra round trip or two).
-const SESSION_IDLE: Duration = Duration::from_secs(5 * 60);
-
-struct Session {
-    state: automerge::sync::State,
-    last_seen: Instant,
-}
-
-/// Per-peer sync states held in server memory, keyed by the client-generated
-/// `X-Tangram-Session` id.
-#[derive(Default)]
-pub struct Sessions {
-    map: Mutex<HashMap<String, Session>>,
-}
 
 /// Handle one `POST /sync`: apply the client's message (if any), then return
 /// every message we owe that peer, framed as `[u32 big-endian length][bytes]`.
@@ -89,26 +100,7 @@ pub fn handle_post<D: DocHandle + ?Sized>(
     session_id: &str,
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    let mut map = sessions.map.lock().expect("sessions lock");
-    map.retain(|_, s| s.last_seen.elapsed() < SESSION_IDLE);
-    let session = map
-        .entry(session_id.to_string())
-        .or_insert_with(|| Session {
-            state: automerge::sync::State::new(),
-            last_seen: Instant::now(),
-        });
-    session.last_seen = Instant::now();
-
-    if !body.is_empty() && store.receive_sync(&mut session.state, body)? {
-        // Document changed: wake SSE pokes, UIs, and other peers.
-        store.bump();
-    }
-    let mut response = Vec::new();
-    while let Some(msg) = store.generate_sync(&mut session.state) {
-        response.extend_from_slice(&u32::try_from(msg.len())?.to_be_bytes());
-        response.extend_from_slice(&msg);
-    }
-    Ok(response)
+    tangram_core::sync::handle_post(&AsSyncDoc(store), sessions, session_id, body)
 }
 
 // ── client side ──────────────────────────────────────────────────────────────
@@ -125,22 +117,6 @@ pub async fn run_remote<D: DocHandle>(url: String, store: Arc<D>) {
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-}
-
-/// Rewrite legacy WebSocket remote URLs (the pre-HTTP transport) so old
-/// configs keep working.
-fn normalize_remote(url: &str) -> String {
-    let rewritten = if let Some(rest) = url.strip_prefix("ws://") {
-        format!("http://{rest}")
-    } else if let Some(rest) = url.strip_prefix("wss://") {
-        format!("https://{rest}")
-    } else {
-        return url.trim_end_matches('/').to_string();
-    };
-    tracing::warn!(
-        "ws:// sync remotes are deprecated (sync runs over HTTP now): using {rewritten} for {url}"
-    );
-    rewritten.trim_end_matches('/').to_string()
 }
 
 /// One connection's lifetime: open the SSE poke stream, then run a sync round
@@ -190,21 +166,6 @@ async fn sync_with_remote<D: DocHandle>(
     }
 }
 
-/// Minimal SSE parse: drop complete blank-line-terminated blocks from `buf`
-/// and report whether any was a real event. The server only ever sends
-/// `event: poke`, so the event's contents don't matter; comment-only blocks
-/// (`: keep-alive`) are not pokes.
-fn drain_pokes(buf: &mut String) -> bool {
-    let mut poked = false;
-    while let Some(end) = buf.find("\n\n") {
-        poked |= buf[..end]
-            .lines()
-            .any(|line| !line.is_empty() && !line.starts_with(':'));
-        buf.drain(..end + 2);
-    }
-    poked
-}
-
 /// Exchange sync messages with the remote until both sides quiesce: we have
 /// nothing to send AND the response carries nothing.
 async fn sync_round<D: DocHandle>(
@@ -240,46 +201,5 @@ async fn sync_round<D: DocHandle>(
         if quiet && body.is_empty() {
             return Ok(());
         }
-    }
-}
-
-/// Split a response body into its `[u32 big-endian length][bytes]` frames.
-fn parse_frames(mut bytes: &[u8]) -> anyhow::Result<Vec<&[u8]>> {
-    let mut frames = Vec::new();
-    while !bytes.is_empty() {
-        anyhow::ensure!(bytes.len() >= 4, "truncated sync frame header");
-        let len = u32::from_be_bytes(bytes[..4].try_into().expect("4 bytes")) as usize;
-        anyhow::ensure!(bytes.len() >= 4 + len, "truncated sync frame");
-        frames.push(&bytes[4..4 + len]);
-        bytes = &bytes[4 + len..];
-    }
-    Ok(frames)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{drain_pokes, parse_frames};
-
-    #[test]
-    fn frames_roundtrip() {
-        let mut body = Vec::new();
-        for msg in [b"hello".as_slice(), b"".as_slice(), b"world".as_slice()] {
-            body.extend_from_slice(&(msg.len() as u32).to_be_bytes());
-            body.extend_from_slice(msg);
-        }
-        let frames = parse_frames(&body).unwrap();
-        assert_eq!(frames, vec![b"hello".as_slice(), b"", b"world"]);
-        assert!(parse_frames(&body[..body.len() - 1]).is_err());
-        assert!(parse_frames(&[0, 0]).is_err());
-    }
-
-    #[test]
-    fn sse_pokes() {
-        let mut buf = String::from("event: poke\ndata:\n\n: keep-al");
-        assert!(drain_pokes(&mut buf));
-        assert_eq!(buf, ": keep-al"); // partial block stays buffered
-        buf.push_str("ive\n\n");
-        assert!(!drain_pokes(&mut buf)); // comment-only block is not a poke
-        assert!(buf.is_empty());
     }
 }

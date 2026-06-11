@@ -24,6 +24,10 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: bash -n .agents/skills/local-replica/replica.sh .agents/skills/systemd-service/service.sh
       - run: cargo test
+      # tangram-core is the portable half of the SDK (RUNTIME_PLAN Phase 1):
+      # it must keep building without tokio/hyper/axum/reqwest/rmcp for
+      # non-native hosts (WASI components, Cloudflare, browsers).
+      - run: cargo build -p tangram-core --target wasm32-wasip2
       - run: cargo build --release
 
   # Phase 0 of docs/RUNTIME_PLAN.md: static musl binaries + scratch images.

@@ -28,7 +28,13 @@
 //! replicate with another instance (changes merge from either side and every
 //! connected UI updates live over SSE).
 
-mod action;
+// The platform-portable half of the SDK (action registry, store + dispatch,
+// sync sessions/framing, the sans-io MCP server) lives in `tangram-core`;
+// this crate is the native tokio/axum host around it plus the WASM guest
+// adapter, and re-exports the shared types so app code only ever names
+// `tangram::…`.
+use tangram_core::action;
+
 #[cfg(not(target_family = "wasm"))]
 mod app;
 #[cfg(target_family = "wasm")]
@@ -36,6 +42,7 @@ pub mod guest;
 pub mod http;
 #[cfg(not(target_family = "wasm"))]
 mod mcp;
+#[cfg(not(target_family = "wasm"))]
 mod store;
 #[cfg(not(target_family = "wasm"))]
 pub mod sync;
@@ -43,10 +50,9 @@ pub mod time;
 #[cfg(not(target_family = "wasm"))]
 mod web;
 
-pub use action::{ActionDef, ActionError, ActionFuture, ActionHandler, Actions};
 #[cfg(not(target_family = "wasm"))]
 pub use app::App;
-pub use store::Ctx;
+pub use tangram_core::{ActionDef, ActionError, ActionFuture, ActionHandler, Actions, Ctx, Model};
 pub use tangram_macros::{actions, model};
 
 /// Everything an app needs in scope.
@@ -60,30 +66,4 @@ pub mod prelude {
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json;
-}
-
-/// A replicated application state: any `#[model]` struct with a `Default`
-/// genesis state satisfies this automatically.
-pub trait Model:
-    autosurgeon::Reconcile
-    + autosurgeon::Hydrate
-    + serde::Serialize
-    + Default
-    + Clone
-    + Send
-    + Sync
-    + 'static
-{
-}
-
-impl<T> Model for T where
-    T: autosurgeon::Reconcile
-        + autosurgeon::Hydrate
-        + serde::Serialize
-        + Default
-        + Clone
-        + Send
-        + Sync
-        + 'static
-{
 }

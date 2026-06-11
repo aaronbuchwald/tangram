@@ -2504,12 +2504,11 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "reqwest",
- "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "tangram-core",
  "tangram-macros",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tower-http",
@@ -2517,6 +2516,20 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wit-bindgen 0.58.0",
+]
+
+[[package]]
+name = "tangram-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -22,8 +22,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use tangram_core::Store;
+
 use crate::action::Actions;
-use crate::store::Store;
 use crate::{ActionError, Model};
 
 /// The generated `tangram:app` bindings (public so the `export_component!`
@@ -111,7 +112,7 @@ pub fn describe<M: Model + Actions>(
 /// native store runs, so guest and native genesis are byte-identical by
 /// construction.
 pub fn genesis<M: Model>() -> Vec<u8> {
-    crate::store::genesis_bytes::<M>().expect("model Default reconciles into genesis")
+    tangram_core::genesis_bytes::<M>().expect("model Default reconciles into genesis")
 }
 
 /// `dispatch()` export: run one action against the given document bytes.

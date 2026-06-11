@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/tangram",
+    "crates/tangram-core",
     "crates/tangram-host",
     "crates/tangram-macros",
     "apps/notes",
@@ -15,6 +16,7 @@ edition = "2024"
 
 [workspace.dependencies]
 tangram = { path = "crates/tangram" }
+tangram-core = { path = "crates/tangram-core" }
 tangram-macros = { path = "crates/tangram-macros" }
 
 anyhow = "1"
