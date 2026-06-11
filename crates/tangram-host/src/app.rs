@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Context;
+use axum::http::StatusCode;
 use serde_json::Value;
 use tangram::sync::DocHandle as _;
 
@@ -34,7 +35,26 @@ pub struct ActionInfo {
     pub name: String,
     pub description: String,
     pub mutates: bool,
-    pub input_schema: Value,
+    /// The JSON Schema for this action's arguments, shared behind an `Arc` so
+    /// the MCP bridge can hand the same allocation to `rmcp::Tool` without a
+    /// deep clone per bridge construction.
+    #[serde(deserialize_with = "deserialize_schema")]
+    pub input_schema: Arc<serde_json::Map<String, Value>>,
+}
+
+/// Deserialize an action's `input_schema` field: extract the object map if the
+/// value is a JSON object, fall back to an empty map otherwise (mirrors the
+/// defensive match in the old `McpBridge::new`).
+fn deserialize_schema<'de, D>(de: D) -> Result<Arc<serde_json::Map<String, Value>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let v = Value::deserialize(de)?;
+    Ok(Arc::new(match v {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }))
 }
 
 /// A dispatch failure, classified so the HTTP/MCP surfaces can keep the
@@ -63,7 +83,40 @@ impl std::fmt::Display for DispatchError {
     }
 }
 
+/// How a [`DispatchError`] maps onto the MCP protocol's two failure modes:
+/// tool-level errors (returned inside a `CallToolResult` so the agent can read
+/// them) vs. JSON-RPC errors (unknown tool / internal fault).
+pub enum McpErrorKind {
+    /// Domain / bad-args failure → `CallToolResult::error`. Agent can recover.
+    ToolError,
+    /// No such tool → `ErrorData::invalid_params`.
+    InvalidParams,
+    /// Internal fault → `ErrorData::internal_error`.
+    InternalError,
+}
+
 impl DispatchError {
+    /// The HTTP status code for this error, shared by the action route
+    /// (`POST /api/actions/:name`) and any future HTTP surface.
+    pub fn http_status(&self) -> StatusCode {
+        match self {
+            Self::Unknown(_) => StatusCode::NOT_FOUND,
+            Self::BadArgs(_) => StatusCode::BAD_REQUEST,
+            Self::Failed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// How this error should surface on the MCP transport, shared between the
+    /// WASM host's `McpBridge` and any future MCP surface.
+    pub fn mcp_kind(&self) -> McpErrorKind {
+        match self {
+            Self::BadArgs(_) | Self::Failed(_) => McpErrorKind::ToolError,
+            Self::Unknown(_) => McpErrorKind::InvalidParams,
+            Self::Internal(_) => McpErrorKind::InternalError,
+        }
+    }
+
     /// Classify a guest-rendered `ActionError` string by its stable prefix.
     fn from_guest(message: String) -> Self {
         if message.starts_with("unknown action:") {
