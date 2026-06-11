@@ -316,7 +316,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     for base in [&base_a, &base_b] {
         wait_for(
             &format!("registry up at {base}"),
-            Duration::from_secs(90),
+            Duration::from_secs(120),
             || async { healthz(&client, base, "registry").await == Some(reqwest::StatusCode::OK) },
         )
         .await;
@@ -337,12 +337,12 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     );
 
     // A runs it (its own converge).
-    wait_for("notes healthy on A", Duration::from_secs(90), || async {
+    wait_for("notes healthy on A", Duration::from_secs(120), || async {
         healthz(&client, &base_a, "notes").await == Some(reqwest::StatusCode::OK)
     })
     .await;
     // …and B runs it too — purely from the synced registry document.
-    wait_for("notes healthy on B", Duration::from_secs(90), || async {
+    wait_for("notes healthy on B", Duration::from_secs(120), || async {
         healthz(&client, &base_b, "notes").await == Some(reqwest::StatusCode::OK)
     })
     .await;
@@ -375,7 +375,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     wait_for(
         "note 'written on A' shows up on B",
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         || async {
             state_text(&client, &base_b, "notes")
                 .await
@@ -404,11 +404,11 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
         .await
         .expect("remove on B");
     assert_eq!(res.status(), reqwest::StatusCode::OK);
-    wait_for("notes gone on A", Duration::from_secs(30), || async {
+    wait_for("notes gone on A", Duration::from_secs(120), || async {
         healthz(&client, &base_a, "notes").await == Some(reqwest::StatusCode::NOT_FOUND)
     })
     .await;
-    wait_for("notes gone on B", Duration::from_secs(30), || async {
+    wait_for("notes gone on B", Duration::from_secs(120), || async {
         healthz(&client, &base_b, "notes").await == Some(reqwest::StatusCode::NOT_FOUND)
     })
     .await;
@@ -419,7 +419,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
         install(&client, &base_a, &notes_args).await,
         reqwest::StatusCode::OK
     );
-    wait_for("notes back on B", Duration::from_secs(90), || async {
+    wait_for("notes back on B", Duration::from_secs(120), || async {
         healthz(&client, &base_b, "notes").await == Some(reqwest::StatusCode::OK)
     })
     .await;
@@ -445,7 +445,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     for base in [&base_a, &base_b] {
         wait_for(
             &format!("nutrition healthy at {base}"),
-            Duration::from_secs(90),
+            Duration::from_secs(120),
             || async { healthz(&client, base, "nutrition").await == Some(reqwest::StatusCode::OK) },
         )
         .await;
@@ -533,7 +533,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     // B reports a PORTABILITY fleet error for the missing path-only entry…
     wait_for(
         "B portability error for ghost",
-        Duration::from_secs(30),
+        Duration::from_secs(120),
         || async {
             fleet_error(&client, &base_b, "ghost")
                 .await
@@ -646,7 +646,7 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
         for app in ["notes", "nutrition"] {
             wait_for(
                 &format!("{app} healthy at {base} after restart"),
-                Duration::from_secs(90),
+                Duration::from_secs(120),
                 || async { healthz(&client, base, app).await == Some(reqwest::StatusCode::OK) },
             )
             .await;

@@ -240,6 +240,28 @@ impl ComponentHandle {
 }
 
 /// The shared engine (async support is the default in this wasmtime).
+///
+/// The on-disk compilation cache (keyed by component content-hash + compiler
+/// settings) is enabled so each unique component is cranelift-compiled once
+/// and cheaply loaded thereafter — this speeds production cold starts (host
+/// restart/reload) and removes the concurrent-compile contention that flaked
+/// the 2-core CI integration tests (which spin up several hosts each
+/// instantiating multiple components at once).
 pub fn engine() -> anyhow::Result<Engine> {
-    Ok(Engine::new(&wasmtime::Config::new())?)
+    let cache_dir = match std::env::var("HOME") {
+        Ok(home) => std::path::PathBuf::from(home).join(".tangram-host/wasmtime-cache"),
+        Err(_) => std::path::PathBuf::from("data/tangram-host/wasmtime-cache"),
+    };
+    let mut config = wasmtime::Config::new();
+    let mut cache = wasmtime::CacheConfig::new();
+    cache.with_directory(&cache_dir);
+    match wasmtime::Cache::new(cache) {
+        Ok(cache) => {
+            config.cache(Some(cache));
+        }
+        // A bad cache dir must never stop the host from running — just warn
+        // and fall back to compiling every time.
+        Err(e) => tracing::warn!("wasmtime compilation cache disabled ({e}); cold starts slower"),
+    }
+    Ok(Engine::new(&config)?)
 }

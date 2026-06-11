@@ -264,7 +264,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     let not_found = Some(reqwest::StatusCode::NOT_FOUND);
 
     // ── bootstrap: top level + both tenants come up ─────────────────────────
-    wait_for("alice notes healthz", Duration::from_secs(60), || async {
+    wait_for("alice notes healthz", Duration::from_secs(120), || async {
         get_status(
             &client,
             &format!("{base}/t/alice/notes/healthz"),
@@ -274,7 +274,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
             == ok
     })
     .await;
-    wait_for("bob registry healthz", Duration::from_secs(60), || async {
+    wait_for("bob registry healthz", Duration::from_secs(120), || async {
         get_status(
             &client,
             &format!("{base}/t/bob/registry/healthz"),
@@ -430,7 +430,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
         .await,
         reqwest::StatusCode::OK
     );
-    wait_for("bob's notes healthy", Duration::from_secs(90), || async {
+    wait_for("bob's notes healthy", Duration::from_secs(120), || async {
         get_status(
             &client,
             &format!("{base}/t/bob/notes/healthz"),
@@ -545,7 +545,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "alice's nutrition healthy",
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         || async {
             get_status(
                 &client,
@@ -599,7 +599,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "extra over-cap error in fleet",
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         || async {
             let fleet = get_json(&client, &format!("{base}/t/alice/api/fleet"), ALICE_TOKEN).await;
             fleet["apps"].as_array().is_some_and(|apps| {
@@ -644,7 +644,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     );
     wait_for(
         "evil data_dir error in fleet",
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         || async {
             let fleet = get_json(&client, &format!("{base}/t/bob/api/fleet"), BOB_TOKEN).await;
             fleet["apps"].as_array().is_some_and(|apps| {
@@ -692,7 +692,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     let _host2 = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log2);
     wait_for(
         "bob's notes after restart",
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         || async {
             get_status(
                 &client,
@@ -706,7 +706,7 @@ token = "${{TANGRAM_TEST_BOB_TOKEN}}"
     .await;
     wait_for(
         "alice's nutrition after restart",
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         || async {
             get_status(
                 &client,

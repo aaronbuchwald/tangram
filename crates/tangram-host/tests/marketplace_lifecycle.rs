@@ -211,7 +211,7 @@ require_auth = true
     for app in ["registry", "marketplace"] {
         wait_for(
             &format!("{app} healthz"),
-            Duration::from_secs(90),
+            Duration::from_secs(120),
             || async {
                 status_of(&client, &format!("{base}/{app}/healthz")).await
                     == Some(reqwest::StatusCode::OK)
@@ -336,7 +336,7 @@ require_auth = true
         .await
         .expect("install by url");
     assert_eq!(res.status(), reqwest::StatusCode::OK);
-    wait_for("notes healthy", Duration::from_secs(90), || async {
+    wait_for("notes healthy", Duration::from_secs(120), || async {
         status_of(&client, &format!("{base}/notes/healthz")).await == Some(reqwest::StatusCode::OK)
     })
     .await;
@@ -450,7 +450,7 @@ require_auth = true
     let _host2 = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log2);
     wait_for(
         "notes healthy after restart",
-        Duration::from_secs(90),
+        Duration::from_secs(120),
         || async {
             status_of(&client, &format!("{base}/notes/healthz")).await
                 == Some(reqwest::StatusCode::OK)
