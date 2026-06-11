@@ -113,8 +113,13 @@ impl Host {
                 continue;
             }
             if let Some(entry) = apps.get(name) {
-                let state = entry.runtime.state_json().await;
-                registry_entries.extend(registry::parse_state(name, &state));
+                // state_json is verbatim component output (a String since the
+                // float-rendering fix); the registry layer needs the parsed
+                // tree to walk specs — exact now that float_roundtrip is on.
+                match serde_json::from_str(&entry.runtime.state_json().await) {
+                    Ok(state) => registry_entries.extend(registry::parse_state(name, &state)),
+                    Err(e) => tracing::warn!("{name}: unparseable registry state: {e}"),
+                }
             }
         }
 
