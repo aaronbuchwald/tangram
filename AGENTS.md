@@ -20,7 +20,9 @@ symlink to `.agents/skills`.
   server (rmcp parity fixtures in its `tests/fixtures/`)
 - `crates/tangram-host` — embedded-Wasmtime host: runs apps as WASM
   components per `apps.toml` with capability grants (WIT world in its `wit/`;
-  README "Run apps as WASM components")
+  README "Run apps as WASM components"); optional MCP plane through a
+  supervised agentgateway child with generated config (`src/gateway.rs`,
+  `[gateway]` in apps.toml; README "MCP through agentgateway")
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in

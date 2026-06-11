@@ -106,6 +106,10 @@ impl AppSpec {
 pub struct HostConfig {
     #[serde(default)]
     pub apps: BTreeMap<String, AppSpec>,
+    /// `[gateway]` — route MCP through a host-managed agentgateway child
+    /// (see `crate::gateway`). Applied at startup, not converged live.
+    #[serde(default)]
+    pub gateway: crate::gateway::GatewaySettings,
 }
 
 impl HostConfig {
@@ -159,6 +163,32 @@ mod tests {
         assert!(notes.require_auth);
         assert!(!notes.enabled);
         assert!(config.has_registry());
+    }
+
+    #[test]
+    fn parses_gateway_section_and_defaults_off() {
+        let config = HostConfig::parse(
+            r#"
+            [gateway]
+            enabled = true
+            binary = "/usr/local/bin/agentgateway"
+            port = 19200
+
+            [apps.notes]
+            component = "notes.wasm"
+            ui = "ui"
+            "#,
+        )
+        .unwrap();
+        assert!(config.gateway.enabled);
+        assert_eq!(
+            config.gateway.binary.as_deref(),
+            Some(std::path::Path::new("/usr/local/bin/agentgateway"))
+        );
+        assert_eq!(config.gateway.port, Some(19200));
+        // No [gateway] section → disabled (direct serving, today's behavior).
+        let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
+        assert!(!config.gateway.enabled);
     }
 
     #[test]

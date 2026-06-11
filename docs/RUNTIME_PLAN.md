@@ -185,9 +185,24 @@ capability at all — the host is the only thing touching `$HOME/.<app-name>`.
   serving in ~0.40 s end to end (≈50 ms debounce + ~310–370 ms component
   instantiation incl. cranelift compile); remove → routes gone in ~30 ms;
   component rebuild (mtime) hot-reloads the instance.
-- [ ] agentgateway alongside, config generated from the same desired state,
-  `/<app>/mcp` routed through it (later phase; the host serves MCP directly
-  for now).
+- [x] agentgateway alongside — delivered 2026-06-11 (`[gateway]` in
+  apps.toml; `crates/tangram-host/src/gateway.rs`; README "MCP through
+  agentgateway"). The host stays the single entry point: agentgateway
+  (v1.2.1, official binary) runs as a host-SUPERVISED child (restart with
+  backoff, killed on shutdown) on an internal port, its config GENERATED
+  from the merged desired state on every converge (atomic write,
+  agentgateway hot-reloads; registry installs appear on the MCP plane
+  without restarts). Public `/<app>/mcp` is proxied host→gateway→an
+  internal loopback listener serving the per-app rmcp services, preserving
+  `Mcp-Session-Id` statefulness + SSE end to end and the bearer gate on
+  mutating registry tools (the gateway forwards Authorization; enforcement
+  stays host-side). NEW: the aggregate `/mcp` endpoint — every app's tools
+  on one session, namespaced `<app>_<tool>` (agentgateway multiplexing).
+  agentgateway 1.2 binds wildcard, so every generated route carries a
+  loopback-only source authorization rule. Missing binary → clear warning +
+  direct per-app serving exactly as before (pinned by
+  `tests/gateway_lifecycle.rs`, alongside handshake/auth/converge/crash-
+  recovery coverage).
 - `tangram-shell` stays as zero-dependency dev mode (unchanged, verified).
 - [x] Capabilities parity (the former known gap): `describe()` carries an
   optional `capabilities` object, computed by the app at instantiation from

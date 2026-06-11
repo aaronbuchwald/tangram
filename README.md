@@ -258,7 +258,47 @@ Set `TANGRAM_AUTH_TOKEN` (env or `.env`). Registry apps — and any app with
 open. Without a token the host warns at startup and refuses to run a
 registry app on a non-loopback `BIND_ADDR` — never expose an
 unauthenticated registry.
->>>>>>> worktree-agent-a6ae367fb411756c8
+
+### MCP through agentgateway: one endpoint for every app
+
+With `[gateway] enabled = true` in `apps.toml` and an
+[agentgateway](https://agentgateway.dev) binary on `$PATH` (or at
+`[gateway].binary`), the host routes its MCP plane through agentgateway —
+[RUNTIME_PLAN](docs/RUNTIME_PLAN.md) decision D3: MCP only; UI/API/sync stay
+host-proxied. The host remains the single entry point on its one public
+port: agentgateway runs as a host-managed child process on an internal
+loopback port (supervised — restarted with backoff if it crashes, killed on
+shutdown), and its config is **generated from the merged desired state**
+(`apps.toml` ∪ registry doc) on every converge. Never edit
+`~/.tangram-host/agentgateway.json` by hand; installing an app through the
+registry regenerates it and agentgateway hot-reloads — the new app's tools
+are live on the MCP plane in about a second, no restarts anywhere.
+
+What you get on top of the unchanged per-app endpoints:
+
+- `/<app>/mcp` — same surface as before, now proxied
+  host → agentgateway → the app's internal MCP endpoint, with
+  `Mcp-Session-Id` statefulness and SSE streaming preserved end to end.
+- `/mcp` — the **aggregate** endpoint (agentgateway's multiplexing): one
+  MCP session exposing every app's tools, namespaced `<app>_<tool>`
+  (`notes_add_note`, `nutrition_log_meal`, `registry_install_app`, …). Point
+  an agent at this single URL instead of one per app:
+  `claude mcp add --transport http tangram http://127.0.0.1:8080/mcp`.
+
+Auth is unchanged and not bypassable through the gateway: the bearer gate on
+mutating registry tools is enforced at the host's internal endpoint, and
+agentgateway forwards the client's `Authorization` header — an
+unauthenticated `registry_install_app` through the aggregate endpoint
+answers 401 exactly like the direct route. If the binary is missing the
+host logs a warning at startup and falls back to direct per-app `/mcp`
+serving (the aggregate endpoint 404s); the gateway is an optional
+enhancement, not a dependency. Install it from the official releases:
+
+```sh
+curl -sLo agentgateway https://github.com/agentgateway/agentgateway/releases/download/v1.2.1/agentgateway-linux-amd64
+# verify against the published .sha256, then:
+sudo install -m 0755 agentgateway /usr/local/bin/agentgateway
+```
 
 ## Getting started: a persistent remote + a local replica
 
