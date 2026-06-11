@@ -25,6 +25,7 @@ use tokio_stream::wrappers::WatchStream;
 use tower::ServiceExt as _;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::Host;
 use crate::app::AppRuntime;
@@ -48,6 +49,18 @@ impl Drop for AppEntry {
             task.abort();
         }
     }
+}
+
+/// The CSP `frame-ancestors` header value for host-served apps, from the
+/// host-level `FRAME_ANCESTORS` env (default `*`, matching the SDK's default
+/// in `crates/tangram/src/app.rs`). An env value with bytes illegal in a
+/// header falls back to the `*` default rather than failing app start —
+/// `AppEntry::new` is infallible, and a missing framing policy is worse than
+/// an ignored malformed override.
+fn frame_ancestors_csp() -> axum::http::HeaderValue {
+    let frame_ancestors = std::env::var("FRAME_ANCESTORS").unwrap_or_else(|_| "*".into());
+    axum::http::HeaderValue::from_str(&format!("frame-ancestors {frame_ancestors}"))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("frame-ancestors *"))
 }
 
 impl AppEntry {
@@ -99,11 +112,24 @@ impl AppEntry {
             .with_state(runtime.clone())
             .merge(actions)
             .merge(mcp)
-            // Permissive CORS, same as the SDK's derived surface.
-            .layer(CorsLayer::permissive())
+            // The static-UI fallback is set BEFORE the cross-cutting layers so
+            // they wrap it too — `Router::layer` only applies to routes and a
+            // fallback registered before the call, and the framing policy must
+            // ride the served HTML, not just the JSON/MCP routes.
             .fallback_service(
                 ServeDir::new(&runtime.spec.ui).append_index_html_on_directories(true),
-            );
+            )
+            // Permissive CORS, same as the SDK's derived surface.
+            .layer(CorsLayer::permissive())
+            // CSP `frame-ancestors`, same as the SDK's derived surface
+            // (crates/tangram/src/app.rs): host-served component apps must
+            // carry a framing policy too, or app-in-note embedding has no
+            // bound. Host-level `FRAME_ANCESTORS` (default `*`, matching the
+            // SDK), applied to every response across the per-app surface.
+            .layer(SetResponseHeaderLayer::overriding(
+                header::CONTENT_SECURITY_POLICY,
+                frame_ancestors_csp(),
+            ));
         Self {
             runtime,
             router,
