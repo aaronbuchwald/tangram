@@ -19,6 +19,9 @@ use sha2::{Digest as _, Sha256};
 /// loop is allowed to retry it.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// The four magic bytes every WebAssembly binary starts with (`\0asm`).
+const WASM_MAGIC: &[u8] = b"\0asm";
+
 /// Default cache root: the host data root (the same place the generated
 /// agentgateway config lives), `data/tangram-host` without a HOME.
 pub fn default_cache_dir() -> PathBuf {
@@ -33,6 +36,26 @@ pub fn default_cache_dir() -> PathBuf {
 /// slot is trusted as-is.
 pub fn cache_path(cache_dir: &Path, sha256: &str) -> PathBuf {
     cache_dir.join(format!("{sha256}.wasm"))
+}
+
+/// Reject anything that is not a real `wasm32-wasip2` COMPONENT before it is
+/// stored: a cheap magic-byte check, then a full wasmtime parse+validate
+/// (`Component::new`, which rejects core modules and malformed binaries).
+/// This is the type/shape MUST-FIX item for open upload — it stops the
+/// content-addressed store from becoming arbitrary-blob storage of garbage.
+/// (A deeper closed-world import audit — rejecting `wasi:sockets`/`wasi:http`
+/// — is the marketplace's existing displayed audit and is the remaining
+/// MUST-FIX content control before public exposure.)
+pub fn validate_wasm_component(engine: &wasmtime::Engine, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 8 || &bytes[..4] != WASM_MAGIC {
+        return Err("not a WebAssembly binary (missing the \\0asm magic header)".into());
+    }
+    // `Component::new` validates the full binary and rejects a bare core
+    // module (the wasm-component layer's preamble differs). A core module or
+    // corrupt binary fails here with wasmtime's own message.
+    wasmtime::component::Component::new(engine, bytes)
+        .map(|_| ())
+        .map_err(|e| format!("not a valid wasm component: {e}"))
 }
 
 /// Downloads + verifies component artifacts into the content-addressed
@@ -54,6 +77,58 @@ impl Fetcher {
             cache_dir,
             failures: tokio::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The content-addressed store root — the same directory the verified
+    /// install-by-URL cache lives in. An UPLOADED artifact (the marketplace
+    /// upload flow) lands here too, so the existing install pipeline can
+    /// fetch it by hash from `GET /artifacts/<sha>.wasm` exactly as it would
+    /// any external URL.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    /// The on-disk path of a stored artifact IFF it exists (a present slot is
+    /// trusted: write-once after verification). Backs `GET /artifacts/<sha>.wasm`.
+    pub fn artifact_path(&self, sha256: &str) -> Option<PathBuf> {
+        let path = cache_path(&self.cache_dir, sha256);
+        path.exists().then_some(path)
+    }
+
+    /// Store an UPLOADED component blob in the content-addressed cache: the
+    /// HOST validates it is a real wasm component (magic bytes + a wasmtime
+    /// parse — see [`validate_wasm_component`]), computes the sha-256 ITSELF
+    /// (the uploader never asserts it), and atomically commits the bytes to
+    /// `<cache>/<sha256>.wasm` (write-once, dedup by hash). Returns the
+    /// computed digest, which is immediately installable by URL
+    /// `/artifacts/<sha256>.wasm` + that hash.
+    ///
+    /// This is open-blob storage when the route is enabled — see the
+    /// default-off gate and MUST-FIX checklist at the route in `routes.rs`
+    /// and in `crates/tangram-host/README.md`. The wasm-validity check here
+    /// is the one MUST-FIX item already met; size/rate/quota/abuse controls
+    /// are NOT and must be added before public exposure.
+    pub fn store_artifact(
+        &self,
+        engine: &wasmtime::Engine,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        validate_wasm_component(engine, bytes)?;
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let path = cache_path(&self.cache_dir, &sha256);
+        if path.exists() {
+            // Identical bytes already stored — dedup, nothing to write.
+            return Ok(sha256);
+        }
+        std::fs::create_dir_all(&self.cache_dir)
+            .map_err(|e| format!("creating cache dir {}: {e}", self.cache_dir.display()))?;
+        // Write-then-rename so a crash can't leave a partial artifact at the
+        // content address (same discipline as a verified fetch). A `.upload`
+        // suffix avoids racing the converge fetcher's `.tmp` slot.
+        let tmp = self.cache_dir.join(format!(".{sha256}.upload"));
+        std::fs::write(&tmp, bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("committing {}: {e}", path.display()))?;
+        Ok(sha256)
     }
 
     /// Resolve a `component_url` spec to a verified local path: a cache hit
@@ -240,6 +315,84 @@ mod tests {
             .resolve("app", &url, &artifact_sha())
             .await
             .expect("correct digest");
+    }
+
+    /// A real wasm32-wasip2 component built by the CI pre-step (the same one
+    /// the integration tests use). `None` when the wasm target wasn't built,
+    /// so a plain `cargo test` without it still passes.
+    fn built_component() -> Option<Vec<u8>> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .join("target/wasm32-wasip2/release/notes.wasm");
+        std::fs::read(path).ok()
+    }
+
+    #[test]
+    fn rejects_non_wasm_garbage() {
+        let engine = wasmtime::Engine::default();
+        // Empty, too-short, and wrong-magic blobs are rejected before any
+        // wasmtime parse — the cheap content-addressed-store abuse guard.
+        for garbage in [&b""[..], b"\0as", b"not a wasm binary at all"] {
+            let err = validate_wasm_component(&engine, garbage).unwrap_err();
+            assert!(err.contains("WebAssembly binary"), "{err}");
+        }
+        // Correct magic but not a valid component (a bare/corrupt body) is
+        // rejected by the wasmtime parse, not the magic check.
+        let mut fake = WASM_MAGIC.to_vec();
+        fake.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0xff, 0xff]);
+        let err = validate_wasm_component(&engine, &fake).unwrap_err();
+        assert!(err.contains("valid wasm component"), "{err}");
+    }
+
+    #[test]
+    fn stores_a_real_component_and_computes_its_sha() {
+        let Some(bytes) = built_component() else {
+            eprintln!("SKIPPING stores_a_real_component: notes.wasm not built");
+            return;
+        };
+        let engine = wasmtime::Engine::default();
+        let scratch = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(scratch.path().join("components"));
+
+        // The HOST computes the sha; the uploader never asserts it.
+        let sha = fetcher.store_artifact(&engine, &bytes).expect("store");
+        assert_eq!(sha, format!("{:x}", Sha256::digest(&bytes)));
+        // It landed at the content address and is now servable by hash.
+        let path = fetcher.artifact_path(&sha).expect("stored slot exists");
+        assert_eq!(path, cache_path(&fetcher.cache_dir, &sha));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // Storing the same bytes again is an idempotent dedup (no error).
+        assert_eq!(fetcher.store_artifact(&engine, &bytes).unwrap(), sha);
+
+        // Crucially: an UPLOADED artifact is immediately installable by the
+        // SAME content-addressed resolve path the URL pipeline uses — a cache
+        // hit, no network. (A bogus URL proves the cache short-circuited it.)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let resolved = rt
+            .block_on(fetcher.resolve("app", "http://127.0.0.1:1/never", &sha))
+            .expect("resolve uses the stored artifact");
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn rejects_garbage_upload() {
+        let engine = wasmtime::Engine::default();
+        let scratch = tempfile::tempdir().unwrap();
+        let fetcher = Fetcher::new(scratch.path().join("components"));
+        let err = fetcher
+            .store_artifact(&engine, b"definitely not wasm")
+            .unwrap_err();
+        assert!(err.contains("WebAssembly binary"), "{err}");
+        // Nothing was written for a rejected upload.
+        assert!(
+            !scratch.path().join("components").exists() || {
+                std::fs::read_dir(scratch.path().join("components"))
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
+            }
+        );
     }
 
     #[tokio::test]

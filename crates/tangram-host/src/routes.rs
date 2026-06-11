@@ -33,6 +33,14 @@ use crate::auth::{self, AuthGate};
 use crate::mcp::McpBridge;
 use crate::tenant::AppKey;
 
+/// Coarse per-upload ceiling for `POST /artifacts` (Phase S2b). Real
+/// `wasm32-wasip2` components run a few MiB; this leaves generous headroom
+/// while still bounding a single request (axum's 2 MiB default is too small).
+/// NOTE: this is NOT the MUST-FIX streaming size cap + per-host quota — the
+/// body is still buffered whole and there is no aggregate limit. See the gate
+/// doc on `upload_artifact` and `crates/tangram-host/README.md`.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
 /// One running app's routes + runtime, as stored in the host's live table.
 pub struct AppEntry {
     pub runtime: Arc<AppRuntime>,
@@ -150,8 +158,136 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/fleet", get(fleet))
         .route("/mcp", axum::routing::any(aggregate_mcp))
+        // The artifact store (Phase S2b): upload a WASM blob (the host
+        // computes its sha and content-addresses it) and serve it back by
+        // hash. Both routes consult `host.artifacts_upload_enabled` — when
+        // off, `POST /artifacts` 404s. Defined as explicit routes (not the
+        // fallback) so they take precedence over `/<app>/` dispatch.
+        .route(
+            "/artifacts",
+            axum::routing::post(upload_artifact)
+                .get(artifacts_disabled_get)
+                // A generous per-upload byte cap — axum's default body limit
+                // is 2 MiB, smaller than a real component. This is a coarse
+                // ceiling, NOT the MUST-FIX streaming size cap + quota (the
+                // body is still buffered whole; see the gate doc).
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/artifacts/{file}", get(serve_artifact))
         .fallback(dispatch_app)
         .with_state((host, via_gateway))
+}
+
+/// `POST /artifacts` — store an uploaded WASM component (Phase S2b). The HOST
+/// computes the sha-256, validates the bytes are a real wasm component
+/// (rejecting garbage/core-modules), and content-addresses it under the same
+/// store the install-by-URL cache uses — so the returned hash is immediately
+/// installable via `component_url = /artifacts/<sha>.wasm` + that sha,
+/// reusing the existing verify-before-instantiate pipeline verbatim.
+///
+/// ⚠️  MUST-FIX BEFORE PUBLIC EXPOSURE — open upload is arbitrary-blob
+/// storage (OWASP "Unrestricted File Upload"): an abuse / DoS / malware-hosting
+/// magnet. This route is DEFAULT-OFF (`[artifacts] upload_enabled = false`)
+/// and, when on, refuses a non-loopback bind without `TANGRAM_AUTH_TOKEN`
+/// (enforced at startup in `main`). The checklist that gates turning this on
+/// for a PUBLIC deployment (see `crates/tangram-host/README.md`):
+///   1. AuthN/AuthZ — behind the bearer gate (done here when a token is set);
+///      never anonymous on a non-loopback bind (done at startup).
+///   2. Per-upload SIZE CAP (stream-and-reject, never buffer a whole blob)
+///      + a per-host storage QUOTA.            — NOT YET DONE.
+///   3. RATE / frequency limits per principal.  — NOT YET DONE.
+///   4. Type/shape validation — valid wasm component + the closed-world
+///      import audit (reject wasi:sockets/wasi:http/fs). — magic+parse DONE;
+///      import audit NOT YET DONE.
+///   5. Content controls — hash blocklist, sandboxed smoke-run, behavioral
+///      check.                                  — NOT YET DONE.
+///   6. Operator controls — delete/GC blobs, an upload audit log. — NOT YET DONE.
+///
+/// Until (2)–(6) exist this is a DEV/DEMO capability only.
+async fn upload_artifact(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !host.artifacts_upload_enabled {
+        // Off is indistinguishable from "no such route" — no capability oracle.
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    // When the host has a token, the upload route requires it (the same
+    // bearer the registry's mutating routes use). Without a token the host is
+    // loopback-only (enforced at startup), so anonymous upload is local-only.
+    if let Some(token) = host.auth_token.as_deref()
+        && !auth::bearer_matches(&headers, token)
+    {
+        return auth::artifact_unauthorized();
+    }
+    match host.fetcher.store_artifact(host.engine(), &body) {
+        Ok(sha256) => {
+            tracing::info!(
+                "artifacts: stored uploaded component {sha256} ({} bytes)",
+                body.len()
+            );
+            (
+                StatusCode::CREATED,
+                axum::Json(json!({
+                    "sha256": sha256,
+                    "url": format!("/artifacts/{sha256}.wasm"),
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, axum::Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// `GET /artifacts` with no hash — a hint, not a listing (enumerating the
+/// store would be an information leak). 404 when upload is disabled.
+async fn artifacts_disabled_get(State((host, _)): State<(Arc<Host>, bool)>) -> Response {
+    if !host.artifacts_upload_enabled {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        "GET /artifacts/<sha256>.wasm to fetch a stored artifact; POST /artifacts to upload one",
+    )
+        .into_response()
+}
+
+/// `GET /artifacts/<sha256>.wasm` — serve a stored artifact by content
+/// address (Phase S2b). Content-addressed, so the bytes are immutable: a long
+/// `immutable` cache header. 404 when upload is disabled or the hash is
+/// unknown. The install-by-URL pipeline points `component_url` here.
+async fn serve_artifact(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    Path(file): Path<String>,
+) -> Response {
+    if !host.artifacts_upload_enabled {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    }
+    let Some(sha256) = file.strip_suffix(".wasm") else {
+        return (StatusCode::NOT_FOUND, "artifacts are <sha256>.wasm").into_response();
+    };
+    // A malformed hash can't address a slot — reject before touching the fs.
+    if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return (StatusCode::NOT_FOUND, "not a sha-256 artifact name").into_response();
+    }
+    match host.fetcher.artifact_path(&sha256.to_ascii_lowercase()) {
+        Some(path) => match tokio::fs::read(&path).await {
+            Ok(bytes) => (
+                [
+                    (header::CONTENT_TYPE, "application/wasm"),
+                    (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(e) => {
+                tracing::error!("artifacts: reading {}: {e}", path.display());
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
+        None => (StatusCode::NOT_FOUND, "no such artifact").into_response(),
+    }
 }
 
 /// The aggregate MCP endpoint: every app's tools on ONE session, namespaced

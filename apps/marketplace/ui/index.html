@@ -245,7 +245,18 @@
     form.add input::placeholder, form.add textarea::placeholder { color: var(--faint); }
     form.add textarea { min-height: 70px; resize: vertical; }
     form.add .actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
-    #formError { color: var(--red); font-size: 12px; }
+    #formError, #uploadError { color: var(--red); font-size: 12px; }
+    .uploadnote {
+      margin: 0 2px 12px;
+      padding: 11px 12px;
+      border: 1px dashed color-mix(in srgb, var(--green) 40%, var(--line));
+      border-radius: 9px;
+      font-size: 12px;
+      color: var(--dim);
+    }
+    .uploadnote .micro { color: var(--green); display: block; margin-bottom: 6px; }
+    .uploadnote code { font-family: var(--mono); color: var(--text); }
+    #uploadPanel[hidden] { display: none; }
 
     footer.todo {
       margin-top: 26px;
@@ -296,6 +307,46 @@
     </div>
 
     <ul class="listings" id="listings"></ul>
+
+    <details class="addpanel" id="uploadPanel" hidden>
+      <summary><span class="micro">⬆ Upload a component (host-hosted)</span></summary>
+      <div class="uploadnote">
+        <span class="micro">Dev/demo — open upload is enabled on this host</span>
+        Pick a compiled <code>wasm32-wasip2</code> component. The HOST computes
+        its sha-256, validates it is a real component, stores it
+        content-addressed, and serves it at <code>/artifacts/&lt;sha&gt;.wasm</code>
+        — then this listing is added pointing at that local URL + hash. Open
+        upload is arbitrary-blob storage; it is gated default-off and is a
+        dev/demo capability until the MUST-FIX checklist (auth, size cap, rate
+        limit, abuse controls, quota) is met.
+      </div>
+      <form class="add" id="uploadForm">
+        <label><span class="micro">Component file (.wasm)</span>
+          <input name="file" type="file" accept=".wasm,application/wasm" required /></label>
+        <label><span class="micro">Name</span>
+          <input name="name" placeholder="myapp" required /></label>
+        <label><span class="micro">Description</span>
+          <input name="description" placeholder="what the app does" /></label>
+        <label><span class="micro">Version</span>
+          <input name="version" placeholder="0.1.0" required /></label>
+        <label><span class="micro">UI directory (host path) or bundled-ui note</span>
+          <input name="ui" placeholder="apps/myapp/ui" required /></label>
+        <label><span class="micro">Publisher</span>
+          <input name="publisher" placeholder="me" required /></label>
+        <label><span class="micro">Capability manifest — outbound hosts (comma-separated; empty = no network)</span>
+          <input name="allow_hosts" placeholder="api.example.com" /></label>
+        <label><span class="micro">Capability manifest — env keys (comma-separated; values stay on the host)</span>
+          <input name="env_keys" placeholder="EXAMPLE_API_KEY" /></label>
+        <label><span class="micro">Capability manifest — data note</span>
+          <input name="data_note" placeholder="one automerge document under $HOME/.myapp" /></label>
+        <label><span class="micro">Import audit (`wasm-tools component wit` world block; optional)</span>
+          <textarea name="import_audit" placeholder="world root { … }"></textarea></label>
+        <div class="actions">
+          <button class="btn primary" type="submit">Upload &amp; add listing</button>
+          <span id="uploadError"></span>
+        </div>
+      </form>
+    </details>
 
     <details class="addpanel" id="addPanel">
       <summary><span class="micro">+ Add listing (curated)</span></summary>
@@ -586,6 +637,74 @@
         showToast("Listing added");
       } catch (err) {
         $("formError").textContent = err.message;
+      }
+    });
+
+    // ── upload flow (Phase S2b): POST the picked .wasm to the host's
+    // content-addressed artifact store (../artifacts, host-root), then
+    // add_listing pointing at the returned local /artifacts/<sha>.wasm URL +
+    // the host-computed sha. The panel is only shown when the host has open
+    // upload enabled (probed via a HEAD/GET below). ───────────────────────
+    async function uploadArtifact(bytes) {
+      const headers = { "Content-Type": "application/wasm" };
+      if (tokenInput.value) headers["Authorization"] = `Bearer ${tokenInput.value}`;
+      const res = await fetch("../artifacts", { method: "POST", headers, body: bytes });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) throw new Error("Unauthorized — set the auth token above");
+      if (res.status === 404) throw new Error("Open upload is not enabled on this host");
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data; // { sha256, url }
+    }
+
+    // Show the upload panel only if the host exposes the artifact store.
+    // Disabled → POST 404s; we probe cheaply with a GET to /artifacts (which
+    // 404s when off, 400s with a hint when on).
+    async function probeUpload() {
+      try {
+        const res = await fetch("../artifacts", { method: "GET" });
+        if (res.status !== 404) $("uploadPanel").hidden = false;
+      } catch { /* standalone / no host root — leave hidden */ }
+    }
+    probeUpload();
+
+    $("uploadForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fields = Object.fromEntries(new FormData(form));
+      const csv = (s) => (s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      $("uploadError").textContent = "";
+      const file = form.querySelector('input[name="file"]').files[0];
+      if (!file) { $("uploadError").textContent = "pick a .wasm file"; return; }
+      const btn = form.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      try {
+        const bytes = await file.arrayBuffer();
+        const { sha256, url } = await uploadArtifact(bytes);
+        // The listing must carry an http(s) URL the host can fetch — point it
+        // at THIS host's own artifact route (single-host/dev-demo scope).
+        const absoluteUrl = new URL(url, window.location.origin).href;
+        await act("add_listing", {
+          name: fields.name.trim(),
+          description: (fields.description ?? "").trim(),
+          version: fields.version.trim(),
+          component_url: absoluteUrl,
+          component_sha256: sha256,
+          ui: fields.ui.trim(),
+          publisher: fields.publisher.trim(),
+          capabilities: {
+            allow_hosts: csv(fields.allow_hosts),
+            env_keys: csv(fields.env_keys),
+            data_note: (fields.data_note ?? "").trim(),
+          },
+          import_audit: (fields.import_audit ?? "").trim(),
+        });
+        form.reset();
+        $("uploadPanel").open = false;
+        showToast(`Uploaded — sha256 ${sha256.slice(0, 12)}… · listing added`);
+      } catch (err) {
+        $("uploadError").textContent = err.message;
+      } finally {
+        btn.disabled = false;
       }
     });
 
