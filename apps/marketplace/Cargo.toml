@@ -20,3 +20,10 @@ tokio.workspace = true
 name = "marketplace"
 # cdylib: `cargo build --lib --target wasm32-wasip2` emits the component.
 crate-type = ["lib", "cdylib"]
+
+# cargo-machete false positives: the #[model]/#[actions] proc-macros in
+# `tangram-macros` emit absolute `::serde`/`::schemars`/`::automerge`/
+# `::autosurgeon` paths, so the app genuinely needs these as direct deps
+# even though no source file contains an explicit `use` of them.
+[package.metadata.cargo-machete]
+ignored = ["automerge", "autosurgeon", "schemars", "serde"]
