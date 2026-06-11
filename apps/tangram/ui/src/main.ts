@@ -12,6 +12,7 @@ import {
   type MdFile,
   type VaultState,
 } from "./api";
+import { MdEditor } from "./editor";
 import { renderMarkdown } from "./markdown";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
@@ -23,6 +24,17 @@ const filesById = new Map<string, MdFile>();
 let fleet: FleetApp[] = [];
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
+
+// The live CodeMirror editor for the active note tab. Held here so an SSE
+// `state` frame can patch it in place (echo-safely) instead of tearing it
+// down — a rebuild would drop focus/cursor and clobber an in-progress edit.
+interface ActiveEditor {
+  fileId: string;
+  editor: MdEditor;
+  preview: HTMLElement;
+  saveTimer?: number;
+}
+let activeEditor: ActiveEditor | null = null;
 
 // ── DOM scaffold ─────────────────────────────────────────────────────────────
 
@@ -194,8 +206,26 @@ function renderTabs() {
   }
 }
 
+function disposeActiveEditor() {
+  if (!activeEditor) return;
+  if (activeEditor.saveTimer) window.clearTimeout(activeEditor.saveTimer);
+  activeEditor.editor.destroy();
+  activeEditor = null;
+}
+
 function renderContent() {
   const tab = tabs.active;
+  // If the active note tab is already mounted with its CodeMirror editor,
+  // leave it in place — tearing it down to re-render would drop the cursor
+  // and clobber an in-progress edit. SSE updates flow through syncActiveNote.
+  if (
+    tab?.kind === "note" &&
+    activeEditor?.fileId === tab.fileId &&
+    contentEl.contains(activeEditor.editor.view.dom)
+  ) {
+    return;
+  }
+  disposeActiveEditor();
   contentEl.replaceChildren();
   if (!tab) {
     renderHome();
@@ -248,9 +278,10 @@ function stat(value: string, label: string): HTMLElement {
   return s;
 }
 
-// A simple textarea editor + rendered preview (CodeMirror live-preview is a
-// deferred phase, see ui/README.md). Edits debounce-write to the model; the
-// preview re-renders from the textarea live.
+// CodeMirror 6 source pane (markdown mode, Obsidian-style in-editor styling)
+// alongside the live rendered preview. Edits debounce-write to the model; the
+// preview re-renders live from the editor. The MdEditor is retained in
+// `activeEditor` so SSE state frames patch it echo-safely (see syncActiveNote).
 function renderNoteTab(fileId: string) {
   const file = filesById.get(fileId);
   if (!file) {
@@ -266,26 +297,42 @@ function renderNoteTab(fileId: string) {
   wrap.appendChild(bar);
 
   const split = el("div", "note-split");
-  const editor = document.createElement("textarea");
-  editor.className = "editor";
-  editor.value = file.body;
-  editor.spellcheck = false;
+  const editorHost = el("div", "editor-host");
   const preview = el("div", "preview markdown");
   preview.innerHTML = renderMarkdown(file.body);
 
-  let timer: number | undefined;
-  editor.addEventListener("input", () => {
-    preview.innerHTML = renderMarkdown(editor.value);
-    if (timer) window.clearTimeout(timer);
-    timer = window.setTimeout(() => {
-      void vault.writeFile(fileId, editor.value).catch((e) => console.error(e));
+  const state: ActiveEditor = {
+    fileId,
+    editor: undefined as unknown as MdEditor,
+    preview,
+  };
+  const editor = new MdEditor(editorHost, file.body, (doc) => {
+    preview.innerHTML = renderMarkdown(doc);
+    if (state.saveTimer) window.clearTimeout(state.saveTimer);
+    state.saveTimer = window.setTimeout(() => {
+      editor.markWritten(doc); // expect this body to echo back over SSE
+      void vault.writeFile(fileId, doc).catch((e) => console.error(e));
     }, 400);
   });
+  state.editor = editor;
 
-  split.appendChild(editor);
+  split.appendChild(editorHost);
   split.appendChild(preview);
   wrap.appendChild(split);
   contentEl.appendChild(wrap);
+  activeEditor = state;
+}
+
+// Apply a fresh vault snapshot to the live note editor, if any. Echo-safe:
+// MdEditor.syncRemote only adopts the remote body when it differs from both
+// the editor's current text and our last write (so a peer's edit lands but our
+// own in-progress typing is never clobbered). The preview follows.
+function syncActiveNote() {
+  if (!activeEditor) return;
+  const file = filesById.get(activeEditor.fileId);
+  if (!file) return; // pruneNotes will close a vanished note's tab
+  activeEditor.editor.syncRemote(file.body);
+  activeEditor.preview.innerHTML = renderMarkdown(activeEditor.editor.doc);
 }
 
 // ── vault operations (with light prompts; richer UX is a later phase) ────────
@@ -356,8 +403,10 @@ function onVaultState(state: VaultState) {
   for (const f of files) filesById.set(f.id, f);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
-  // active note tab may need its editor synced if the body changed remotely;
-  // re-render content keeps it correct (last-writer-wins on the model).
+  // Patch the live note editor in place from the new snapshot (echo-safe),
+  // then refresh content. renderContent reuses the mounted editor for the
+  // active note, so this never clobbers an in-progress edit.
+  syncActiveNote();
   renderContent();
 }
 
@@ -366,6 +415,10 @@ async function refreshFleet() {
     const f = await fetchFleet();
     fleet = (f.apps ?? []).sort((a, b) => a.name.localeCompare(b.name));
     renderApps();
+    // Keep the landing/home stats (APPS / HEALTHY) in step with the fleet:
+    // the home tab is otherwise only re-rendered on tab/vault changes, so it
+    // would show 0 until one of those fired (the landing-stats bug).
+    if (tabs.active?.kind === "home" || tabs.active === null) renderContent();
   } catch (e) {
     console.error("fleet refresh failed", e);
   }
