@@ -22,7 +22,10 @@ symlink to `.agents/skills`.
   components per `apps.toml` with capability grants (WIT world in its `wit/`;
   README "Run apps as WASM components"); optional MCP plane through a
   supervised agentgateway child with generated config (`src/gateway.rs`,
-  `[gateway]` in apps.toml; README "MCP through agentgateway")
+  `[gateway]` in apps.toml; README "MCP through agentgateway"); opt-in
+  multi-tenancy — isolated, bearer-gated app sets under `/t/<tenant>/`
+  (`src/tenant.rs` + the `Principal` seam in `src/auth.rs`, `[tenants]` in
+  apps.toml; README "Multi-tenancy", RUNTIME_PLAN Phase 5)
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in

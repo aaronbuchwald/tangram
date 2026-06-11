@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 
 const TOKEN: &str = "test-gateway-token";
+const ALICE_TOKEN: &str = "alice-gateway-token";
+const BOB_TOKEN: &str = "bob-gateway-token";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,6 +70,9 @@ fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc
         .env("HOME", home)
         .env("BIND_ADDR", bind)
         .env("TANGRAM_AUTH_TOKEN", TOKEN)
+        // Tenant tokens for the tenant-scoping test (inert for the others).
+        .env("TANGRAM_TEST_ALICE_TOKEN", ALICE_TOKEN)
+        .env("TANGRAM_TEST_BOB_TOKEN", BOB_TOKEN)
         .env("RUST_LOG", "info")
         .env_remove("TANGRAM_DATA_DIR")
         .stdout(Stdio::from(log_file.try_clone().expect("clone log")))
@@ -586,4 +591,207 @@ async fn missing_binary_falls_back_to_direct_serving() {
         .await
         .expect("aggregate probe");
     assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+/// Phase 5 × the gateway: tenant MCP lives at `/t/<tenant>/<app>/mcp` plus a
+/// per-tenant aggregate `/t/<tenant>/mcp` that lists ONLY that tenant's
+/// tools; the global aggregate `/mcp` excludes tenant apps entirely; and the
+/// tenant bearer is enforced at the host's INTERNAL endpoints — hitting
+/// agentgateway's own port directly (skipping the public listener's check)
+/// still cannot reach a tenant app without the token.
+#[tokio::test]
+async fn tenant_mcp_is_scoped_and_authed_through_the_gateway() {
+    for name in ["registry", "notes"] {
+        if !component(name).exists() {
+            eprintln!(
+                "SKIPPING tenant gateway test: {} missing",
+                component(name).display()
+            );
+            return;
+        }
+    }
+    if !agentgateway_on_path() {
+        eprintln!("SKIPPING tenant gateway test: no agentgateway binary on PATH");
+        return;
+    }
+
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    // Pin the gateway port so the test can talk to agentgateway DIRECTLY
+    // (loopback passes its source rule) and prove auth holds behind it.
+    let gateway_port = free_port();
+    let apps_toml = home.join("apps.toml");
+    // alice: notes + todo (the same component under a second name — a
+    // tenant-only app name that must never leak onto the global aggregate).
+    // bob: the default registry bootstrap.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[gateway]
+enabled = true
+port = {gateway_port}
+
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+
+[apps.notes]
+component = "{notes}"
+ui = "{notes_ui}"
+
+[tenants.alice]
+token = "${{TANGRAM_TEST_ALICE_TOKEN}}"
+
+[tenants.alice.apps.notes]
+component = "{notes}"
+ui = "{notes_ui}"
+
+[tenants.alice.apps.todo]
+component = "{notes}"
+ui = "{notes_ui}"
+
+[tenants.bob]
+token = "${{TANGRAM_TEST_BOB_TOKEN}}"
+"#,
+            registry = component("registry").display(),
+            notes = component("notes").display(),
+            notes_ui = root.join("apps/notes/ui").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+    // A client that always presents alice's bearer (every MCP request into a
+    // tenant namespace needs it — initialize and tools/list included).
+    let alice = {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {ALICE_TOKEN}")
+                .parse()
+                .expect("auth header"),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("alice client")
+    };
+
+    wait_for("gateway running", Duration::from_secs(120), || async {
+        fleet_gateway(&client, &base).await["running"] == serde_json::Value::Bool(true)
+    })
+    .await;
+
+    // The per-tenant aggregate converges and lists ONLY alice's apps: the
+    // namespaces are her `notes_*`/`todo_*` — no `registry_*` (the top-level
+    // registry is not hers).
+    let alice_aggregate = format!("{base}/t/alice/mcp");
+    wait_for(
+        "alice's aggregate lists notes+todo",
+        Duration::from_secs(120),
+        || async {
+            match McpSession::try_connect(&alice, &alice_aggregate).await {
+                Ok(session) => match session.try_tool_names().await {
+                    Ok(tools) => {
+                        tools.iter().any(|t| t == "notes_add_note")
+                            && tools.iter().any(|t| t == "todo_add_note")
+                    }
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            }
+        },
+    )
+    .await;
+    let session = McpSession::connect(&alice, &alice_aggregate).await;
+    let tools = session.tool_names().await;
+    assert!(
+        tools
+            .iter()
+            .all(|t| t.starts_with("notes_") || t.starts_with("todo_")),
+        "alice's aggregate must list only her apps: {tools:?}"
+    );
+
+    // A tools/call through her aggregate lands in HER document.
+    let (status, body) = session
+        .call(
+            "todo_add_note",
+            serde_json::json!({ "text": "via tenant aggregate" }),
+            Some(ALICE_TOKEN),
+        )
+        .await;
+    assert!(status.is_success(), "todo_add_note: {status} {body}");
+    let state: serde_json::Value = alice
+        .get(format!("{base}/t/alice/todo/api/state"))
+        .send()
+        .await
+        .expect("todo state")
+        .json()
+        .await
+        .expect("todo state json");
+    assert!(
+        state["notes"]
+            .as_array()
+            .is_some_and(|notes| notes.iter().any(|n| n["text"] == "via tenant aggregate")),
+        "{state}"
+    );
+
+    // The GLOBAL aggregate excludes tenant apps: top-level notes_/registry_
+    // tools only, and alice's tenant-only `todo` never appears.
+    let global = McpSession::connect(&client, &format!("{base}/mcp")).await;
+    let tools = global.tool_names().await;
+    assert!(tools.iter().any(|t| t == "notes_add_note"), "{tools:?}");
+    assert!(
+        tools.iter().any(|t| t == "registry_install_app"),
+        "{tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|t| t.starts_with("todo_")),
+        "tenant apps must not leak onto the global aggregate: {tools:?}"
+    );
+
+    // Per-app MCP through the gateway: authed works, tokenless and
+    // wrong-tenant 401 at the host before the gateway hop.
+    let per_app = format!("{base}/t/alice/notes/mcp");
+    McpSession::connect(&alice, &per_app).await;
+    for token in [None, Some(BOB_TOKEN)] {
+        let mut req = client
+            .post(&per_app)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": { "protocolVersion": "2025-03-26", "capabilities": {},
+                            "clientInfo": { "name": "x", "version": "0" } }
+            }));
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await.expect("unauthed tenant mcp");
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "token {token:?}"
+        );
+    }
+
+    // The hop is not a bypass: talk to agentgateway's own port directly
+    // (loopback satisfies its source rule, skipping the public listener's
+    // check entirely) — the host's INTERNAL endpoint still demands the
+    // bearer, so the tokenless handshake fails and the authed one succeeds.
+    let via_gateway = format!("http://127.0.0.1:{gateway_port}/t/alice/notes/mcp");
+    assert!(
+        McpSession::try_connect(&client, &via_gateway)
+            .await
+            .is_err(),
+        "a tokenless request straight at the gateway must not reach a tenant app"
+    );
+    McpSession::connect(&alice, &via_gateway).await;
 }

@@ -108,11 +108,18 @@ pub fn handle_post<D: DocHandle + ?Sized>(
 /// Dial out to a remote instance and keep syncing with it, reconnecting with
 /// backoff. `url` is a sync base like `http://other-host:8080/sync` (legacy
 /// `ws://`/`wss://` values are rewritten with a deprecation warning).
-pub async fn run_remote<D: DocHandle>(url: String, store: Arc<D>) {
+///
+/// `token`, when set, is sent as `Authorization: Bearer <token>` on both the
+/// sync POST and the SSE poke stream — required by remotes whose sync
+/// endpoints are private, e.g. a tangram-host tenant namespace
+/// (`https://host/t/<tenant>/<app>/sync`). The native app host wires it from
+/// `TANGRAM_REMOTE_TOKEN` (or `TANGRAM_REMOTE_TOKEN_<NAME>`); tangram-host
+/// from the spec's `remote_token`.
+pub async fn run_remote<D: DocHandle>(url: String, token: Option<String>, store: Arc<D>) {
     let base = normalize_remote(&url);
     let client = reqwest::Client::new();
     loop {
-        if let Err(e) = sync_with_remote(&client, &base, &store).await {
+        if let Err(e) = sync_with_remote(&client, &base, token.as_deref(), &store).await {
             tracing::warn!("sync with {base} failed: {e:#}; reconnecting");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -126,15 +133,20 @@ pub async fn run_remote<D: DocHandle>(url: String, store: Arc<D>) {
 async fn sync_with_remote<D: DocHandle>(
     client: &reqwest::Client,
     base: &str,
+    token: Option<&str>,
     store: &Arc<D>,
 ) -> anyhow::Result<()> {
     let session = uuid::Uuid::new_v4().to_string();
     let mut state = automerge::sync::State::new();
     let mut version = store.subscribe();
 
-    let response = client
+    let mut events = client
         .get(format!("{base}/events"))
-        .query(&[("session", &session)])
+        .query(&[("session", &session)]);
+    if let Some(token) = token {
+        events = events.bearer_auth(token);
+    }
+    let response = events
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
@@ -147,7 +159,7 @@ async fn sync_with_remote<D: DocHandle>(
         // Converge both directions, then sleep until there's work again. The
         // first iteration doubles as the initial sync (the server also pokes
         // on connect).
-        sync_round(client, base, &session, &mut state, store).await?;
+        sync_round(client, base, &session, token, &mut state, store).await?;
         loop {
             tokio::select! {
                 chunk = pokes.next() => {
@@ -172,17 +184,22 @@ async fn sync_round<D: DocHandle>(
     client: &reqwest::Client,
     base: &str,
     session: &str,
+    token: Option<&str>,
     state: &mut automerge::sync::State,
     store: &Arc<D>,
 ) -> anyhow::Result<()> {
     loop {
         let message = store.generate_sync(state);
         let quiet = message.is_none();
-        let body = client
+        let mut post = client
             .post(base)
             .header("X-Tangram-Session", session)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(message.unwrap_or_default())
+            .body(message.unwrap_or_default());
+        if let Some(token) = token {
+            post = post.bearer_auth(token);
+        }
+        let body = post
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)

@@ -63,6 +63,69 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+// ── the request principal (RUNTIME_PLAN Phase 5 → 6 seam) ───────────────────
+
+/// Who a request acts as. Today there are two kinds: the implicit
+/// single-tenant principal (top-level routes, trusted-localhost model) and a
+/// tenant authenticated by its bearer token. Phase 6 swaps the token lookup
+/// in [`resolve_principal`] for OAuth claims without touching call sites —
+/// everything downstream consumes a `Principal`, never a raw header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Principal {
+    /// A top-level request — the single-tenant surface, exactly as before.
+    /// (Not minted anywhere yet: top-level routes skip principal resolution
+    /// entirely today, preserving byte-identical behavior; Phase 6 starts
+    /// constructing it when per-user identity arrives.)
+    #[allow(dead_code)]
+    Local,
+    /// A request authenticated as this tenant.
+    Tenant(String),
+}
+
+impl Principal {
+    pub fn tenant(&self) -> Option<&str> {
+        match self {
+            Self::Local => None,
+            Self::Tenant(name) => Some(name.as_str()),
+        }
+    }
+}
+
+/// Resolve a request under `/t/<tenant>/` to a [`Principal`]: the request
+/// must carry `Authorization: Bearer <that tenant's token>` (constant-time
+/// compare). `expected_token` is the tenant's resolved token — `None` for an
+/// unknown tenant or one whose token didn't resolve, which fails exactly
+/// like a wrong token: the caller answers a uniform 401 either way, so an
+/// unauthenticated probe cannot distinguish "tenant exists, wrong token"
+/// from "no such tenant".
+pub fn resolve_principal(
+    headers: &HeaderMap,
+    tenant: &str,
+    expected_token: Option<&str>,
+) -> Option<Principal> {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))?;
+    let expected = expected_token?;
+    ct_eq(presented.as_bytes(), expected.as_bytes()).then(|| Principal::Tenant(tenant.to_string()))
+}
+
+/// The uniform 401 for the tenant namespace — same body for a missing
+/// header, a wrong token, another tenant's token, and a nonexistent tenant
+/// (no existence oracle).
+pub fn tenant_unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        axum::Json(serde_json::json!({
+            "error": "missing or invalid bearer token for this tenant namespace \
+                      (send Authorization: Bearer <the tenant's token>)"
+        })),
+    )
+        .into_response()
+}
+
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -247,6 +310,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn principal_resolution_is_per_tenant_and_uniform_on_failure() {
+        let bearer = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Bearer {token}").parse().unwrap(),
+            );
+            headers
+        };
+        let alice = Some("alice-token");
+
+        // The right token resolves to that tenant's principal.
+        assert_eq!(
+            resolve_principal(&bearer("alice-token"), "alice", alice),
+            Some(Principal::Tenant("alice".into()))
+        );
+        // Missing header, wrong token, another tenant's token, wrong scheme,
+        // and an unknown tenant (expected_token = None) all fail identically.
+        assert_eq!(resolve_principal(&HeaderMap::new(), "alice", alice), None);
+        assert_eq!(resolve_principal(&bearer("wrong"), "alice", alice), None);
+        assert_eq!(
+            resolve_principal(&bearer("bob-token"), "alice", alice),
+            None
+        );
+        assert_eq!(
+            resolve_principal(&bearer("alice-token"), "ghost", None),
+            None
+        );
+        let mut basic = HeaderMap::new();
+        basic.insert(header::AUTHORIZATION, "Basic alice-token".parse().unwrap());
+        assert_eq!(resolve_principal(&basic, "alice", alice), None);
+
+        assert_eq!(Principal::Tenant("alice".into()).tenant(), Some("alice"));
+        assert_eq!(Principal::Local.tenant(), None);
     }
 
     #[test]

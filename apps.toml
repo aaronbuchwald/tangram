@@ -45,3 +45,24 @@ NUTRITION_STRATEGY = "calorieninjas"
 # ${VAR} values are expanded from the host's environment (.env is loaded),
 # so the secret itself stays out of this file.
 CALORIENINJAS_API_KEY = "${CALORIENINJAS_API_KEY}"
+
+# ── Multi-tenancy (RUNTIME_PLAN Phase 5; README "Multi-tenancy") ─────────────
+# Uncomment to serve isolated, bearer-gated app sets under /t/<tenant>/
+# alongside the top-level apps above (which stay unauthenticated and
+# unchanged). Every request under /t/<tenant>/ — UI, state, SSE, sync, MCP —
+# requires Authorization: Bearer <that tenant's token>. Tenant data lives
+# under data_root (default $HOME/.tangram-tenants), one tree per tenant.
+#[tenants]
+#data_root = "/srv/tangram-tenants"   # default: $HOME/.tangram-tenants
+#
+#[tenants.alice]
+#token = "${TANGRAM_TENANT_ALICE_TOKEN}"          # REQUIRED; keep it in .env
+#max_apps = 8                                     # app cap (default 8)
+#allow_hosts_ceiling = ["api.calorieninjas.com"]  # outbound cap (intersection)
+## With no [tenants.alice.apps.*] template, alice starts with just a registry
+## instance (cloned from [apps.registry] above) and installs the rest through
+## it: /t/alice/registry/ — her replicated doc drives only HER namespace.
+#
+#[tenants.alice.apps.notes]                       # or give bootstrap apps
+#component = "target/wasm32-wasip2/release/notes.wasm"
+#ui = "apps/notes/ui"

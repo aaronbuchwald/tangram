@@ -25,6 +25,9 @@ use crate::{Ctx, Model, mcp, sync, web};
 ///   hosts). Legacy `ws://`/`wss://` values are rewritten to `http(s)://`
 ///   with a deprecation warning.
 /// - `TANGRAM_REMOTE_<NAME>` — per-app remote, e.g. `TANGRAM_REMOTE_NOTES`
+/// - `TANGRAM_REMOTE_TOKEN` (or per-app `TANGRAM_REMOTE_TOKEN_<NAME>`) —
+///   bearer token sent on the dial-out sync requests, for remotes whose sync
+///   endpoints are private (a tangram-host tenant namespace)
 /// - `TANGRAM_DATA_DIR` — where the document lives, directly inside it
 ///   (a shell's apps share one dir). Default when unset: `$HOME/.<app-name>`
 ///   (e.g. `~/.notes/notes.automerge`), or `./data` if `$HOME` is unset.
@@ -120,7 +123,11 @@ impl<M: Model + Actions> App<M> {
         // Replicate with a remote peer if one is configured; local-first
         // means everything below works identically without it.
         if let Some(remote) = self.remote.clone().or_else(|| self.env_remote()) {
-            tokio::spawn(sync::run_remote(remote, store.clone()));
+            tokio::spawn(sync::run_remote(
+                remote,
+                self.env_remote_token(),
+                store.clone(),
+            ));
         }
 
         let router = web::router(store.clone(), ui_dir)
@@ -141,6 +148,18 @@ impl<M: Model + Actions> App<M> {
     fn env_remote(&self) -> Option<String> {
         let suffix = self.name.to_uppercase().replace('-', "_");
         std::env::var(format!("TANGRAM_REMOTE_{suffix}")).ok()
+    }
+
+    /// Bearer token the dial-out sync client presents to the remote:
+    /// `TANGRAM_REMOTE_TOKEN_<NAME>`, else the shared `TANGRAM_REMOTE_TOKEN`.
+    /// Needed when the remote's sync endpoints are private — e.g. a
+    /// tangram-host tenant namespace (`/t/<tenant>/<app>/sync`).
+    fn env_remote_token(&self) -> Option<String> {
+        let suffix = self.name.to_uppercase().replace('-', "_");
+        std::env::var(format!("TANGRAM_REMOTE_TOKEN_{suffix}"))
+            .or_else(|_| std::env::var("TANGRAM_REMOTE_TOKEN"))
+            .ok()
+            .filter(|t| !t.trim().is_empty())
     }
 
     pub async fn serve(self) -> anyhow::Result<()> {

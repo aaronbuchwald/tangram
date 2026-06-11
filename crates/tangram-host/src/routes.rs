@@ -30,6 +30,7 @@ use crate::Host;
 use crate::app::{AppRuntime, DispatchError};
 use crate::auth::{self, AuthGate};
 use crate::mcp::McpBridge;
+use crate::tenant::AppKey;
 
 /// One running app's routes + runtime, as stored in the host's live table.
 pub struct AppEntry {
@@ -146,23 +147,25 @@ async fn aggregate_mcp(
     }
 }
 
-/// `GET /api/fleet` — live host-level status for every desired app:
-/// where its spec came from (file vs registry), whether it is enabled,
+/// `GET /api/fleet` — live host-level status for every desired TOP-LEVEL
+/// app: where its spec came from (file vs registry), whether it is enabled,
 /// running, healthy (the live instance answers a state probe), and the
 /// last converge error if it failed to start. This is observation of THIS
 /// host — deliberately not part of the registry's replicated document.
+/// Tenant apps are NOT listed here (this route is unauthenticated); each
+/// tenant sees their own at `GET /t/<tenant>/api/fleet`.
 async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_json::Value> {
     let statuses = host.fleet.read().await.clone();
     let apps = host.apps.read().await;
     let mut out = Vec::with_capacity(statuses.len());
-    for (name, status) in &statuses {
-        let entry = apps.get(name);
+    for (key, status) in statuses.iter().filter(|(key, _)| key.tenant.is_none()) {
+        let entry = apps.get(key);
         let healthy = match entry {
             Some(entry) => entry.runtime.healthy().await,
             None => false,
         };
         out.push(json!({
-            "name": name,
+            "name": key.app,
             "source": status.source.as_str(),
             "registry": status.registry,
             "require_auth": status.require_auth,
@@ -185,10 +188,11 @@ async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_j
 
 /// Route `/<app>` and `/<app>/...` to the app's router, resolved against the
 /// LIVE app table — this is what makes apps.toml edits take effect without
-/// restarting the host.
+/// restarting the host. `/t/...` is the tenant namespace (reserved as an app
+/// name) and is handled by [`dispatch_tenant`].
 async fn dispatch_app(
     State((host, via_gateway)): State<(Arc<Host>, bool)>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
     let path = req.uri().path().to_string();
     let Some(without_slash) = path.strip_prefix('/') else {
@@ -199,9 +203,13 @@ async fn dispatch_app(
         None => (without_slash.to_string(), String::new()),
     };
 
+    if name == "t" {
+        return dispatch_tenant(host, via_gateway, req, &rest).await;
+    }
+
     let router = {
         let apps = host.apps.read().await;
-        match apps.get(&name) {
+        match apps.get(&AppKey::top(&name)) {
             Some(entry) => entry.router.clone(),
             None => return (StatusCode::NOT_FOUND, "no such app").into_response(),
         }
@@ -225,7 +233,12 @@ async fn dispatch_app(
         return gateway.proxy(req).await;
     }
 
-    // Strip the `/<app>` prefix and forward to the app's router.
+    forward_to_app(router, req, rest).await
+}
+
+/// Strip the route prefix off and forward to the app's router (the prefix is
+/// everything before `rest`, which keeps its leading slash).
+async fn forward_to_app(router: Router, mut req: Request, rest: String) -> Response {
     let path_and_query = match req.uri().query() {
         Some(query) => format!("{rest}?{query}"),
         None => rest,
@@ -238,6 +251,135 @@ async fn dispatch_app(
         Ok(response) => response,
         Err(never) => match never {},
     }
+}
+
+// ── the tenant namespace (RUNTIME_PLAN Phase 5) ─────────────────────────────
+
+/// Split the path after `/t` into (tenant, rest): `/alice` → ("alice", ""),
+/// `/alice/` → ("alice", "/"), `/alice/notes/api` → ("alice", "/notes/api").
+/// `None` for no tenant segment (`/t`, `/t/`).
+fn split_tenant(rest: &str) -> Option<(String, String)> {
+    let after = rest.strip_prefix('/')?;
+    let (tenant, tail) = match after.split_once('/') {
+        Some((tenant, tail)) => (tenant, format!("/{tail}")),
+        None => (after, String::new()),
+    };
+    (!tenant.is_empty()).then(|| (tenant.to_string(), tail))
+}
+
+/// Requests under `/t/<tenant>/...`. EVERYTHING here — UI, state, actions,
+/// SSE, sync, MCP, the tenant index and fleet — requires `Authorization:
+/// Bearer <that tenant's token>`: tenant data is private, unlike the
+/// trusted-localhost single-tenant surface where reads stay open. The 401 is
+/// uniform across missing header / wrong token / another tenant's token /
+/// nonexistent tenant, so the namespace leaks no tenant-existence signal.
+async fn dispatch_tenant(host: Arc<Host>, via_gateway: bool, req: Request, rest: &str) -> Response {
+    let Some((tenant, rest)) = split_tenant(rest) else {
+        return (StatusCode::NOT_FOUND, "no such app").into_response();
+    };
+
+    // The Phase-6 seam: request → Principal, resolved exactly once, here
+    // (and on the internal listener, which the MCP gateway targets — the
+    // gateway hop cannot bypass it). OAuth claims later replace the token
+    // table inside resolve_principal without touching anything below.
+    let principal = {
+        let tokens = host.tenant_tokens.read().await;
+        auth::resolve_principal(
+            req.headers(),
+            &tenant,
+            tokens.get(&tenant).map(String::as_str),
+        )
+    };
+    // Everything below acts as `principal` — which must be THIS tenant (a
+    // `Local` principal has no business inside a tenant namespace).
+    if principal
+        .as_ref()
+        .and_then(auth::Principal::tenant)
+        .is_none_or(|name| name != tenant)
+    {
+        return auth::tenant_unauthorized();
+    }
+
+    match rest.as_str() {
+        "" => return Redirect::permanent(&format!("/t/{tenant}/")).into_response(),
+        "/" => return tenant_index(&host, &tenant).await,
+        "/api/fleet" => return tenant_fleet(&host, &tenant).await,
+        _ => {}
+    }
+
+    // The per-tenant aggregate MCP endpoint — this tenant's tools only,
+    // multiplexed by the gateway (404 without one, like the global /mcp).
+    if rest == "/mcp" || rest.starts_with("/mcp/") {
+        return match host.gateway.as_ref().filter(|_| via_gateway) {
+            Some(gateway) => gateway.proxy(req).await,
+            None => (
+                StatusCode::NOT_FOUND,
+                "no aggregate /t/<tenant>/mcp endpoint (enable [gateway] in apps.toml); \
+                 per-app MCP is at /t/<tenant>/<app>/mcp",
+            )
+                .into_response(),
+        };
+    }
+
+    let after = &rest[1..];
+    let (app, app_rest) = match after.split_once('/') {
+        Some((app, more)) => (app.to_string(), format!("/{more}")),
+        None => (after.to_string(), String::new()),
+    };
+    let router = {
+        let apps = host.apps.read().await;
+        match apps.get(&AppKey::tenant(&tenant, &app)) {
+            Some(entry) => entry.router.clone(),
+            None => return (StatusCode::NOT_FOUND, "no such app").into_response(),
+        }
+    };
+
+    if app_rest.is_empty() {
+        return Redirect::permanent(&format!("/t/{tenant}/{app}/")).into_response();
+    }
+
+    // Per-app MCP through the gateway, same hairpin as top-level apps: the
+    // gateway targets this path on the INTERNAL listener, whose tenant
+    // dispatch re-checks the bearer (agentgateway forwards Authorization).
+    if via_gateway
+        && (app_rest == "/mcp" || app_rest.starts_with("/mcp/"))
+        && let Some(gateway) = host.gateway.as_ref()
+    {
+        return gateway.proxy(req).await;
+    }
+
+    forward_to_app(router, req, app_rest).await
+}
+
+/// `GET /t/<tenant>/api/fleet` — the tenant-scoped twin of `/api/fleet`
+/// (bearer-gated by the dispatcher): only this tenant's apps, plus the
+/// EFFECTIVE outbound grant (after the ceiling intersection) so a tenant can
+/// see what an install actually got.
+async fn tenant_fleet(host: &Arc<Host>, tenant: &str) -> Response {
+    let statuses = host.fleet.read().await.clone();
+    let apps = host.apps.read().await;
+    let mut out = Vec::new();
+    for (key, status) in statuses
+        .iter()
+        .filter(|(key, _)| key.tenant.as_deref() == Some(tenant))
+    {
+        let entry = apps.get(key);
+        let healthy = match entry {
+            Some(entry) => entry.runtime.healthy().await,
+            None => false,
+        };
+        out.push(json!({
+            "name": key.app,
+            "source": status.source.as_str(),
+            "registry": status.registry,
+            "enabled": status.enabled,
+            "running": entry.is_some(),
+            "healthy": healthy,
+            "allow_hosts": status.allow_hosts,
+            "error": status.error,
+        }));
+    }
+    axum::Json(json!({ "tenant": tenant, "apps": out })).into_response()
 }
 
 // ── per-app handlers (the SDK's derived surface, component-backed) ──────────
@@ -341,31 +483,60 @@ async fn sync_events(
 
 // ── index ────────────────────────────────────────────────────────────────────
 
+/// The root index lists TOP-LEVEL apps only — tenant apps are private to
+/// their (authenticated) tenant index at `/t/<tenant>/`.
 async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
     let apps = host.apps.read().await;
     let cards: String = apps
-        .values()
-        .map(|entry| {
-            let name = &entry.runtime.name;
-            format!(
-                r#"    <li>
-      <a class="app" href="/{name}/"><strong>{name}</strong><span>WASM component</span></a>
+        .keys()
+        .filter(|key| key.tenant.is_none())
+        .map(|key| app_card(&key.route_prefix(), &key.app))
+        .collect();
+    index_page(
+        "Tangram host",
+        "WASM components running on this host",
+        cards,
+    )
+}
+
+/// `GET /t/<tenant>/` — the tenant's own index (bearer-gated by the
+/// dispatcher): just their apps, linked under their namespace.
+async fn tenant_index(host: &Arc<Host>, tenant: &str) -> Response {
+    let apps = host.apps.read().await;
+    let cards: String = apps
+        .keys()
+        .filter(|key| key.tenant.as_deref() == Some(tenant))
+        .map(|key| app_card(&key.route_prefix(), &key.app))
+        .collect();
+    index_page(
+        &format!("Tangram — {tenant}"),
+        "your apps on this host",
+        cards,
+    )
+    .into_response()
+}
+
+fn app_card(prefix: &str, name: &str) -> String {
+    format!(
+        r#"    <li>
+      <a class="app" href="{prefix}/"><strong>{name}</strong><span>WASM component</span></a>
       <div class="endpoints">
-        <code>/{name}/mcp</code>
-        <code>/{name}/sync</code>
+        <code>{prefix}/mcp</code>
+        <code>{prefix}/sync</code>
       </div>
     </li>
 "#
-            )
-        })
-        .collect();
+    )
+}
+
+fn index_page(title: &str, subtitle: &str, cards: String) -> Html<String> {
     Html(format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Tangram host</title>
+  <title>{title}</title>
   <style>
     :root {{ color-scheme: dark; }}
     body {{
@@ -394,8 +565,8 @@ async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
 </head>
 <body>
   <main>
-    <h1>Tangram host</h1>
-    <p class="sub">WASM components running on this host</p>
+    <h1>{title}</h1>
+    <p class="sub">{subtitle}</p>
     <ul>
 {cards}    </ul>
   </main>
@@ -403,4 +574,31 @@ async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
 </html>
 "#
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_tenant;
+
+    #[test]
+    fn tenant_path_parsing() {
+        // After the dispatcher strips "/t", `rest` keeps its leading slash.
+        assert_eq!(split_tenant("/alice"), Some(("alice".into(), "".into())));
+        assert_eq!(split_tenant("/alice/"), Some(("alice".into(), "/".into())));
+        assert_eq!(
+            split_tenant("/alice/notes/api/state"),
+            Some(("alice".into(), "/notes/api/state".into()))
+        );
+        assert_eq!(
+            split_tenant("/alice/api/fleet"),
+            Some(("alice".into(), "/api/fleet".into()))
+        );
+        assert_eq!(
+            split_tenant("/alice/mcp"),
+            Some(("alice".into(), "/mcp".into()))
+        );
+        // No tenant segment: "/t" and "/t/" 404 like an unknown app.
+        assert_eq!(split_tenant(""), None);
+        assert_eq!(split_tenant("/"), None);
+    }
 }

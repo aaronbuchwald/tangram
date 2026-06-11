@@ -355,9 +355,47 @@ remote host, local host, and Cloudflare (miniflare-tested, deployable);
 **(2)** multi-tenancy with OAuth sign-in on Cloudflare — account creation,
 hosted use of the remote, and OAuth-connected local instances.
 
-- **Phase 5 — multi-tenancy mode**: tenant namespace in routing
-  (`/t/<tenant>/<app>/`), per-(tenant, app) docs/data dirs/grants, per-tenant
-  registry; auth-principal seam. Single port and single process preserved.
+- [x] **Phase 5 — multi-tenancy mode** — delivered 2026-06-11. One host
+  process, one public port, N tenants; single-tenant mode stays the default
+  and byte-identical (no `[tenants]` section → nothing changes; pinned by
+  the unchanged registry/gateway/capabilities integration tests).
+  - Config: `[tenants.<name>]` in apps.toml — `token = "${VAR}"` (REQUIRED,
+    env-expanded; unresolved → tenant 401s and its apps don't run),
+    `max_apps` (default 8), `allow_hosts_ceiling`, and an `apps` bootstrap
+    template reusing the `[apps.*]` schema (empty → a registry instance
+    cloned from the file's registry app). `[tenants] data_root` defaults to
+    `$HOME/.tangram-tenants`.
+  - Routing: `/t/<tenant>/<app>/{,api,sync,mcp}` through the live-table
+    dispatcher keyed `(tenant, app)`; `/t/<tenant>/` index +
+    `/t/<tenant>/api/fleet`; `t` (and `mcp`) reserved as app names.
+  - Identity seam for Phase 6: every request under `/t/<tenant>/` (reads,
+    SSE, sync, MCP included — tenant data is private, unlike the
+    trusted-localhost top level) resolves to a `Principal` via one
+    constant-time token lookup (`auth::resolve_principal`); wrong/other/no
+    token and unknown tenants answer one uniform 401 (no existence oracle).
+    OAuth later swaps the lookup, not the call sites.
+  - Isolation, measured by `tests/tenant_lifecycle.rs` (host process spawned
+    twice, scratch HOME): same app name in alice+bob → separate docs under
+    `<data_root>/<tenant>/<app>/`; the cross-tenant 401 matrix; a tenant
+    spec's `data_dir` must be relative (escapes → converge error in that
+    tenant's fleet, no file written); registry-sourced tenant entries get NO
+    `${VAR}` host-env expansion (the host env holds other tenants' tokens).
+  - Per-tenant registry drives only its tenant's desired state; `max_apps`
+    errors the newest excess install in the tenant fleet (never evicting the
+    registry or an earlier install); effective `allow_hosts` = spec ∩
+    ceiling, reported in the tenant fleet; installed apps + data persist
+    across host restarts via the tenant's replicated registry doc.
+  - Sync with auth: the SDK sync client sends `Authorization: Bearer` from
+    `TANGRAM_REMOTE_TOKEN`/`TANGRAM_REMOTE_TOKEN_<NAME>` (host specs:
+    `remote_token = "${VAR}"`; `replica.sh --remote-token`); a native
+    replica converges a tenant app with the token and is 401-rejected
+    without (same test).
+  - Gateway: per-tenant aggregate `/t/<tenant>/mcp` lists only that tenant's
+    tools; the global `/mcp` excludes tenant apps; the bearer is enforced at
+    the host's INTERNAL endpoints, so talking to agentgateway's port
+    directly still cannot reach a tenant app tokenless (pinned by
+    `tenant_mcp_is_scoped_and_authed_through_the_gateway` in
+    `tests/gateway_lifecycle.rs`).
 - **Phase 6 — identity**: OAuth accounts on the CF side (account == tenant),
   device-flow/PAT tokens for local replicas' sync + MCP auth; replaces the
   Phase-3 shared bearer with per-user credentials.

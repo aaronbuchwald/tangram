@@ -3,8 +3,10 @@
 #
 # Usage:
 #   replica.sh connect [--wasm] [--remote <http base>] [--bind <addr:port>]
-#                      [--data-dir <dir>] [--env KEY=VALUE]...
+#                      [--data-dir <dir>] [--remote-token <token>]
+#                      [--env KEY=VALUE]...
 #   replica.sh status  [--remote <http base>] [--bind <addr:port>]
+#                      [--remote-token <token>]
 #   replica.sh stop
 #
 # Defaults: --remote http://127.0.0.1:8080 (a remote reached through an SSH
@@ -12,10 +14,13 @@
 # --env (repeatable) exports extra environment to the started replica.
 # --wasm (connect only) runs the replica as WASM components under
 # tangram-host instead of the native shell — same surfaces, same sync.
+# --remote-token (or a TANGRAM_REMOTE_TOKEN in the environment) is sent as
+# Authorization: Bearer on every sync request — required when the remote is
+# a tangram-host tenant namespace (--remote http://host:8080/t/<tenant>).
 set -euo pipefail
 
 usage() {
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
   exit "${1:-1}"
 }
 
@@ -33,18 +38,24 @@ BIND="127.0.0.1:8090"
 DATA_DIR="data-replica"
 ENV_VARS=()
 WASM=""
+REMOTE_TOKEN="${TANGRAM_REMOTE_TOKEN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --remote)   REMOTE="${2:?--remote needs a value}"; shift 2 ;;
-    --bind)     BIND="${2:?--bind needs a value}"; shift 2 ;;
-    --data-dir) DATA_DIR="${2:?--data-dir needs a value}"; shift 2 ;;
-    --env)      ENV_VARS+=("${2:?--env needs KEY=VALUE}"); shift 2 ;;
-    --wasm)     WASM=yes; shift ;;
+    --remote)       REMOTE="${2:?--remote needs a value}"; shift 2 ;;
+    --bind)         BIND="${2:?--bind needs a value}"; shift 2 ;;
+    --data-dir)     DATA_DIR="${2:?--data-dir needs a value}"; shift 2 ;;
+    --env)          ENV_VARS+=("${2:?--env needs KEY=VALUE}"); shift 2 ;;
+    --remote-token) REMOTE_TOKEN="${2:?--remote-token needs a value}"; shift 2 ;;
+    --wasm)         WASM=yes; shift ;;
     -h|--help) usage 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
+
+# Curl args for talking to the remote (tenant namespaces need the bearer).
+REMOTE_CURL_AUTH=()
+[ -n "$REMOTE_TOKEN" ] && REMOTE_CURL_AUTH=(-H "Authorization: Bearer $REMOTE_TOKEN")
 
 [ -n "$WASM" ] && [ "$SUBCMD" != "connect" ] \
   && die "--wasm only applies to connect (status/stop detect the mode from the pid file)"
@@ -75,8 +86,16 @@ pid_from() {
 replica_pid() { pid_from "$PID_FILE"; }
 wasm_replica_pid() { pid_from "$WASM_PID_FILE"; }
 
-# Fetch state JSON for an app from a base http URL ($1) and app prefix ($2).
-state_of() { curl -sf --max-time 3 "$1/$2/api/state"; }
+# Fetch state JSON for an app from a base http URL ($1) and app prefix ($2);
+# extra args (e.g. the remote bearer header) pass through to curl.
+state_of() {
+  local base="$1" app="$2"
+  shift 2
+  curl -sf --max-time 3 "$@" "$base/$app/api/state"
+}
+
+# state_of against the remote, with the bearer when one is configured.
+remote_state_of() { state_of "$REMOTE_HTTP" "$1" ${REMOTE_CURL_AUTH[@]+"${REMOTE_CURL_AUTH[@]}"}; }
 
 # Compare nutrition capabilities local vs remote: if the remote can resolve
 # meal descriptions but this replica cannot, the divergence is almost always
@@ -85,7 +104,8 @@ state_of() { curl -sf --max-time 3 "$1/$2/api/state"; }
 check_capabilities() {
   local local_caps remote_caps local_di remote_di
   local_caps="$(curl -sf --max-time 3 "http://$BIND/nutrition/api/capabilities" || true)"
-  remote_caps="$(curl -sf --max-time 3 "$REMOTE_HTTP/nutrition/api/capabilities" || true)"
+  remote_caps="$(curl -sf --max-time 3 ${REMOTE_CURL_AUTH[@]+"${REMOTE_CURL_AUTH[@]}"} \
+    "$REMOTE_HTTP/nutrition/api/capabilities" || true)"
   [ -n "$local_caps" ] && [ -n "$remote_caps" ] || return 0
   local_di="$(printf '%s' "$local_caps" | grep -o '"description_input":[a-z]*' | cut -d: -f2)"
   remote_di="$(printf '%s' "$remote_caps" | grep -o '"description_input":[a-z]*' | cut -d: -f2)"
@@ -125,7 +145,7 @@ case "$SUBCMD" in
     else
       echo "local replica: not running"
     fi
-    if curl -sf --max-time 3 "$REMOTE_HTTP/" >/dev/null; then
+    if curl -sf --max-time 3 ${REMOTE_CURL_AUTH[@]+"${REMOTE_CURL_AUTH[@]}"} "$REMOTE_HTTP/" >/dev/null; then
       echo "remote: reachable at $REMOTE_HTTP/ (tunnel up)"
     else
       echo "remote: NOT reachable at $REMOTE_HTTP/ — is the SSH tunnel up?"
@@ -133,7 +153,7 @@ case "$SUBCMD" in
     fi
     for app in notes nutrition; do
       local_state="$(state_of "http://$BIND" "$app" || true)"
-      remote_state="$(state_of "$REMOTE_HTTP" "$app" || true)"
+      remote_state="$(remote_state_of "$app" || true)"
       if [ -n "$local_state" ] && [ "$local_state" = "$remote_state" ]; then
         echo "$app: in sync"
       else
@@ -148,9 +168,11 @@ esac
 # ── connect ────────────────────────────────────────────────────────────────
 
 # The remote must be reachable BEFORE we start: with the default remote this
-# means the `ssh tangram` tunnel (LocalForward 8080) is up.
-curl -sf --max-time 3 "$REMOTE_HTTP/" >/dev/null \
-  || die "remote not reachable at $REMOTE_HTTP/ — start your SSH tunnel (ssh tangram) first"
+# means the `ssh tangram` tunnel (LocalForward 8080) is up. (A tenant
+# namespace also answers 401 without the bearer — the auth args matter here.)
+curl -sf --max-time 3 ${REMOTE_CURL_AUTH[@]+"${REMOTE_CURL_AUTH[@]}"} "$REMOTE_HTTP/" >/dev/null \
+  || die "remote not reachable at $REMOTE_HTTP/ — start your SSH tunnel (ssh tangram) first \
+(tenant remotes also need --remote-token)"
 
 if [ -n "$WASM" ]; then
   # ── wasm mode: components + tangram-host ─────────────────────────────────
@@ -198,6 +220,13 @@ if [ -n "$WASM" ]; then
     [ -n "$dup" ] || NUTRITION_ENV_KEYS+=("$key")
   done
 
+  # The bearer for a private remote (a tenant namespace) is referenced as
+  # ${TANGRAM_REMOTE_TOKEN} so the secret stays out of the generated file.
+  remote_token_line() {
+    if [ -n "$REMOTE_TOKEN" ]; then
+      echo "remote_token = \"\${TANGRAM_REMOTE_TOKEN}\""
+    fi
+  }
   {
     echo "# Generated by replica.sh connect --wasm — edits converge live."
     echo
@@ -206,12 +235,14 @@ if [ -n "$WASM" ]; then
     echo "ui = \"$DIR/apps/notes/ui\""
     echo "data_dir = \"$ABS_DATA/notes\""
     echo "remote = \"$REMOTE/notes/sync\""
+    remote_token_line
     echo
     echo "[apps.nutrition]"
     echo "component = \"$DIR/target/wasm32-wasip2/release/nutrition.wasm\""
     echo "ui = \"$DIR/apps/nutrition/ui\""
     echo "data_dir = \"$ABS_DATA/nutrition\""
     echo "remote = \"$REMOTE/nutrition/sync\""
+    remote_token_line
     echo "# The component's ENTIRE outbound-network grant (same as apps.toml)."
     echo "allow_hosts = [\"api.calorieninjas.com\"]"
     if [ "${#NUTRITION_ENV_KEYS[@]}" -gt 0 ]; then
@@ -225,6 +256,7 @@ if [ -n "$WASM" ]; then
 
   nohup env \
     BIND_ADDR="$BIND" \
+    TANGRAM_REMOTE_TOKEN="$REMOTE_TOKEN" \
     ${ENV_VARS[@]+"${ENV_VARS[@]}"} \
     "$DIR/target/release/tangram-host" "$APPS_TOML" >"$WASM_LOG_FILE" 2>&1 &
   echo $! > "$WASM_PID_FILE"
@@ -252,6 +284,7 @@ else
     TANGRAM_DATA_DIR="$DATA_DIR" \
     TANGRAM_REMOTE_NOTES="$REMOTE/notes/sync" \
     TANGRAM_REMOTE_NUTRITION="$REMOTE/nutrition/sync" \
+    TANGRAM_REMOTE_TOKEN="$REMOTE_TOKEN" \
     ${ENV_VARS[@]+"${ENV_VARS[@]}"} \
     "$DIR/target/release/tangram-shell" >"$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
@@ -272,7 +305,7 @@ synced=""
 for _ in $(seq 1 20); do
   synced=yes
   for app in notes nutrition; do
-    [ "$(state_of "http://$BIND" "$app" || true)" = "$(state_of "$REMOTE_HTTP" "$app" || true)" ] || synced=""
+    [ "$(state_of "http://$BIND" "$app" || true)" = "$(remote_state_of "$app" || true)" ] || synced=""
   done
   [ -n "$synced" ] && break
   sleep 0.5

@@ -300,6 +300,96 @@ curl -sLo agentgateway https://github.com/agentgateway/agentgateway/releases/dow
 sudo install -m 0755 agentgateway /usr/local/bin/agentgateway
 ```
 
+## Multi-tenancy: isolated app sets under one host (Phase 5)
+
+One host process, one public port, N tenants. A `[tenants]` section in
+`apps.toml` turns multi-tenancy on ALONGSIDE the top-level apps — everything
+above keeps working unchanged (and unauthenticated, as before); tenants get
+their own namespace at `/t/<tenant>/`:
+
+```toml
+[tenants]
+# data_root = "/srv/tangram-tenants"   # default: $HOME/.tangram-tenants
+
+[tenants.alice]
+token = "${TANGRAM_TENANT_ALICE_TOKEN}"          # REQUIRED; ${VAR} from .env
+max_apps = 8                                     # cap incl. bootstrap (default 8)
+allow_hosts_ceiling = ["api.calorieninjas.com"]  # tenant-wide outbound cap
+
+[tenants.alice.apps.notes]                       # bootstrap apps (same schema
+component = "target/wasm32-wasip2/release/notes.wasm"  # as [apps.*])
+ui = "apps/notes/ui"
+
+[tenants.bob]
+token = "${TANGRAM_TENANT_BOB_TOKEN}"
+# no apps template → bob starts with just a registry instance (cloned from
+# the file's own registry app) — his control plane for installing the rest
+```
+
+Each tenant is isolated on every axis:
+
+- **Routing**: `/t/<tenant>/<app>/{,api,sync,mcp}` via the same live
+  dispatcher; `/t/<tenant>/` is a small index and `/t/<tenant>/api/fleet`
+  the tenant-scoped fleet status. `t` is a reserved app name.
+- **Auth**: EVERY request under `/t/<tenant>/` — UI, state, SSE, sync, MCP,
+  reads included — requires `Authorization: Bearer <that tenant's token>`
+  (constant-time compare). Tenant data is private, unlike the
+  trusted-localhost single-tenant surface. A missing header, a wrong token,
+  another tenant's token, and a nonexistent tenant all answer the same 401,
+  so the namespace is not a tenant-existence oracle. (Phase 6 swaps this
+  token lookup for OAuth behind the same `Principal` seam.)
+- **Data**: `<data_root>/<tenant>/<app>/<app>.automerge`. A tenant app spec
+  may only set a RELATIVE `data_dir` (joined under the tenant's tree);
+  absolute paths or `..` are rejected and surface as a converge error in the
+  tenant's fleet.
+- **Grants**: an app's effective `allow_hosts` is the INTERSECTION of its
+  spec and the tenant's `allow_hosts_ceiling` (the fleet shows what an
+  install actually got); `max_apps` caps the tenant's enabled apps — an
+  excess install errors in the fleet and never runs (it can never evict an
+  earlier app or the tenant's registry).
+- **Control plane**: each tenant's registry app drives THAT tenant's desired
+  state only — the same app name in two tenants is a non-event. Tenant
+  registry entries do NOT get `${VAR}` host-env expansion (the host env
+  holds other tenants' tokens).
+
+A walkthrough (tokens from `.env`):
+
+```sh
+TOKEN=$TANGRAM_TENANT_ALICE_TOKEN
+curl -s localhost:8080/t/alice/notes/api/state               # → 401 (no token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:8080/t/alice/notes/api/state                     # → alice's notes
+curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:8080/t/alice/registry/api/actions/install_app \
+  -H 'content-type: application/json' \
+  -d '{"name":"nutrition",
+       "component":"target/wasm32-wasip2/release/nutrition.wasm",
+       "ui":"apps/nutrition/ui",
+       "allow_hosts":["api.calorieninjas.com"]}'             # serving at
+curl -s -H "Authorization: Bearer $TOKEN" \
+  localhost:8080/t/alice/api/fleet                           # /t/alice/nutrition/
+```
+
+**Sync** from a laptop replica needs the bearer too: the SDK's dial-out
+client sends it from `TANGRAM_REMOTE_TOKEN` (or per-app
+`TANGRAM_REMOTE_TOKEN_<NAME>`; in host specs, `remote_token = "${VAR}"`), so
+
+```sh
+TANGRAM_REMOTE=https://host/t/alice/notes/sync \
+TANGRAM_REMOTE_TOKEN=$TOKEN cargo run -p tangram-notes
+```
+
+replicates alice's notes — `replica.sh connect --remote https://host/t/alice
+--remote-token $TOKEN` wires the same thing up for the standard replica.
+
+**MCP**: with the gateway enabled, each tenant app serves
+`/t/<tenant>/<app>/mcp` plus a per-tenant aggregate `/t/<tenant>/mcp`
+exposing only that tenant's tools (namespaced `<app>_<tool>`); the global
+aggregate `/mcp` never includes tenant apps. The bearer is enforced at the
+host's internal endpoints, so the gateway hop cannot bypass it:
+`claude mcp add --transport http alice http://host:8080/t/alice/mcp
+--header "Authorization: Bearer $TOKEN"`.
+
 ## Getting started: a persistent remote + a local replica
 
 The day-to-day setup: a remote box runs the apps permanently; your laptop
@@ -448,6 +538,7 @@ deployed worker is on the public internet.
 | `BIND_ADDR` | `127.0.0.1:8080` | Listen address |
 | `TANGRAM_REMOTE` | — | `http://host:port/sync` of a peer to replicate with (single-app mode); legacy `ws://`/`wss://` values are rewritten to `http(s)://` with a warning |
 | `TANGRAM_REMOTE_<NAME>` | — | Per-app remote, e.g. `TANGRAM_REMOTE_NOTES` (required form in a shell) |
+| `TANGRAM_REMOTE_TOKEN` | — | Bearer token sent on dial-out sync requests (`TANGRAM_REMOTE_TOKEN_<NAME>` per app) — required when the remote is private, e.g. a tangram-host tenant namespace |
 | `TANGRAM_DATA_DIR` | `$HOME/.<app-name>` | Where the document file lives, directly inside it. Unset: each app uses its own `~/.<app>` (e.g. `~/.notes/notes.automerge`); `./data` if `$HOME` is also unset |
 | `TANGRAM_UI_DIR` | builder value | Static UI directory; overrides the app's compiled-in path (set in container images, where that path doesn't exist) |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |

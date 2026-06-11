@@ -46,6 +46,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::watch;
 
+use crate::tenant::AppKey;
+
 /// `[gateway]` in `apps.toml`. Read once at startup (changing it needs a
 /// host restart — unlike app specs, which converge live).
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
@@ -113,58 +115,114 @@ fn loopback_policy() -> Value {
     json!({ "authorization": { "rules": [LOOPBACK_RULE] } })
 }
 
-fn mcp_target(app: &str, internal_port: u16) -> Value {
+fn mcp_target(prefix: &str, app: &str, internal_port: u16) -> Value {
     json!({
         "name": target_name(app),
-        "mcp": { "host": format!("http://127.0.0.1:{internal_port}/{app}/mcp") }
+        "mcp": { "host": format!("http://127.0.0.1:{internal_port}{prefix}/mcp") }
     })
 }
 
-/// Render the full agentgateway config for the given RUNNING apps: one
-/// per-app route (`/<app>/mcp` → that app's internal MCP endpoint, tool
-/// names unchanged) plus the aggregate `/mcp` route multiplexing every app
-/// as a namespaced target. Deterministic for a given input (apps are
-/// sorted), so converge can diff bytes to decide whether to rewrite.
-pub fn render_config(apps: &[String], gateway_port: u16, internal_port: u16) -> Value {
-    let mut apps: Vec<&String> = apps.iter().collect();
-    apps.sort();
-    apps.dedup();
+/// One per-app MCP route: `<prefix>/mcp` → the same path on the host's
+/// internal listener (tool names unchanged).
+fn app_route(route_name: String, prefix: &str, app: &str, internal_port: u16) -> Value {
+    json!({
+        "name": route_name,
+        "policies": loopback_policy(),
+        "matches": [{ "path": { "pathPrefix": format!("{prefix}/mcp") } }],
+        "backends": [{ "mcp": { "targets": [mcp_target(prefix, app, internal_port)] } }]
+    })
+}
 
-    let mut routes = Vec::with_capacity(apps.len() + 1);
-    for app in &apps {
-        routes.push(json!({
-            "name": format!("{app}-mcp"),
-            "policies": loopback_policy(),
-            "matches": [{ "path": { "pathPrefix": format!("/{app}/mcp") } }],
-            "backends": [{ "mcp": { "targets": [mcp_target(app, internal_port)] } }]
-        }));
-    }
-    // Aggregate last (order is irrelevant for matching — "/mcp" and
-    // "/<app>/mcp" prefixes are disjoint — but humans read this file).
+/// One aggregate route multiplexing `apps` (already scoped: the global
+/// top-level set, or one tenant's set) as namespaced targets.
+fn aggregate_route(route_name: &str, path: &str, apps: &[&AppKey], internal_port: u16) -> Value {
     let mut seen = std::collections::BTreeSet::new();
-    let aggregate_targets: Vec<Value> = apps
+    let targets: Vec<Value> = apps
         .iter()
-        .filter(|app| {
+        .filter(|key| {
             // `a_b` and `a-b` both map to target `a-b`; keep the first and
             // warn rather than emit a config agentgateway rejects.
-            let kept = seen.insert(target_name(app));
+            let kept = seen.insert(target_name(&key.app));
             if !kept {
                 tracing::warn!(
-                    "{app}: target name {:?} collides on the aggregate /mcp endpoint — skipped \
-                     (rename the app)",
-                    target_name(app)
+                    "{key}: target name {:?} collides on the aggregate {path} endpoint — \
+                     skipped (rename the app)",
+                    target_name(&key.app)
                 );
             }
             kept
         })
-        .map(|app| mcp_target(app, internal_port))
+        .map(|key| mcp_target(&key.route_prefix(), &key.app, internal_port))
         .collect();
-    routes.push(json!({
-        "name": "mcp-aggregate",
+    json!({
+        "name": route_name,
         "policies": loopback_policy(),
-        "matches": [{ "path": { "pathPrefix": "/mcp" } }],
-        "backends": [{ "mcp": { "targets": aggregate_targets } }]
-    }));
+        "matches": [{ "path": { "pathPrefix": path } }],
+        "backends": [{ "mcp": { "targets": targets } }]
+    })
+}
+
+/// Render the full agentgateway config for the given RUNNING apps: one
+/// per-app route (`/<app>/mcp` or `/t/<tenant>/<app>/mcp` → the same path on
+/// the host's internal listener, tool names unchanged), the aggregate `/mcp`
+/// route multiplexing the TOP-LEVEL apps only, and one aggregate
+/// `/t/<tenant>/mcp` per tenant multiplexing exactly that tenant's apps —
+/// tenant tools never appear on the global aggregate, and the host's
+/// internal endpoints still enforce the tenant bearer (the gateway forwards
+/// Authorization). Deterministic for a given input (apps are sorted), so
+/// converge can diff bytes to decide whether to rewrite.
+pub fn render_config(apps: &[AppKey], gateway_port: u16, internal_port: u16) -> Value {
+    let mut apps: Vec<&AppKey> = apps.iter().collect();
+    apps.sort();
+    apps.dedup();
+    let top: Vec<&AppKey> = apps
+        .iter()
+        .copied()
+        .filter(|key| key.tenant.is_none())
+        .collect();
+    let mut tenants: std::collections::BTreeMap<&str, Vec<&AppKey>> =
+        std::collections::BTreeMap::new();
+    for key in &apps {
+        if let Some(tenant) = key.tenant.as_deref() {
+            tenants.entry(tenant).or_default().push(key);
+        }
+    }
+
+    let mut routes = Vec::with_capacity(apps.len() + tenants.len() + 1);
+    for key in &top {
+        routes.push(app_route(
+            format!("{}-mcp", key.app),
+            &key.route_prefix(),
+            &key.app,
+            internal_port,
+        ));
+    }
+    for (tenant, keys) in &tenants {
+        for key in keys {
+            routes.push(app_route(
+                format!("t-{tenant}-{}-mcp", key.app),
+                &key.route_prefix(),
+                &key.app,
+                internal_port,
+            ));
+        }
+        // The per-tenant aggregate: that tenant's tools and no one else's.
+        routes.push(aggregate_route(
+            &format!("t-{tenant}-mcp-aggregate"),
+            &format!("/t/{tenant}/mcp"),
+            keys,
+            internal_port,
+        ));
+    }
+    // The global aggregate last (order is irrelevant for matching — the
+    // prefixes are disjoint — but humans read this file). Top-level apps
+    // only: tenant apps must never leak onto the public aggregate.
+    routes.push(aggregate_route(
+        "mcp-aggregate",
+        "/mcp",
+        &top,
+        internal_port,
+    ));
 
     json!({
         // The admin/stats/readiness listeners are pinned to ephemeral
@@ -256,7 +314,7 @@ impl Gateway {
     /// Regenerate the config for the given running apps; written atomically
     /// (tmp + rename) and only when the bytes changed — agentgateway watches
     /// the file and hot-reloads. Called by every converge pass.
-    pub fn sync_apps(&self, apps: &[String]) {
+    pub fn sync_apps(&self, apps: &[AppKey]) {
         let rendered = render_config(apps, self.port, self.internal_port);
         let bytes = serde_json::to_vec_pretty(&rendered).expect("static json renders");
         match write_if_changed(&self.config_path, &bytes) {
@@ -472,9 +530,9 @@ mod tests {
     #[test]
     fn renders_per_app_and_aggregate_routes() {
         let apps = vec![
-            "nutrition".to_string(),
-            "notes".to_string(),
-            "registry".to_string(),
+            AppKey::top("nutrition"),
+            AppKey::top("notes"),
+            AppKey::top("registry"),
         ];
         let config = render_config(&apps, 19200, 19300);
 
@@ -530,8 +588,83 @@ mod tests {
     }
 
     #[test]
+    fn render_scopes_tenant_apps_off_the_global_aggregate() {
+        let apps = vec![
+            AppKey::top("notes"),
+            AppKey::tenant("alice", "notes"),
+            AppKey::tenant("alice", "todo"),
+            AppKey::tenant("bob", "notes"),
+        ];
+        let config = render_config(&apps, 19200, 19300);
+        let routes = config["binds"][0]["listeners"][0]["routes"]
+            .as_array()
+            .expect("routes");
+        // 1 top per-app + 3 tenant per-app + 2 tenant aggregates + 1 global.
+        assert_eq!(routes.len(), 7);
+
+        let by_name = |name: &str| -> &Value {
+            routes
+                .iter()
+                .find(|r| r["name"] == name)
+                .unwrap_or_else(|| panic!("route {name}"))
+        };
+
+        // Tenant per-app routes match and target the namespaced path.
+        let alice_notes = by_name("t-alice-notes-mcp");
+        assert_eq!(
+            alice_notes["matches"][0]["path"]["pathPrefix"],
+            "/t/alice/notes/mcp"
+        );
+        assert_eq!(
+            alice_notes["backends"][0]["mcp"]["targets"][0]["mcp"]["host"],
+            "http://127.0.0.1:19300/t/alice/notes/mcp"
+        );
+
+        // The per-tenant aggregate lists exactly that tenant's apps…
+        let alice_aggregate = by_name("t-alice-mcp-aggregate");
+        assert_eq!(
+            alice_aggregate["matches"][0]["path"]["pathPrefix"],
+            "/t/alice/mcp"
+        );
+        let names: Vec<&str> = alice_aggregate["backends"][0]["mcp"]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names, ["notes", "todo"]);
+        let bob_aggregate = by_name("t-bob-mcp-aggregate");
+        let names: Vec<&str> = bob_aggregate["backends"][0]["mcp"]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names, ["notes"]);
+
+        // …and the GLOBAL aggregate excludes tenant apps entirely.
+        let global = by_name("mcp-aggregate");
+        let targets = global["backends"][0]["mcp"]["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0]["mcp"]["host"],
+            "http://127.0.0.1:19300/notes/mcp"
+        );
+
+        // Every route (tenant ones included) keeps the loopback source rule.
+        for route in routes {
+            assert!(
+                route["policies"]["authorization"]["rules"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("source.address")
+            );
+        }
+    }
+
+    #[test]
     fn render_sanitizes_underscores_and_dedupes_collisions() {
-        let apps = vec!["my_app".to_string(), "my-app".to_string()];
+        let apps = vec![AppKey::top("my_app"), AppKey::top("my-app")];
         let config = render_config(&apps, 1, 2);
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
@@ -569,8 +702,12 @@ mod tests {
 
     #[test]
     fn render_is_deterministic_for_unsorted_input() {
-        let a = render_config(&["b".into(), "a".into()], 1, 2);
-        let b = render_config(&["a".into(), "b".into(), "a".into()], 1, 2);
+        let a = render_config(&[AppKey::top("b"), AppKey::top("a")], 1, 2);
+        let b = render_config(
+            &[AppKey::top("a"), AppKey::top("b"), AppKey::top("a")],
+            1,
+            2,
+        );
         assert_eq!(a, b);
     }
 

@@ -133,7 +133,8 @@ impl AppRuntime {
 
         let remote_task = spec.remote.clone().map(|remote| {
             tracing::info!("{name}: replicating with {remote}");
-            tokio::spawn(tangram::sync::run_remote(remote, doc.clone()))
+            let token = spec.resolved_remote_token(name);
+            tokio::spawn(tangram::sync::run_remote(remote, token, doc.clone()))
         });
 
         Ok(Self {

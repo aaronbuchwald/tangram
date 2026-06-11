@@ -31,8 +31,9 @@ mod mcp;
 mod registry;
 mod routes;
 mod runtime;
+mod tenant;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::IntoFuture;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,17 +47,24 @@ use tracing_subscriber::EnvFilter;
 
 use crate::app::{AppRuntime, component_mtime};
 use crate::config::{AppSpec, HostConfig};
-use crate::registry::Source;
+use crate::registry::{Desired, Source};
 use crate::routes::AppEntry;
+use crate::tenant::AppKey;
 
 /// Fleet status of one desired app, refreshed by every converge pass and
-/// served (with live running/healthy probes) at `GET /api/fleet`.
+/// served (with live running/healthy probes) at `GET /api/fleet`
+/// (top-level apps) and `GET /t/<tenant>/api/fleet` (that tenant's apps,
+/// bearer-gated).
 #[derive(Debug, Clone)]
 pub struct FleetStatus {
     pub source: Source,
     pub registry: bool,
     pub require_auth: bool,
     pub enabled: bool,
+    /// The EFFECTIVE outbound grant (after the tenant ceiling intersection,
+    /// for tenant apps). Reported in the tenant fleet so a tenant can see
+    /// what their install actually got.
+    pub allow_hosts: Vec<String>,
     /// Why the last converge could not (re)start this app, if it failed.
     pub error: Option<String>,
 }
@@ -64,11 +72,15 @@ pub struct FleetStatus {
 pub struct Host {
     engine: wasmtime::Engine,
     config_path: PathBuf,
-    pub apps: RwLock<HashMap<String, AppEntry>>,
-    pub fleet: RwLock<BTreeMap<String, FleetStatus>>,
+    pub apps: RwLock<HashMap<AppKey, AppEntry>>,
+    pub fleet: RwLock<BTreeMap<AppKey, FleetStatus>>,
     /// `TANGRAM_AUTH_TOKEN`: gates mutating routes on registry/require_auth
     /// apps. `None` = unauthenticated host (loopback-only for registries).
     pub auth_token: Option<String>,
+    /// Tenant → resolved bearer token (Phase 5), refreshed on every converge
+    /// — the lookup table behind [`auth::resolve_principal`]. A tenant whose
+    /// `${VAR}` token didn't resolve is absent: every request 401s.
+    pub tenant_tokens: RwLock<BTreeMap<String, String>>,
     /// Whether `BIND_ADDR` is a loopback address — a registry app without a
     /// token refuses to run on a non-loopback bind.
     pub bind_loopback: bool,
@@ -80,14 +92,51 @@ pub struct Host {
     pub gateway: Option<Arc<gateway::Gateway>>,
 }
 
+/// The bootstrap ("file") layer of one tenant's desired state: the explicit
+/// `[tenants.<t>.apps.*]` template, or — when empty — a single registry
+/// instance cloned from the file's own registry app spec (component + ui
+/// only; no grants, no env), so every tenant starts with a control plane.
+fn tenant_bootstrap(
+    config: &HostConfig,
+    tenant_spec: &config::TenantSpec,
+) -> BTreeMap<String, AppSpec> {
+    if !tenant_spec.apps.is_empty() {
+        return tenant_spec.apps.clone();
+    }
+    let Some(template) = config
+        .apps
+        .values()
+        .find(|spec| spec.registry && spec.enabled)
+    else {
+        // HostConfig::parse refuses this shape; be safe if it ever changes.
+        return BTreeMap::new();
+    };
+    let registry = AppSpec {
+        component: template.component.clone(),
+        ui: template.ui.clone(),
+        data_dir: None,
+        allow_hosts: Vec::new(),
+        env: BTreeMap::new(),
+        remote: None,
+        remote_token: None,
+        registry: true,
+        require_auth: false,
+        enabled: true,
+    };
+    [("registry".to_string(), registry)].into_iter().collect()
+}
+
 impl Host {
     /// One reconciliation pass, in two stages: (1) converge the registry
-    /// apps named in `apps.toml`, (2) read their replicated spec lists,
-    /// merge them over the file config (registry wins name collisions), and
+    /// apps named in `apps.toml` — top-level AND each tenant's bootstrap
+    /// registries, (2) read their replicated spec lists, merge them over
+    /// their scope's file layer (registry wins name collisions; a tenant's
+    /// registry only ever drives that tenant), apply tenant policy
+    /// (data-dir confinement, the allow_hosts ceiling, max_apps), and
     /// converge the full set — build new/changed apps (spec changed, or the
-    /// component file was rebuilt), drop removed/disabled ones. A failing
-    /// app is logged, reported in the fleet status, and skipped; a failing
-    /// RELOAD keeps the old instance serving.
+    /// component file was rebuilt), drop removed/disabled/policy-blocked
+    /// ones. A failing app is logged, reported in the fleet status, and
+    /// skipped; a failing RELOAD keeps the old instance serving.
     async fn converge(&self) {
         let config = match HostConfig::load(&self.config_path) {
             Ok(config) => config,
@@ -97,50 +146,210 @@ impl Host {
             }
         };
 
-        let mut apps = self.apps.write().await;
-        let mut errors: BTreeMap<String, String> = BTreeMap::new();
-
-        // Stage 1: registry apps from the file, so their documents can be
-        // read below. (They are re-checked as part of stage 2's full set —
-        // `ensure_app` is idempotent for an up-to-date app.)
-        for (name, spec) in config.apps.iter().filter(|(_, s)| s.registry && s.enabled) {
-            if let Err(e) = self.ensure_app(&mut apps, name, spec).await {
-                errors.insert(name.clone(), e);
+        // Refresh the tenant token table — the auth lookup behind every
+        // `/t/<tenant>/` request. A tenant whose token didn't resolve stays
+        // out of the table (uniform 401) and its apps don't run.
+        let data_root = config.tenants.resolved_data_root();
+        let mut tokens: BTreeMap<String, String> = BTreeMap::new();
+        for (name, spec) in &config.tenants.tenants {
+            match spec.resolved_token(name) {
+                Some(token) => {
+                    tokens.insert(name.clone(), token);
+                }
+                None => tracing::error!(
+                    "tenant {name}: token did not resolve — /t/{name}/ answers 401 and its \
+                     apps will not run (set the env var referenced by [tenants.{name}].token)"
+                ),
             }
         }
+        *self.tenant_tokens.write().await = tokens.clone();
 
-        // The registry layer of desired state: every running registry app's
-        // replicated spec list.
-        let mut registry_entries = Vec::new();
-        for (name, spec) in &config.apps {
-            if !spec.registry {
-                continue;
+        let mut apps = self.apps.write().await;
+        let mut errors: BTreeMap<AppKey, String> = BTreeMap::new();
+        // Apps a POLICY blocked (cap, data-dir escape, unresolved token):
+        // unlike start failures (where a failing reload keeps the old
+        // instance serving), these must not run at all.
+        let mut blocked: BTreeSet<AppKey> = BTreeSet::new();
+
+        // Each tenant's bootstrap layer (template or default registry clone).
+        let tenant_file: BTreeMap<String, BTreeMap<String, AppSpec>> = config
+            .tenants
+            .tenants
+            .iter()
+            .map(|(name, spec)| (name.clone(), tenant_bootstrap(&config, spec)))
+            .collect();
+
+        // Stage 1: registry apps — top-level ones from the file plus each
+        // tenant's bootstrap registries — so their documents can be read
+        // below. (They are re-checked as part of stage 2's full set —
+        // `ensure_app` is idempotent for an up-to-date app.)
+        for (name, spec) in config.apps.iter().filter(|(_, s)| s.registry && s.enabled) {
+            let key = AppKey::top(name);
+            let gate = self.auth_token.as_deref();
+            if let Err(e) = self.ensure_app(&mut apps, &key, spec, gate).await {
+                errors.insert(key, e);
             }
-            if let Some(entry) = apps.get(name) {
-                // state_json is verbatim component output (a String since the
-                // float-rendering fix); the registry layer needs the parsed
-                // tree to walk specs — exact now that float_roundtrip is on.
-                match serde_json::from_str(&entry.runtime.state_json().await) {
-                    Ok(state) => registry_entries.extend(registry::parse_state(name, &state)),
-                    Err(e) => tracing::warn!("{name}: unparseable registry state: {e}"),
+        }
+        for (tname, layer) in &tenant_file {
+            let Some(token) = tokens.get(tname) else {
+                continue; // unresolved token: errors recorded in stage 2
+            };
+            let tenant_spec = &config.tenants.tenants[tname];
+            let tenant_root = data_root.join(tname);
+            // Respect max_apps even here: never start a registry the cap
+            // will evict in stage 2.
+            let bootstrap_desired: BTreeMap<String, Desired> = layer
+                .iter()
+                .map(|(n, s)| {
+                    (
+                        n.clone(),
+                        Desired {
+                            spec: s.clone(),
+                            source: Source::File,
+                        },
+                    )
+                })
+                .collect();
+            let over_cap: BTreeSet<String> =
+                tenant::enforce_max_apps(&bootstrap_desired, tenant_spec.max_apps, &[])
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .collect();
+            for (aname, spec) in layer
+                .iter()
+                .filter(|(n, s)| s.registry && s.enabled && !over_cap.contains(*n))
+            {
+                let key = AppKey::tenant(tname, aname);
+                match tenant::effective_spec(
+                    tname,
+                    aname,
+                    spec,
+                    Source::File,
+                    &tenant_root,
+                    tenant_spec.allow_hosts_ceiling.as_deref(),
+                ) {
+                    Ok(effective) => {
+                        if let Err(e) = self
+                            .ensure_app(&mut apps, &key, &effective, Some(token))
+                            .await
+                        {
+                            errors.insert(key, e);
+                        }
+                    }
+                    Err(e) => {
+                        errors.insert(key.clone(), e);
+                        blocked.insert(key);
+                    }
                 }
             }
         }
 
-        // Stage 2: converge the merged desired state.
-        let desired = registry::merge(&config.apps, registry_entries);
-        for (name, want) in &desired {
-            if !want.spec.enabled {
-                continue;
-            }
-            if let Err(e) = self.ensure_app(&mut apps, name, &want.spec).await {
-                errors.insert(name.clone(), e);
+        // The registry layer of desired state: every running registry app's
+        // replicated spec list, scoped to where the registry lives — a
+        // tenant's registry drives THAT tenant's desired state only, so app
+        // names colliding across tenants are non-events.
+        let mut top_entries = Vec::new();
+        let mut tenant_entries: BTreeMap<String, Vec<(String, AppSpec)>> = BTreeMap::new();
+        let registry_keys: Vec<AppKey> = config
+            .apps
+            .iter()
+            .filter(|(_, s)| s.registry)
+            .map(|(n, _)| AppKey::top(n))
+            .chain(tenant_file.iter().flat_map(|(tname, layer)| {
+                layer
+                    .iter()
+                    .filter(|(_, s)| s.registry)
+                    .map(move |(n, _)| AppKey::tenant(tname, n))
+            }))
+            .collect();
+        for key in registry_keys {
+            if let Some(entry) = apps.get(&key) {
+                // state_json is verbatim component output (a String since the
+                // float-rendering fix); the registry layer needs the parsed
+                // tree to walk specs — exact now that float_roundtrip is on.
+                match serde_json::from_str(&entry.runtime.state_json().await) {
+                    Ok(state) => {
+                        let parsed = registry::parse_state(&key.to_string(), &state);
+                        match &key.tenant {
+                            Some(tname) => tenant_entries
+                                .entry(tname.clone())
+                                .or_default()
+                                .extend(parsed),
+                            None => top_entries.extend(parsed),
+                        }
+                    }
+                    Err(e) => tracing::warn!("{key}: unparseable registry state: {e}"),
+                }
             }
         }
-        apps.retain(|name, _| {
-            let keep = desired.get(name).is_some_and(|want| want.spec.enabled);
+
+        // Stage 2: merge per scope, apply tenant policy (data confinement,
+        // ceiling intersection, max_apps), and converge the full set.
+        let mut desired: BTreeMap<AppKey, Desired> = registry::merge(&config.apps, top_entries)
+            .into_iter()
+            .map(|(name, want)| (AppKey::top(name), want))
+            .collect();
+        for (tname, layer) in &tenant_file {
+            let entries = tenant_entries.remove(tname).unwrap_or_default();
+            // The registry doc's list order is install order — max_apps
+            // evicts the NEWEST excess install, never an earlier one.
+            let install_order: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+            let merged = registry::merge(layer, entries);
+            let tenant_spec = &config.tenants.tenants[tname];
+            let tenant_root = data_root.join(tname);
+            for (name, message) in
+                tenant::enforce_max_apps(&merged, tenant_spec.max_apps, &install_order)
+            {
+                let key = AppKey::tenant(tname, name);
+                errors.insert(key.clone(), message);
+                blocked.insert(key);
+            }
+            for (aname, mut want) in merged {
+                let key = AppKey::tenant(tname, &aname);
+                if !tokens.contains_key(tname) {
+                    errors
+                        .entry(key.clone())
+                        .or_insert_with(|| "tenant token unresolved — app not run".to_string());
+                    blocked.insert(key.clone());
+                }
+                match tenant::effective_spec(
+                    tname,
+                    &aname,
+                    &want.spec,
+                    want.source,
+                    &tenant_root,
+                    tenant_spec.allow_hosts_ceiling.as_deref(),
+                ) {
+                    Ok(effective) => want.spec = effective,
+                    Err(e) => {
+                        errors.insert(key.clone(), e);
+                        blocked.insert(key.clone());
+                    }
+                }
+                desired.insert(key, want);
+            }
+        }
+
+        for (key, want) in &desired {
+            if !want.spec.enabled || blocked.contains(key) {
+                continue;
+            }
+            let gate = match &key.tenant {
+                None => self.auth_token.as_deref(),
+                Some(tname) => tokens.get(tname).map(String::as_str),
+            };
+            if let Err(e) = self.ensure_app(&mut apps, key, &want.spec, gate).await {
+                errors.insert(key.clone(), e);
+            }
+        }
+        apps.retain(|key, _| {
+            let keep =
+                desired.get(key).is_some_and(|want| want.spec.enabled) && !blocked.contains(key);
             if !keep {
-                tracing::info!("{name}: removed (routes for /{name}/ are gone)");
+                tracing::info!(
+                    "{key}: removed (routes for {}/ are gone)",
+                    key.route_prefix()
+                );
             }
             keep
         });
@@ -149,43 +358,50 @@ impl Host {
         // state: regenerate (atomically; agentgateway hot-reloads the file)
         // whenever the running set changed.
         if let Some(gateway) = &self.gateway {
-            let running: Vec<String> = apps.keys().cloned().collect();
+            let running: Vec<AppKey> = apps.keys().cloned().collect();
             gateway.sync_apps(&running);
         }
 
         *self.fleet.write().await = desired
             .into_iter()
-            .map(|(name, want)| {
-                let error = errors.remove(&name);
+            .map(|(key, want)| {
+                let error = errors.remove(&key);
                 let status = FleetStatus {
                     source: want.source,
                     registry: want.spec.registry,
                     require_auth: want.spec.require_auth,
                     enabled: want.spec.enabled,
+                    allow_hosts: want.spec.allow_hosts.clone(),
                     error,
                 };
-                (name, status)
+                (key, status)
             })
             .collect();
     }
 
     /// Converge one app toward its spec: no-op when up to date, otherwise
-    /// (re)instantiate. Returns the failure message for the fleet status.
+    /// (re)instantiate. `gate_token` is the bearer gating the app's mutating
+    /// routes when it is a registry/require_auth app — the host token for
+    /// top-level apps, the tenant's token for tenant apps (whose WHOLE
+    /// surface is additionally gated at dispatch). Returns the failure
+    /// message for the fleet status.
     async fn ensure_app(
         &self,
-        apps: &mut HashMap<String, AppEntry>,
-        name: &str,
+        apps: &mut HashMap<AppKey, AppEntry>,
+        key: &AppKey,
         spec: &AppSpec,
+        gate_token: Option<&str>,
     ) -> Result<(), String> {
-        if spec.registry && self.auth_token.is_none() && !self.bind_loopback {
+        if spec.registry && key.tenant.is_none() && self.auth_token.is_none() && !self.bind_loopback
+        {
             let msg = "refusing to run a registry app on a non-loopback bind without \
                        TANGRAM_AUTH_TOKEN (set the token or bind 127.0.0.1)"
                 .to_string();
-            tracing::error!("{name}: {msg}");
-            apps.remove(name);
+            tracing::error!("{key}: {msg}");
+            apps.remove(key);
             return Err(msg);
         }
-        let up_to_date = apps.get(name).is_some_and(|entry| {
+        let up_to_date = apps.get(key).is_some_and(|entry| {
             entry.runtime.spec == *spec
                 && entry.runtime.component_mtime == component_mtime(&spec.component)
         });
@@ -193,12 +409,9 @@ impl Host {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        match AppRuntime::build(&self.engine, name, spec).await {
+        match AppRuntime::build(&self.engine, &key.app, spec).await {
             Ok(runtime) => {
-                let gate_token = self
-                    .auth_token
-                    .as_deref()
-                    .filter(|_| spec.registry || spec.require_auth);
+                let gate_token = gate_token.filter(|_| spec.registry || spec.require_auth);
                 let mut entry = AppEntry::new(runtime, gate_token);
                 if spec.registry {
                     // Registry doc changes (actions, MCP calls, sync from a
@@ -211,24 +424,25 @@ impl Host {
                         }
                     }));
                 }
-                let verb = if apps.contains_key(name) {
+                let verb = if apps.contains_key(key) {
                     "reloaded"
                 } else {
                     "added"
                 };
-                apps.insert(name.to_string(), entry);
                 tracing::info!(
-                    "{name}: {verb} (serving /{name}/ after {:?})",
+                    "{key}: {verb} (serving {}/ after {:?})",
+                    key.route_prefix(),
                     started.elapsed()
                 );
+                apps.insert(key.clone(), entry);
                 Ok(())
             }
-            Err(e) if apps.contains_key(name) => {
-                tracing::error!("{name}: reload failed, keeping old instance: {e:#}");
+            Err(e) if apps.contains_key(key) => {
+                tracing::error!("{key}: reload failed, keeping old instance: {e:#}");
                 Err(format!("reload failed (old instance still serving): {e:#}"))
             }
             Err(e) => {
-                tracing::error!("{name}: failed to start: {e:#}");
+                tracing::error!("{key}: failed to start: {e:#}");
                 Err(format!("failed to start: {e:#}"))
             }
         }
@@ -337,6 +551,7 @@ async fn main() -> anyhow::Result<()> {
         apps: RwLock::new(HashMap::new()),
         fleet: RwLock::new(BTreeMap::new()),
         auth_token,
+        tenant_tokens: RwLock::new(BTreeMap::new()),
         bind_loopback,
         nudge: Arc::new(Notify::new()),
         gateway: mcp_gateway,
@@ -402,10 +617,11 @@ async fn main() -> anyhow::Result<()> {
     if host.gateway.is_some() {
         tracing::info!("mcp — aggregate http://{bind_addr}/mcp (all apps, tools <app>_<tool>)");
     }
-    for name in host.apps.read().await.keys() {
-        tracing::info!("{name} — web UI http://{bind_addr}/{name}/");
-        tracing::info!("{name} — mcp    http://{bind_addr}/{name}/mcp");
-        tracing::info!("{name} — sync   http://{bind_addr}/{name}/sync");
+    for key in host.apps.read().await.keys() {
+        let prefix = key.route_prefix();
+        tracing::info!("{key} — web UI http://{bind_addr}{prefix}/");
+        tracing::info!("{key} — mcp    http://{bind_addr}{prefix}/mcp");
+        tracing::info!("{key} — sync   http://{bind_addr}{prefix}/sync");
     }
 
     // Race the server against Ctrl-C instead of graceful shutdown: SSE
