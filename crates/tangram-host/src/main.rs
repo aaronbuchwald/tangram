@@ -102,6 +102,20 @@ pub struct Host {
     /// request-time egress injection (ADR-0005 / Phase 10b), where the value
     /// is resolved host-side and never enters the component.
     pub secrets: Arc<secrets::SecretRegistry>,
+    /// `[artifacts] upload_enabled` (Phase S2b): when true the host hosts
+    /// `POST /artifacts` (store an uploaded component, computing its sha) and
+    /// `GET /artifacts/<sha>.wasm`. DEFAULT OFF — when false both routes 404.
+    /// Read once at startup (not converged live, like `[gateway]`), behind
+    /// the loopback/auth gate in `main`.
+    pub artifacts_upload_enabled: bool,
+}
+
+impl Host {
+    /// The shared Wasmtime engine — used to validate an UPLOADED component
+    /// before it enters the content-addressed store (`POST /artifacts`).
+    pub fn engine(&self) -> &wasmtime::Engine {
+        &self.engine
+    }
 }
 
 /// The bootstrap ("file") layer of one tenant's desired state: the explicit
@@ -579,6 +593,39 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Open artifact upload (Phase S2b) — DEFAULT OFF. When enabled it is a
+    // dev/demo capability: arbitrary-blob storage that MUST NOT face the
+    // public internet until the MUST-FIX checklist (auth, per-upload size
+    // cap, rate limiting, content/abuse controls, quota — see
+    // crates/tangram-host/README.md) is met. The wasm-validity check is the
+    // only checklist item already done. Mirror the registry posture: refuse a
+    // non-loopback bind without a token, and log a loud warning when on.
+    let artifacts_upload_enabled = HostConfig::load(&config_path)
+        .map(|config| config.artifacts.upload_enabled)
+        .unwrap_or(false);
+    if artifacts_upload_enabled {
+        if !bind_loopback && auth_token.is_none() {
+            anyhow::bail!(
+                "refusing to bind {bind_addr}: [artifacts] upload_enabled = true exposes open \
+                 artifact upload (arbitrary blob storage) and TANGRAM_AUTH_TOKEN is not set — \
+                 set the token or bind 127.0.0.1 (see the MUST-FIX checklist in \
+                 crates/tangram-host/README.md before exposing this publicly)"
+            );
+        }
+        tracing::warn!(
+            "⚠️  OPEN ARTIFACT UPLOAD IS ENABLED (POST /artifacts) — DEV/DEMO ONLY. This is \
+             arbitrary-blob storage; do NOT expose it publicly until the MUST-FIX checklist is \
+             met (auth, per-upload size cap, rate limiting, content/abuse controls, quota — \
+             see crates/tangram-host/README.md). Uploads are validated as wasm components and \
+             {}.",
+            if auth_token.is_some() {
+                "require the bearer token"
+            } else {
+                "are UNAUTHENTICATED (loopback-only bind)"
+            }
+        );
+    }
+
     // The MCP gateway (RUNTIME_PLAN D3): with `[gateway] enabled = true` and
     // an agentgateway binary, the host binds an INTERNAL loopback listener
     // for direct per-app serving and routes public MCP through a supervised
@@ -638,6 +685,7 @@ async fn main() -> anyhow::Result<()> {
         gateway: mcp_gateway,
         fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
         secrets: Arc::new(secrets::SecretRegistry::default()),
+        artifacts_upload_enabled,
     });
     host.converge().await;
 

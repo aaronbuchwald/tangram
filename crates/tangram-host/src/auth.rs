@@ -63,6 +63,23 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Does the request carry `Authorization: Bearer <token>` (constant-time)?
+/// Used by host-level routes that gate on the host token without building a
+/// per-app [`AuthGate`] — currently the artifact upload route (Phase S2b).
+pub fn bearer_matches(headers: &HeaderMap, token: &str) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|presented| ct_eq(presented.as_bytes(), token.as_bytes()))
+}
+
+/// The 401 for the host-level artifact upload route — same shape as the
+/// per-app bearer guard (point the uploader at `TANGRAM_AUTH_TOKEN`).
+pub fn artifact_unauthorized() -> Response {
+    unauthorized()
+}
+
 // ── the request principal (RUNTIME_PLAN Phase 5 → 6 seam) ───────────────────
 
 /// Who a request acts as. Today there are two kinds: the implicit

@@ -438,6 +438,25 @@ impl TenantsConfig {
     }
 }
 
+/// `[artifacts]` — host-side WASM blob upload + hosting (Phase S2b). When
+/// `upload_enabled` is true the host exposes `POST /artifacts` (store an
+/// uploaded component, computing its sha-256) and `GET /artifacts/<sha>.wasm`
+/// (serve it). DEFAULT OFF: open upload is arbitrary-blob storage — an abuse,
+/// DoS, and malware-hosting magnet on a public bind. See the MUST-FIX
+/// checklist at the route in `routes.rs` and in `crates/tangram-host/README.md`.
+/// This is a dev/demo capability until that checklist is met.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactsConfig {
+    /// Open artifact upload. DEFAULT OFF. When false, `POST /artifacts`
+    /// 404s and `GET /artifacts/<sha>.wasm` serves nothing. When true, the
+    /// host REFUSES to start on a non-loopback bind without
+    /// `TANGRAM_AUTH_TOKEN` (mirrors the registry posture) and logs a loud
+    /// startup warning.
+    #[serde(default)]
+    pub upload_enabled: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfig {
@@ -451,6 +470,9 @@ pub struct HostConfig {
     /// (see `crate::gateway`). Applied at startup, not converged live.
     #[serde(default)]
     pub gateway: crate::gateway::GatewaySettings,
+    /// `[artifacts]` — WASM blob upload + hosting (Phase S2b). DEFAULT OFF.
+    #[serde(default)]
+    pub artifacts: ArtifactsConfig,
 }
 
 impl HostConfig {
@@ -565,6 +587,24 @@ mod tests {
         // No [gateway] section → disabled (direct serving, today's behavior).
         let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
         assert!(!config.gateway.enabled);
+    }
+
+    #[test]
+    fn parses_artifacts_section_and_defaults_off() {
+        // No [artifacts] section → upload is OFF (the safe default).
+        let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
+        assert!(
+            !config.artifacts.upload_enabled,
+            "open upload must default OFF"
+        );
+        // Explicit opt-in.
+        let config = HostConfig::parse(
+            "[artifacts]\nupload_enabled = true\n[apps.a]\ncomponent = \"a\"\nui = \"u\"",
+        )
+        .unwrap();
+        assert!(config.artifacts.upload_enabled);
+        // Unknown keys in the section are rejected (deny_unknown_fields).
+        assert!(HostConfig::parse("[artifacts]\nbogus = true").is_err());
     }
 
     #[test]
