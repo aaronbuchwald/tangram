@@ -399,9 +399,44 @@ hosted use of the remote, and OAuth-connected local instances.
     directly still cannot reach a tenant app tokenless (pinned by
     `tenant_mcp_is_scoped_and_authed_through_the_gateway` in
     `tests/gateway_lifecycle.rs`).
-- **Phase 6 — identity**: OAuth accounts on the CF side (account == tenant),
-  device-flow/PAT tokens for local replicas' sync + MCP auth; replaces the
-  Phase-3 shared bearer with per-user credentials.
+- [x] **Phase 6 — identity (CF side)** — delivered 2026-06-11. OAuth
+  accounts on the Cloudflare worker (account == tenant), PATs for local
+  replicas' sync + MCP auth. Architecture in
+  [ADR-0003](adr/0003-cloudflare-identity.md); the native host's Phase-5
+  token table stays as-is (host↔CF credential unification is follow-up).
+  - [x] OAuth sign-in (`/auth/login|callback|logout`): hand-rolled
+    authorization-code flow with GitHub as the upstream IdP (the
+    `workers-oauth-provider` library is an authorization *server* — wrong
+    role; see the ADR). Upstream endpoints are env-overridable
+    (`OAUTH_{AUTHORIZE,TOKEN,USER}_URL`), which is the stub-IdP seam the
+    miniflare e2e uses. New account → tenant created with a collision-safe
+    slug from the IdP login (`alice`, then `alice-2`); re-sign-in is
+    idempotent.
+  - [x] Accounts DO (`TangramAccounts`, one instance): accounts, 30-day
+    browser sessions, and PATs — all tokens stored as SHA-256 hashes,
+    plaintext shown exactly once. `/account` page (session-gated) mints,
+    lists, and revokes PATs and links the tenant's apps.
+  - [x] Tenant namespaces mirroring Phase 5: `/t/<tenant>/<app>/{,api,sync,
+    mcp}`; DO ids from `t/<tenant>/<app>` (disjoint from the single-user
+    surface's ids — full isolation, existing deployments keep their data);
+    EVERY request under `/t/<tenant>/` (reads, SSE, sync, MCP, UI) resolves
+    a principal — PAT bearer or session cookie — via one accounts-DO RPC, or
+    answers ONE uniform 401 (no existence oracle, same property as the
+    host). Per-tenant app set = the worker's bundled APPS (notes/nutrition);
+    a per-tenant registry-on-CF is explicitly out of scope.
+  - [x] Replicas use the UNCHANGED sync client: `TANGRAM_REMOTE_<APP>=
+    https://<worker>/t/<tenant>/<app>/sync` + `TANGRAM_REMOTE_TOKEN=<PAT>`
+    (verified in the e2e — no `crates/tangram` changes). Revocation is
+    immediate (the PAT row deletion IS the revocation; no cache): the
+    replica's next exchange 401s and it reconnect-loops without crashing.
+  - [x] Miniflare e2e (`scripts/e2e-cloudflare-identity.sh`, CI job
+    `e2e-cloudflare-identity`; runs its whole suite twice on fresh state):
+    stub-IdP sign-in for alice+bob, slug collision (`alice-2`), the full
+    401 matrix (state/actions POST/state SSE/sync POST/sync SSE/MCP/UI/
+    index × {no token, garbage, bob's PAT, bob's cookie, unknown tenant} —
+    bodies byte-identical), PAT + cookie access, MCP under the PAT,
+    bidirectional replica↔tenant sync (8–76 ms), isolation (bob and the
+    open single-user surface see none of alice's data), and revocation.
 - **Phase 7 — CF app runtime**: upgrade Cloudflare from sync relay to full
   app host — spike `jco`-transpiled tangram:app components with a Worker-side
   host shim over DO storage (fallback: workers-rs + tangram-core); record the

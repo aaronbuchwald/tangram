@@ -29,6 +29,7 @@ jobs:
                    .agents/skills/systemd-service/service.sh \
                    scripts/e2e-cloudflare-sync.sh \
                    scripts/e2e-cloudflare-apps.sh \
+                   scripts/e2e-cloudflare-identity.sh \
                    cloud/cloudflare/build-components.sh; do
             bash -n "$f"
           done
@@ -101,6 +102,28 @@ jobs:
       # (dist/components, produced by the e2e's build step).
       - run: npx tsc --noEmit
         working-directory: cloud/cloudflare
+
+  # Miniflare e2e for IDENTITY on Cloudflare (RUNTIME_PLAN Phase 6 /
+  # ADR-0003): OAuth sign-in against a stub IdP (account == tenant,
+  # collision-safe slugs), the per-tenant /t/<tenant>/ namespaces with the
+  # uniform 401 matrix (state/actions/SSE/sync/MCP/UI), PATs minted from the
+  # account page, a native replica syncing through TANGRAM_REMOTE_TOKEN, and
+  # immediate revocation (replica reconnect-loops, never crashes). The
+  # script runs its whole suite twice on fresh state.
+  e2e-cloudflare-identity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloud/cloudflare/package-lock.json
+      - run: bash scripts/e2e-cloudflare-identity.sh
 
   # Phase 0 of docs/RUNTIME_PLAN.md: static musl binaries + scratch images.
   # Build-only (no push) — proves the sandbox packaging keeps working.

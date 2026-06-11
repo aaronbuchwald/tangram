@@ -538,10 +538,24 @@ of yours running in between — and the worker is itself a first-class
 instance you can read and write from any browser or agent. `npx wrangler
 dev` runs the same thing locally (see
 [cloud/cloudflare/README.md](cloud/cloudflare/README.md), including
-nutrition's CalorieNinjas secret); `bash scripts/e2e-cloudflare-sync.sh`
-and `bash scripts/e2e-cloudflare-apps.sh` regression-test the sync path and
-the full app surface under miniflare (both CI jobs). The no-auth caveat
-above applies doubly: a deployed worker is on the public internet.
+nutrition's CalorieNinjas secret); `bash scripts/e2e-cloudflare-sync.sh`,
+`bash scripts/e2e-cloudflare-apps.sh`, and
+`bash scripts/e2e-cloudflare-identity.sh` regression-test the sync path,
+the full app surface, and the identity layer under miniflare (all three CI
+jobs). The no-auth caveat above applies to the top-level surface: a
+deployed worker is on the public internet.
+
+**Accounts on Cloudflare** (RUNTIME_PLAN Phase 6 /
+[ADR-0003](docs/adr/0003-cloudflare-identity.md)): configure a GitHub OAuth
+app and the worker grows sign-in at `/auth/login` — every account gets a
+private, fully isolated namespace at `/t/<tenant>/<app>/...` (same
+UI/api/sync/MCP surface), gated by the browser session or a personal access
+token minted on `/account`. A laptop replica syncs a private namespace with
+the standard client config — `TANGRAM_REMOTE_NOTES=https://…/t/<tenant>/
+notes/sync` plus `TANGRAM_REMOTE_TOKEN=<PAT>` (the same variables used for
+tangram-host tenant remotes above); revoking the PAT cuts it off on the
+next request. Setup steps:
+[cloud/cloudflare/README.md](cloud/cloudflare/README.md) "Accounts".
 
 ## Configuration (env / `.env`)
 

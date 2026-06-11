@@ -16,10 +16,24 @@ import nutritionUi from "../../../apps/nutrition/ui/index.html";
 
 import { TangramGuest, tangramHostImports, wasiImports } from "./shim";
 
+import type { TangramAccounts } from "./auth";
+
 export interface Env {
   TANGRAM_DOC: DurableObjectNamespace;
+  /** The accounts DO (RUNTIME_PLAN Phase 6): OAuth accounts, sessions,
+   * PATs — one instance, named "accounts". */
+  TANGRAM_ACCOUNTS: DurableObjectNamespace<TangramAccounts>;
   /** Comma-separated app names this Worker serves, e.g. "notes,nutrition". */
   APPS: string;
+  /** GitHub OAuth app credentials (Worker secrets) — unset, `/auth/login`
+   * answers 503 and the tenant namespace is unreachable (no accounts). */
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  /** Upstream IdP endpoint overrides — default to real GitHub; the
+   * identity e2e points them at a stub IdP under miniflare. */
+  OAUTH_AUTHORIZE_URL?: string;
+  OAUTH_TOKEN_URL?: string;
+  OAUTH_USER_URL?: string;
   /** Nutrition's strategy config — set CALORIENINJAS_API_KEY as a Worker
    * secret (`wrangler secret put CALORIENINJAS_API_KEY`) to enable
    * description-based meal logging; without it nutrition falls back to

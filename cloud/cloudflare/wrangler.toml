@@ -20,11 +20,27 @@ APPS = "notes,nutrition"
 # Nutrition's strategy config is NOT set here: provide CALORIENINJAS_API_KEY
 # with `wrangler secret put CALORIENINJAS_API_KEY` (or --var under `wrangler
 # dev`); unset, nutrition falls back to offline/manual logging cleanly.
+#
+# Identity (RUNTIME_PLAN Phase 6): OAuth sign-in needs the GitHub OAuth app
+# credentials as SECRETS (`wrangler secret put GITHUB_CLIENT_ID` and
+# GITHUB_CLIENT_SECRET — see cloud/cloudflare/README.md "Accounts"); unset,
+# /auth/login answers 503 and only the open single-user surface works.
+# OAUTH_{AUTHORIZE,TOKEN,USER}_URL override the upstream IdP endpoints
+# (defaults: real GitHub) — used by the identity e2e to stub the IdP.
 
 [[durable_objects.bindings]]
 name = "TANGRAM_DOC"
 class_name = "TangramDoc"
 
+# Accounts/sessions/PATs (Phase 6) — one instance, named "accounts".
+[[durable_objects.bindings]]
+name = "TANGRAM_ACCOUNTS"
+class_name = "TangramAccounts"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TangramDoc"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["TangramAccounts"]

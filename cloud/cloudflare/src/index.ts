@@ -23,11 +23,16 @@
 import * as Automerge from "@automerge/automerge";
 import { DurableObject } from "cloudflare:workers";
 
+import { authorizeTenant, handleAccount, handleAuth } from "./account";
+import { TangramAccounts, tenantUnauthorized } from "./auth";
 import { AppLogic, Env, appUi, hasComponent, instantiateApp } from "./components";
 import { McpEndpoint, ToolOutcome } from "./mcp";
 import { errorPayload } from "./shim";
 
 export type { Env };
+// The accounts Durable Object (RUNTIME_PLAN Phase 6) — exported here so
+// wrangler's class binding finds it on the entry module.
+export { TangramAccounts };
 
 const OCTET_STREAM = { "Content-Type": "application/octet-stream" };
 const JSON_TYPE = { "Content-Type": "application/json" };
@@ -386,7 +391,77 @@ function headsEqual(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((h, i) => h === b[i]);
 }
 
-// ── worker entry: routes /<app>/... to that app's Durable Object ────────────
+// ── worker entry ─────────────────────────────────────────────────────────────
+//
+// Three surfaces (RUNTIME_PLAN Phases 7 + 6):
+//   /<app>/...            the original single-user surface — open, kept
+//                         byte-compatible (existing DOs and replicas)
+//   /auth/* + /account*   OAuth sign-in (GitHub) and the account page (PATs)
+//   /t/<tenant>/<app>/... per-account namespaces — EVERY request requires a
+//                         PAT bearer or the session cookie; tenant data
+//                         lives in its own DO (id from "t/<tenant>/<app>")
+
+/** Serve one app surface: UI worker-side, everything else through the app's
+ * Durable Object. `docName` keys the DO id — `<app>` for the single-user
+ * surface, `t/<tenant>/<app>` per tenant (full data isolation; app names
+ * never contain "/", so the keyspaces cannot collide). */
+function serveApp(
+  request: Request,
+  env: Env,
+  url: URL,
+  apps: string[],
+  app: string,
+  docName: string,
+  rest: string[],
+  prefix: string,
+): Response | Promise<Response> {
+  if (!apps.includes(app)) {
+    return new Response(`unknown app "${app}" (configured: ${apps.join(", ")})`, { status: 404 });
+  }
+  // The static UI is served Worker-side (no DO hop). `<prefix>/<app>`
+  // redirects to `<prefix>/<app>/` so the page's relative fetches
+  // ("api/state") resolve under the app prefix.
+  if (rest.length === 0) {
+    return Response.redirect(`${url.origin}${prefix}/${app}/`, 301);
+  }
+  const sub = rest.join("/");
+  if (request.method === "GET" && (sub === "" || sub === "index.html")) {
+    const ui = appUi(app);
+    if (ui) {
+      return new Response(ui, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+  }
+
+  const stub = env.TANGRAM_DOC.get(env.TANGRAM_DOC.idFromName(docName));
+  url.pathname = `/${sub}`;
+  const headers = new Headers(request.headers);
+  headers.set("x-tangram-app", app);
+  return stub.fetch(new Request(new Request(url, request), { headers }));
+}
+
+/** `/t/<tenant>/...`: resolve the principal FIRST — an unknown tenant, a
+ * wrong/revoked token, another tenant's token, and no token at all answer
+ * the same 401 (no existence oracle, mirroring tangram-host Phase 5). The
+ * per-tenant app set is the worker's bundled APPS (a per-tenant registry on
+ * CF is out of scope — see RUNTIME_PLAN Phase 6). */
+async function handleTenant(
+  request: Request,
+  env: Env,
+  url: URL,
+  apps: string[],
+): Promise<Response> {
+  const [, , tenant, app, ...rest] = url.pathname.split("/");
+  if (!tenant || !(await authorizeTenant(request, env, tenant))) {
+    return tenantUnauthorized();
+  }
+  if (app === undefined || app === "") {
+    const lines = apps.map(
+      (a) => `  /t/${tenant}/${a}/   …/api/{state,actions,events}   …/sync(+/events)   …/mcp`,
+    );
+    return new Response(`tangram — tenant ${tenant}\n\napps:\n${lines.join("\n")}\n`);
+  }
+  return serveApp(request, env, url, apps, app, `t/${tenant}/${app}`, rest, `/t/${tenant}`);
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -396,38 +471,27 @@ export default {
       .map((s) => s.trim())
       .filter(Boolean);
 
+    if (url.pathname.startsWith("/auth/")) return handleAuth(request, env);
+    if (url.pathname === "/account" || url.pathname.startsWith("/account/")) {
+      return handleAccount(request, env, apps);
+    }
+    if (url.pathname === "/t" || url.pathname.startsWith("/t/")) {
+      return handleTenant(request, env, url, apps);
+    }
+
     if (url.pathname === "/") {
       const lines = apps.map((app) =>
         hasComponent(app)
           ? `  /${app}/   /${app}/api/{state,actions,events,capabilities}   /${app}/sync(+/events)   /${app}/mcp`
           : `  /${app}/sync   /${app}/sync/events   /${app}/api/state   (sync relay only)`,
       );
-      return new Response(`tangram\n\napps:\n${lines.join("\n")}\n`);
+      return new Response(
+        `tangram\n\napps:\n${lines.join("\n")}\n\n` +
+          `account: /account (OAuth sign-in; your apps live under /t/<you>/)\n`,
+      );
     }
 
     const [, app, ...rest] = url.pathname.split("/");
-    if (!apps.includes(app)) {
-      return new Response(`unknown app "${app}" (configured: ${apps.join(", ")})`, { status: 404 });
-    }
-
-    // The static UI is served Worker-side (no DO hop). `/notes` redirects to
-    // `/notes/` so the page's relative fetches ("api/state") resolve under
-    // the app prefix.
-    if (rest.length === 0) {
-      return Response.redirect(`${url.origin}/${app}/`, 301);
-    }
-    const sub = rest.join("/");
-    if (request.method === "GET" && (sub === "" || sub === "index.html")) {
-      const ui = appUi(app);
-      if (ui) {
-        return new Response(ui, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-      }
-    }
-
-    const stub = env.TANGRAM_DOC.get(env.TANGRAM_DOC.idFromName(app));
-    url.pathname = `/${sub}`;
-    const headers = new Headers(request.headers);
-    headers.set("x-tangram-app", app);
-    return stub.fetch(new Request(new Request(url, request), { headers }));
+    return serveApp(request, env, url, apps, app, app, rest, "");
   },
 } satisfies ExportedHandler<Env>;

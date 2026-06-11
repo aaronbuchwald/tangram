@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tangram — Account</title>
+  <style>
+    /* Same dark performance-console language as the app UIs (notes /
+       nutrition); accent here is the account green. Served at /account
+       (worker-level, not prefix-mounted), so fetches use absolute paths. */
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --panel: #15171b;
+      --panel-2: #1b1e23;
+      --line: #23262b;
+      --text: #f2f4f7;
+      --dim: #8d95a2;
+      --faint: #5d6470;
+      --green: #2bd576;
+      --red: #ff4554;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 var(--sans);
+    }
+    .wrap { max-width: 640px; margin: 0 auto; padding: 32px 20px 64px; }
+    .micro {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .3em;
+      text-transform: uppercase;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 24px;
+    }
+    a { color: var(--green); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    section { margin-bottom: 28px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-top: 10px;
+    }
+    code, .mono { font-family: var(--mono); font-size: 12px; }
+    #tenant { color: var(--green); }
+    ul { list-style: none; margin: 0; padding: 0; }
+    li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    li:last-child { border-bottom: none; }
+    .dim { color: var(--dim); }
+    button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--dim); }
+    button.danger { color: var(--red); }
+    input {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font: inherit;
+      flex: 1;
+    }
+    form { display: flex; gap: 8px; margin-top: 10px; }
+    .minted {
+      margin-top: 10px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--green);
+      border-radius: 6px;
+      word-break: break-all;
+    }
+    .hint { color: var(--faint); font-size: 12px; margin-top: 8px; }
+    pre {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--dim);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Tangram</h1>
+        <div class="micro">Account</div>
+      </div>
+      <a href="/auth/logout">sign out</a>
+    </header>
+
+    <section>
+      <div class="micro">Tenant</div>
+      <div class="card">
+        <div>namespace <code id="tenant">…</code> <span class="dim" id="login"></span></div>
+        <div class="hint">your apps:</div>
+        <ul id="apps"></ul>
+      </div>
+    </section>
+
+    <section>
+      <div class="micro">Access tokens</div>
+      <div class="card">
+        <ul id="pats"><li class="dim">loading…</li></ul>
+        <form id="mint">
+          <input id="label" placeholder="label (e.g. laptop replica)" />
+          <button type="submit">mint token</button>
+        </form>
+        <div id="minted-box" class="minted" hidden>
+          <div class="micro">New token — copy it now, it is shown once</div>
+          <code id="minted"></code>
+        </div>
+        <div class="hint">A token is the credential for everything under your
+        namespace: web API, sync, MCP. Point a laptop replica at this host:</div>
+        <pre id="replica">…</pre>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function refresh() {
+      const me = await (await fetch("/account/api/me")).json();
+      $("tenant").textContent = "/t/" + me.tenant + "/";
+      $("login").textContent = "(" + me.provider + ": " + me.login + ")";
+      $("apps").innerHTML = "";
+      for (const app of me.apps) {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = "/t/" + me.tenant + "/" + app + "/";
+        a.textContent = "/t/" + me.tenant + "/" + app + "/";
+        li.appendChild(a);
+        $("apps").appendChild(li);
+      }
+      $("replica").textContent =
+        "TANGRAM_REMOTE_NOTES=" + location.origin + "/t/" + me.tenant + "/notes/sync \\\n" +
+        "TANGRAM_REMOTE_TOKEN=<token> cargo run -p tangram-notes";
+
+      const { pats } = await (await fetch("/account/api/pats")).json();
+      $("pats").innerHTML = "";
+      if (pats.length === 0) {
+        const li = document.createElement("li");
+        li.className = "dim";
+        li.textContent = "no tokens yet";
+        $("pats").appendChild(li);
+      }
+      for (const pat of pats) {
+        const li = document.createElement("li");
+        const name = document.createElement("span");
+        name.innerHTML = "<code>" + pat.id + "</code> ";
+        const label = document.createElement("span");
+        label.className = "dim";
+        label.textContent = pat.label;
+        name.appendChild(label);
+        const revoke = document.createElement("button");
+        revoke.className = "danger";
+        revoke.textContent = "revoke";
+        revoke.onclick = async () => {
+          await fetch("/account/api/pats/" + pat.id, { method: "DELETE" });
+          refresh();
+        };
+        li.appendChild(name);
+        li.appendChild(revoke);
+        $("pats").appendChild(li);
+      }
+    }
+
+    $("mint").onsubmit = async (e) => {
+      e.preventDefault();
+      const response = await fetch("/account/api/pats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: $("label").value }),
+      });
+      const minted = await response.json();
+      $("minted").textContent = minted.token;
+      $("minted-box").hidden = false;
+      $("label").value = "";
+      refresh();
+    };
+
+    refresh();
+  </script>
+</body>
+</html>
