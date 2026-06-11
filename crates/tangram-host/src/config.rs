@@ -1,7 +1,9 @@
-//! Desired state: `apps.toml`. The file watcher re-reads it on every change
-//! and the reconciler converges the running set of components toward it —
-//! Phase 3 replaces this file with the registry app as the source of truth,
-//! keeping it as import/export.
+//! Desired state, part 1: `apps.toml`. The file watcher re-reads it on every
+//! change and the reconciler converges the running set of components toward
+//! it. Since Phase 3 the file is the BOOTSTRAP half of the desired state:
+//! an app flagged `registry = true` is itself a Tangram app whose replicated
+//! document carries ADDITIONAL app specs, merged over this file by
+//! [`crate::registry::merge`] (registry entries win on name collision).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,37 @@ pub struct AppSpec {
     /// exactly like a native app's TANGRAM_REMOTE).
     #[serde(default)]
     pub remote: Option<String>,
+    /// This app IS a fleet registry: the host subscribes to its document and
+    /// merges its replicated spec list into the desired state (Phase 3).
+    /// Mutating routes on registry apps are gated behind TANGRAM_AUTH_TOKEN.
+    #[serde(default)]
+    pub registry: bool,
+    /// Gate this app's mutating routes (`POST /api/actions/*` and MCP
+    /// `tools/call` of mutating tools) behind `Authorization: Bearer
+    /// $TANGRAM_AUTH_TOKEN`, like a registry app. No effect when the host
+    /// has no token.
+    #[serde(default)]
+    pub require_auth: bool,
+    /// Disabled apps stay on record but are not run.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// App names become path prefixes (and data-dir names), so keep them
+/// URL-trivial. Shared by the file loader and the registry-entry parser.
+pub fn validate_name(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+        "app name {name:?} must be alphanumeric/dash/underscore (it becomes a path prefix)"
+    );
+    Ok(())
 }
 
 impl AppSpec {
@@ -79,17 +112,78 @@ impl HostConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let config: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let config: Self = toml::from_str(text)?;
         for name in config.apps.keys() {
-            anyhow::ensure!(
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
-                "app name {name:?} must be alphanumeric/dash/underscore (it becomes a path prefix)"
-            );
+            validate_name(name)?;
         }
         Ok(config)
+    }
+
+    /// True if any (enabled) app in the file is a registry.
+    pub fn has_registry(&self) -> bool {
+        self.apps.values().any(|spec| spec.registry && spec.enabled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_registry_and_auth_flags() {
+        let config = HostConfig::parse(
+            r#"
+            [apps.registry]
+            component = "registry.wasm"
+            ui = "ui"
+            registry = true
+
+            [apps.notes]
+            component = "notes.wasm"
+            ui = "notes-ui"
+            require_auth = true
+            enabled = false
+            "#,
+        )
+        .unwrap();
+        let registry = &config.apps["registry"];
+        assert!(registry.registry);
+        assert!(!registry.require_auth);
+        assert!(registry.enabled, "enabled defaults to true");
+        let notes = &config.apps["notes"];
+        assert!(!notes.registry);
+        assert!(notes.require_auth);
+        assert!(!notes.enabled);
+        assert!(config.has_registry());
+    }
+
+    #[test]
+    fn rejects_bad_names_and_unknown_fields() {
+        assert!(HostConfig::parse("[apps.\"bad name\"]\ncomponent = \"a\"\nui = \"b\"").is_err());
+        assert!(HostConfig::parse("[apps.ok]\ncomponent = \"a\"\nui = \"b\"\nbogus = 1").is_err());
+    }
+
+    #[test]
+    fn env_passthrough_expands_host_vars() {
+        let config = HostConfig::parse(
+            r#"
+            [apps.app]
+            component = "a.wasm"
+            ui = "ui"
+            [apps.app.env]
+            LITERAL = "as-is"
+            EXPANDED = "${TANGRAM_TEST_EXPANSION_VAR}"
+            "#,
+        )
+        .unwrap();
+        // Safety: test-local var name, nothing else reads it concurrently.
+        unsafe { std::env::set_var("TANGRAM_TEST_EXPANSION_VAR", "secret-value") };
+        let env = config.apps["app"].resolved_env("app");
+        assert!(env.contains(&("LITERAL".into(), "as-is".into())));
+        assert!(env.contains(&("EXPANDED".into(), "secret-value".into())));
     }
 }

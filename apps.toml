@@ -1,9 +1,21 @@
 # Desired state for tangram-host (README "Run apps as WASM components").
 # Build the components first:
-#   cargo build -p tangram-notes -p tangram-nutrition --lib --target wasm32-wasip2 --release
+#   cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
+#     --lib --target wasm32-wasip2 --release
 # then: cargo run -p tangram-host --release -- apps.toml
 # Paths are relative to the directory you run the host from. Edits converge
 # live: add/remove/reload apps without restarting the host.
+#
+# This file is the BOOTSTRAP half of the desired state: the registry app
+# below carries ADDITIONAL app specs in its replicated document
+# (install_app/remove_app/set_enabled actions or MCP tools); registry
+# entries win on name collision. Set TANGRAM_AUTH_TOKEN (.env) to gate the
+# registry's mutating routes — required for any non-loopback BIND_ADDR.
+
+[apps.registry]
+component = "target/wasm32-wasip2/release/registry.wasm"
+ui = "apps/registry/ui"
+registry = true
 
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"

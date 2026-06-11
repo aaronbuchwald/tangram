@@ -16,13 +16,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          # wasm32-wasip2: the tangram-host capabilities test builds and
-          # runs the notes/nutrition WASM components.
+          # wasm32-wasip2: the tangram-host capabilities and registry
+          # lifecycle tests build and run the WASM components.
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: bash -n .agents/skills/local-replica/replica.sh .agents/skills/systemd-service/service.sh
+      # The wasm components first: tangram-host's registry_lifecycle
+      # integration test spawns the real host against them (it self-skips
+      # when they're missing, so build them to make it actually run).
+      - run: >
+          cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry
+          --lib --target wasm32-wasip2 --release
       - run: cargo test
       # tangram-core is the portable half of the SDK (RUNTIME_PLAN Phase 1):
       # it must keep building without tokio/hyper/axum/reqwest/rmcp for

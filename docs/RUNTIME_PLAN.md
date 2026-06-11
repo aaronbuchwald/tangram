@@ -200,12 +200,38 @@ capability at all — the host is the only thing touching `$HOME/.<app-name>`.
   second; remove → gone; same binary + config on any Linux/macOS host.
 
 ### Phase 3 — Registry app as source of truth (API-driven, live)
-Unchanged from rev 1 (was Phase 2): `apps/registry` is itself a Tangram app
-(install_app/set_enabled/remove_app/set_image actions); the reconciler
-subscribes to its state; `apps.toml` demotes to import/export; bearer-token
-auth on mutating routes before any non-localhost exposure; default-deny
-egress (grants become enforced, not advisory) lands here.
-Exit: registry action or MCP tool call → new sandbox serving in seconds.
+Delivered 2026-06-11. `apps/registry` is itself a Tangram app; the host
+merges its replicated spec list over `apps.toml` (the file stays as
+bootstrap + the registry's own entry — D2's import/export role).
+- [x] `apps/registry`: `#[model]` list of app specs mirroring the
+  `apps.toml` schema (name, component, ui, data_dir?, allow_hosts, env with
+  `${VAR}` host-side expansion, enabled) + `install_app` / `set_enabled` /
+  `remove_app` / `set_component` / `set_allow_hosts` / `set_env` /
+  `list_apps` actions; builds native AND wasm32-wasip2 like every app; fleet
+  UI in the shared design system. Live status (running/healthy/error) is
+  deliberately NOT in the model — it's a per-host observation, served by the
+  host at `GET /api/fleet`.
+- [x] Host integration (`registry = true` in apps.toml): the host runs the
+  registry like any app, subscribes to its document, and converges on every
+  change (action, MCP call, or sync from a replica) exactly like a file
+  edit; registry entries win on name collision (except: the registry's own
+  doc cannot redefine a registry app — file-controlled). Registry-installed
+  apps persist across host restarts because they live in the replicated doc
+  (proved by the `registry_lifecycle` integration test and live).
+- [x] Bearer-token auth: `TANGRAM_AUTH_TOKEN` gates `POST /api/actions/*`
+  and MCP `tools/call` of MUTATING tools on registry apps (→ 401 without
+  `Authorization: Bearer`); reads stay open. Per-app `require_auth = true`
+  extends the gate to any app. Without a token the host warns and refuses
+  to run a registry app on a non-loopback bind. Default-deny egress was
+  already enforced in Phase 2 (allow_hosts is the entire grant).
+- [x] Tests in `cargo test`/CI: reconciler merge precedence + enabled=false,
+  auth guards (401/200/missing-header, MCP mutating-only), spec validation,
+  and the end-to-end lifecycle (install via authed POST → healthy →
+  remove → routes gone → restart → app returns from the doc) in
+  `crates/tangram-host/tests/registry_lifecycle.rs` (CI builds the wasm
+  components first; the test self-skips without them).
+- Exit met: registry action or MCP tool call → new component serving in
+  ~0.5 s (debounce-free converge on doc change; instantiation dominates).
 
 ### Phase 4 — Cloudflare adapter (remote-in-the-cloud)
 - Not WASI: a `workers-rs` host adapter over the same `tangram-core`

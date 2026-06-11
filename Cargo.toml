@@ -7,6 +7,7 @@ members = [
     "crates/tangram-macros",
     "apps/notes",
     "apps/nutrition",
+    "apps/registry",
     "apps/shell",
 ]
 
@@ -32,6 +33,7 @@ rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

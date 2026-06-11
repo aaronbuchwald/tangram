@@ -28,16 +28,34 @@ use tower_http::services::ServeDir;
 
 use crate::Host;
 use crate::app::{AppRuntime, DispatchError};
+use crate::auth::{self, AuthGate};
 use crate::mcp::McpBridge;
 
 /// One running app's routes + runtime, as stored in the host's live table.
 pub struct AppEntry {
     pub runtime: Arc<AppRuntime>,
     pub router: Router,
+    /// For registry apps: the task that nudges the reconciler on every
+    /// document change (action, MCP call, or sync from a replica) — desired
+    /// state converges exactly like an `apps.toml` edit.
+    pub watch_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for AppEntry {
+    fn drop(&mut self) {
+        if let Some(task) = &self.watch_task {
+            task.abort();
+        }
+    }
 }
 
 impl AppEntry {
-    pub fn new(runtime: AppRuntime) -> Self {
+    /// Build the app's router. With `auth_token` set (registry apps and
+    /// `require_auth` apps when the host has TANGRAM_AUTH_TOKEN), the
+    /// mutating surfaces are gated: every `POST /api/actions/*` and every
+    /// MCP `tools/call` of a mutating tool requires the bearer token; read
+    /// routes stay open.
+    pub fn new(runtime: AppRuntime, auth_token: Option<&str>) -> Self {
         let runtime = Arc::new(runtime);
         let mcp_service = StreamableHttpService::new(
             {
@@ -47,33 +65,90 @@ impl AppEntry {
             LocalSessionManager::default().into(),
             StreamableHttpServerConfig::default(),
         );
+
+        let mut actions = Router::new()
+            .route("/api/actions/{name}", axum::routing::post(run_action))
+            .with_state(runtime.clone());
+        let mut mcp = Router::new().nest_service("/mcp", mcp_service);
+        if let Some(token) = auth_token {
+            let gate = Arc::new(AuthGate::new(
+                token.to_string(),
+                runtime
+                    .describe
+                    .actions
+                    .iter()
+                    .filter(|a| a.mutates)
+                    .map(|a| a.name.clone()),
+            ));
+            actions = actions.layer(axum::middleware::from_fn_with_state(
+                gate.clone(),
+                auth::bearer_guard,
+            ));
+            mcp = mcp.layer(axum::middleware::from_fn_with_state(gate, auth::mcp_guard));
+        }
+
         let router = Router::new()
             .route("/healthz", get(|| async { "ok" }))
             .route("/api/state", get(state))
             .route("/api/capabilities", get(capabilities))
             .route("/api/actions", get(list_actions))
-            .route("/api/actions/{name}", axum::routing::post(run_action))
             .route("/api/events", get(events))
             .route("/sync", axum::routing::post(sync_post))
             .route("/sync/events", get(sync_events))
-            .nest_service("/mcp", mcp_service)
+            .with_state(runtime.clone())
+            .merge(actions)
+            .merge(mcp)
             // Permissive CORS, same as the SDK's derived surface.
             .layer(CorsLayer::permissive())
             .fallback_service(
                 ServeDir::new(&runtime.spec.ui).append_index_html_on_directories(true),
-            )
-            .with_state(runtime.clone());
-        Self { runtime, router }
+            );
+        Self {
+            runtime,
+            router,
+            watch_task: None,
+        }
     }
 }
 
-/// The root router: index page plus the dynamic `/<app>/...` dispatcher.
+/// The root router: index page, fleet status, plus the dynamic
+/// `/<app>/...` dispatcher.
 pub fn root_router(host: Arc<Host>) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/api/fleet", get(fleet))
         .fallback(dispatch_app)
         .with_state(host)
+}
+
+/// `GET /api/fleet` — live host-level status for every desired app:
+/// where its spec came from (file vs registry), whether it is enabled,
+/// running, healthy (the live instance answers a state probe), and the
+/// last converge error if it failed to start. This is observation of THIS
+/// host — deliberately not part of the registry's replicated document.
+async fn fleet(State(host): State<Arc<Host>>) -> axum::Json<serde_json::Value> {
+    let statuses = host.fleet.read().await.clone();
+    let apps = host.apps.read().await;
+    let mut out = Vec::with_capacity(statuses.len());
+    for (name, status) in &statuses {
+        let entry = apps.get(name);
+        let healthy = match entry {
+            Some(entry) => entry.runtime.healthy().await,
+            None => false,
+        };
+        out.push(json!({
+            "name": name,
+            "source": status.source.as_str(),
+            "registry": status.registry,
+            "require_auth": status.require_auth,
+            "enabled": status.enabled,
+            "running": entry.is_some(),
+            "healthy": healthy,
+            "error": status.error,
+        }));
+    }
+    axum::Json(json!({ "apps": out }))
 }
 
 /// Route `/<app>` and `/<app>/...` to the app's router, resolved against the

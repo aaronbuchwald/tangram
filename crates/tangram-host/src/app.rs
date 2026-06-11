@@ -177,6 +177,13 @@ impl AppRuntime {
             .map_err(|e| DispatchError::Internal(format!("internal error: bad result JSON: {e}")))
     }
 
+    /// Liveness probe for the fleet status: the instance is healthy if it
+    /// still renders state for the current document.
+    pub async fn healthy(&self) -> bool {
+        let doc_bytes = self.doc.save();
+        self.component.state_json(&doc_bytes).await.is_ok()
+    }
+
     /// The current state as JSON text, exactly as the component rendered it.
     /// Served verbatim (after a syntax-only `RawValue` validation) rather than
     /// parsed into a `Value` and re-serialized: even with serde_json's
