@@ -31,8 +31,10 @@ symlink to `.agents/skills`.
   Tangram app whose replicated spec list the host merges over `apps.toml`;
   bearer auth via `TANGRAM_AUTH_TOKEN` (README "The registry app")
 - `apps/shell` — multi-app host serving every app under one port, prefixed
-- `cloud/cloudflare` — Durable-Object sync relay (TypeScript Worker); speaks
-  the same sync interface as the SDK, interchangeable as a remote
+- `cloud/cloudflare` — Durable-Object app host (TypeScript Worker running
+  the jco-transpiled WASM app components — ADR-0002): full per-app surface
+  (UI/api/sync/mcp), the sync side interchangeable with any SDK remote;
+  `mcp-core/` is tangram-core's MCP machine as a component
 - `docs/SDK_DESIGN.md` — architecture & roadmap
 - `docs/SYNC_PROTOCOL.md` — the HTTP(+SSE) sync wire contract (binding for
   every sync server: native SDK and the Cloudflare relay)

@@ -63,7 +63,8 @@ crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
 apps/shell              multi-app host: serves every app under one port, prefixed
-cloud/cloudflare        Durable-Object sync relay speaking the same sync interface
+cloud/cloudflare        Durable-Object app host: full surface (UI/api/sync/mcp)
+                        over the same WASM app components, serverless (ADR-0002)
 docs/SDK_DESIGN.md      architecture & roadmap
 docs/SYNC_PROTOCOL.md   the HTTP(+SSE) sync wire contract
 .agents/skills/         agent skills (SKILL.md format), tool-agnostic
@@ -413,33 +414,44 @@ caveat either way: `/sync` and `/mcp` have no auth yet, so only expose them
 on networks where every peer is trusted — a tailnet qualifies, the public
 internet does not.
 
-### Alternative: a Cloudflare relay as the remote
+### Alternative: Cloudflare as the remote (full app host)
 
-Instead of an always-on box, the remote can be the serverless sync relay in
+Instead of an always-on box, the remote can be the serverless host in
 [`cloud/cloudflare/`](cloud/cloudflare/): one Durable Object per app stores
-the document (SQLite-backed) and speaks the exact same sync interface
-([docs/SYNC_PROTOCOL.md](docs/SYNC_PROTOCOL.md)), so replicas can't tell it
+the document (SQLite-backed) and serves the FULL Tangram surface — the
+app's web UI, `POST /api/actions/{name}` dispatched through the **same WASM
+app components** tangram-host runs (jco-transpiled, RUNTIME_PLAN Phase 7 /
+[ADR-0002](docs/adr/0002-cloudflare-app-runtime.md)), live SSE state, MCP
+via tangram-core's protocol machine, and the exact same sync interface
+([docs/SYNC_PROTOCOL.md](docs/SYNC_PROTOCOL.md)) — replicas can't tell it
 from a native instance:
 
 ```sh
-cd cloud/cloudflare && npm install && npx wrangler login && npx wrangler deploy
+cd cloud/cloudflare && npm ci && npm run build:components && \
+  npx wrangler login && npx wrangler deploy
 ```
 
-then point each replica at the worker:
+then everything points at the worker:
 
 ```sh
+# replicas converge through (and with) it:
 TANGRAM_REMOTE_NOTES=https://tangram-relay.<your-subdomain>.workers.dev/notes/sync \
 TANGRAM_REMOTE_NUTRITION=https://tangram-relay.<your-subdomain>.workers.dev/nutrition/sync \
 cargo run --release -p tangram-shell
+# agents talk MCP straight to the worker:
+claude mcp add --transport http notes https://tangram-relay.<your-subdomain>.workers.dev/notes/mcp
+# humans: https://tangram-relay.<your-subdomain>.workers.dev/notes/
 ```
 
-Two laptops pointed at the same relay converge through it with no machine of
-yours running in between. `npx wrangler dev` runs the same relay locally for
-testing (see [cloud/cloudflare/README.md](cloud/cloudflare/README.md)), and
-`bash scripts/e2e-cloudflare-sync.sh` regression-tests the whole relay path
-end to end under miniflare (genesis convergence, bidirectional sync, restart
-persistence — also a CI job). The no-auth caveat above applies doubly: a
-deployed worker is on the public internet.
+Two laptops pointed at the same worker converge through it with no machine
+of yours running in between — and the worker is itself a first-class
+instance you can read and write from any browser or agent. `npx wrangler
+dev` runs the same thing locally (see
+[cloud/cloudflare/README.md](cloud/cloudflare/README.md), including
+nutrition's CalorieNinjas secret); `bash scripts/e2e-cloudflare-sync.sh`
+and `bash scripts/e2e-cloudflare-apps.sh` regression-test the sync path and
+the full app surface under miniflare (both CI jobs). The no-auth caveat
+above applies doubly: a deployed worker is on the public internet.
 
 ## Configuration (env / `.env`)
 

@@ -1,0 +1,27 @@
+# The MCP protocol core for the Cloudflare app runtime (ADR-0002): a tiny
+# wasm32-wasip2 component wrapping tangram-core's sans-io streamable-HTTP MCP
+# state machine, jco-transpiled and driven from the Worker so the Cloudflare
+# /mcp surface runs the SAME Rust protocol code as every other host.
+#
+# Standalone crate (own [workspace]): it is built by cloud/cloudflare's
+# component build, not part of the root workspace's native builds.
+[package]
+name = "tangram-mcp-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tangram-core = { path = "../../../crates/tangram-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.58"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+strip = true

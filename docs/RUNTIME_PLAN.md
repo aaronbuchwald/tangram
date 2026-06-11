@@ -263,7 +263,10 @@ bootstrap + the registry's own entry — D2's import/export role).
   genesis convergence, bidirectional sync < 5 s, restart persistence with
   peers frozen) runs as the `e2e-cloudflare-sync` CI job and via
   `cargo test -p tangram-host -- --ignored e2e_cloudflare`.
-- [ ] MCP surface via CF's Agents SDK (`McpAgent`) when full app logic moves.
+- [x] MCP surface — delivered with Phase 7 (2026-06-11), but NOT via CF's
+  Agents SDK: `/<app>/mcp` is served by tangram-core's sans-io MCP machine
+  compiled to a component (`cloud/cloudflare/mcp-core`), keeping one Rust
+  protocol implementation across every host (rationale in ADR-0002).
 - Exit (met for sync): a laptop replica syncs through a DO relay with the
   EC2 box off.
 
@@ -366,6 +369,36 @@ hosted use of the remote, and OAuth-connected local instances.
   host shim over DO storage (fallback: workers-rs + tangram-core); record the
   choice as ADR-0002. Serves UI/api/sync/mcp per (tenant, app); miniflare e2e
   extended to the full surface. Prereq: the tangram-core split.
+  **Single-user surface delivered 2026-06-11** (per-tenant routing waits for
+  Phase 5/6); evidence:
+  - [x] Spike + [ADR-0002](adr/0002-cloudflare-app-runtime.md): jco-transpiled
+    components chosen (Path A) — notes/nutrition run unmodified under workerd,
+    incl. JSPI for the guest's synchronous `http-fetch` import awaiting the
+    Worker's `fetch()`; workers-rs probe (Path B) blocked on `crates/tangram`
+    surgery. Bundle ≈ 1.7 MiB gzipped (full evidence in the ADR).
+  - [x] Each app's Durable Object serves the full surface (`cloud/cloudflare`):
+    bundled UI, `/api/state|actions|events|capabilities` (state rendered by the
+    component's `state-json`), `POST /api/actions/{name}` doc-in/doc-out
+    against DO SQLite storage with the SDK's error envelope, `/healthz`,
+    `/api/genesis`, and the unchanged Phase-4 `/sync(+events)`.
+  - [x] `/mcp` through **tangram-core's sans-io MCP machine compiled to its own
+    component** (`cloud/cloudflare/mcp-core`, world `tangram:mcp`) — the same
+    Rust protocol layer as every host; tool calls dispatch through the same
+    path as the actions API.
+  - [x] Genesis from the component's deterministic `genesis()`, asserted
+    byte-identical (sha256) to a fresh native instance's persisted genesis in
+    the e2e.
+  - [x] Capability parity with tangram-host: per-app `allow_hosts` enforced in
+    the Worker's `http-fetch` (denial names the grant), env grants from Worker
+    vars/secrets (nutrition's CalorieNinjas key; clean offline fallback
+    without it).
+  - [x] Miniflare e2e (`scripts/e2e-cloudflare-apps.sh`, CI job
+    `e2e-cloudflare-apps`; the Phase-4 sync e2e kept green): UI/healthz,
+    dispatch write-through + error envelope, SSE state events, MCP
+    initialize/tools-list/tools-call against `/notes/mcp`, allowlist denial,
+    and the flagship — a native replica syncing bidirectionally with the
+    miniflare-HOSTED app (9–86 ms propagation, incl. a DO-side action
+    reaching the replica).
 - **Phase 8 — marketplace**: a Tangram app cataloging installable apps with
   REQUIRED capability manifests displayed alongside the mechanical import
   audit ("what can this app actually do"); install via registry with

@@ -1,10 +1,25 @@
+# The name predates Phase 7 (the worker began as a sync relay); it is kept
+# so existing deployments keep their Durable Objects (and their documents).
 name = "tangram-relay"
 main = "src/index.ts"
 compatibility_date = "2026-05-01"
 
+# Bundling rules: app UIs ship as text; core wasm modules (automerge's build
+# and the jco-transpiled app components) ship pre-compiled — workerd forbids
+# runtime WebAssembly.compile, so everything arrives as WebAssembly.Module.
+rules = [
+  { type = "Text", globs = ["**/*.html"], fallthrough = true },
+  { type = "CompiledWasm", globs = ["**/*.wasm"], fallthrough = true },
+]
+
 [vars]
-# Apps this relay serves: one Durable Object (one automerge document) each.
+# Apps this Worker serves: one Durable Object (one automerge document) each.
+# Names with a bundled component (src/components.ts) get the full app
+# surface; others degrade to the plain sync relay.
 APPS = "notes,nutrition"
+# Nutrition's strategy config is NOT set here: provide CALORIENINJAS_API_KEY
+# with `wrangler secret put CALORIENINJAS_API_KEY` (or --var under `wrangler
+# dev`); unset, nutrition falls back to offline/manual logging cleanly.
 
 [[durable_objects.bindings]]
 name = "TANGRAM_DOC"
