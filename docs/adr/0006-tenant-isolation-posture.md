@@ -51,7 +51,7 @@ key-leak concern at every tier:
 | Trust tier | Isolation required |
 |---|---|
 | **First-party apps (today)** | In-process WASM is sufficient. Memory isolation + closed world + egress injection. No hardware separation needed. |
-| **Semi-trusted tenants** | In-process WASM **only if** ADR-0005 holds for all secrets, **plus** disable SMT co-scheduling of distrusting tenants and set Wasmtime resource limits (fuel/memory — not yet configured; tracked as future work). |
+| **Semi-trusted tenants** | In-process WASM **only if** ADR-0005 holds for all secrets, **plus** disable SMT co-scheduling of distrusting tenants and set Wasmtime resource limits (fuel/memory — **not yet configured; this is a known, tracked backlog item**: set per-component fuel/memory limits in `tangram-host`'s Wasmtime engine config as a cheap robustness win). |
 | **Untrusted third-party (marketplace SaaS)** | In-process WASM is **insufficient**. Require process-per-tenant with no cross-tenant core co-residency, SMT off, LLC partitioning (CAT), ADR-0005 mandatory; separate physical cores/machines for the strongest guarantee. |
 
 Corollary: **gVisor is not on this ladder** for the side-channel threat — it
@@ -69,5 +69,10 @@ reducer (Track G in RUNTIME_PLAN), not as a co-residency side-channel defense.
 - Before opening the marketplace to untrusted third-party apps (the Phase 8
   TODO), the untrusted-tier requirements above are mandatory and must be
   designed in — process-per-tenant + core/SMT/CAT controls — not retrofitted.
-- Open follow-up (not yet ticketed): set Wasmtime fuel/memory limits per
-  component (a cheap robustness win independent of tier).
+- **Known, tracked follow-up** (backlog item, not yet implemented): set Wasmtime
+  fuel/memory limits per component in `tangram-host`'s engine configuration
+  (`wasmtime::Config` fuel + `StoreLimits` / `ResourceLimiter`). This is a
+  cheap robustness win independent of isolation tier — it prevents a runaway
+  component from consuming unbounded CPU/memory and is explicitly pre-requisite
+  for the semi-trusted tier. Work is deferred; this ADR records the gap so it
+  is not lost between health passes.

@@ -141,8 +141,10 @@ relay surface.
 - Per-session automerge sync states stay in DO memory (unchanged from the
   relay), and the document remains one storage value (2 MiB bound, noted in
   the relay README).
-- Single-user scope: no tenancy, no auth on actions/MCP (Phase 5/6 add
-  them); the README carries the same "don't host secrets" caveat as the
-  relay.
+- Single-user scope at time of writing: no tenancy, no auth on actions/MCP.
+  **Both are now delivered**: Phase 5 (multi-tenancy, `/t/<tenant>/` routing,
+  bearer-gated tenant apps) and Phase 6 (CF identity — OAuth accounts, PATs,
+  per-tenant namespaces) landed 2026-06-11. The "don't host secrets" caveat in
+  the relay README remains valid for single-user deployments without auth.
 - wrangler stays pinned `~4.86` (Node 20 constraint); jco pinned exactly
   (`1.22.0`) since its output is part of the deployable artifact.

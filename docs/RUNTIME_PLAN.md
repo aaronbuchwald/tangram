@@ -348,6 +348,12 @@ bootstrap + the registry's own entry — D2's import/export role).
   (k8s NetworkPolicy is cleaner) — both inherited only if/when Track G runs
   third-party apps; WASM grants make egress allowlists first-class on the
   spine.
+- **Duplicate transitive dep versions** (noted 2026-06-11, checked and not
+  actionable): `cargo tree --duplicates` shows multiple versions of several
+  crates (notably in the wasmtime ecosystem — e.g. `wit-parser`, `wasm-encoder`,
+  `id-arena`). All duplicates are upstream version disagreements within the
+  wasmtime crate graph; none are under our direct control. No action needed
+  until an upstream wasmtime release resolves them.
 
 ## Beyond Phase 4 — product backlog (added 2026-06-11)
 
