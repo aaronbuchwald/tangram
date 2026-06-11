@@ -2535,6 +2535,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tangram",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "toml 0.8.23",
@@ -2584,6 +2585,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tangram-registry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "tangram",
+ "tokio",
 ]
 
 [[package]]

@@ -21,6 +21,9 @@ symlink to `.agents/skills`.
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in
   `apps/nutrition/src/strategy/` (see README "Nutrition strategies")
+- `apps/registry` — the fleet's source of truth (RUNTIME_PLAN Phase 3): a
+  Tangram app whose replicated spec list the host merges over `apps.toml`;
+  bearer auth via `TANGRAM_AUTH_TOKEN` (README "The registry app")
 - `apps/shell` — multi-app host serving every app under one port, prefixed
 - `cloud/cloudflare` — Durable-Object sync relay (TypeScript Worker); speaks
   the same sync interface as the SDK, interchangeable as a remote

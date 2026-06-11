@@ -172,8 +172,8 @@ file, socket, or non-granted host at all.
 
 ```sh
 rustup target add wasm32-wasip2                                       # once
-cargo build -p tangram-notes -p tangram-nutrition --lib \
-  --target wasm32-wasip2 --release                                    # → target/wasm32-wasip2/release/{notes,nutrition}.wasm
+cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
+  --lib --target wasm32-wasip2 --release                              # → target/wasm32-wasip2/release/{notes,nutrition,registry}.wasm
 cargo run -p tangram-host --release -- apps.toml
 ```
 
@@ -205,6 +205,46 @@ the Cloudflare relay; genesis bytes are identical by construction), and
 grants no `allow_hosts` simply cannot reach the network: nutrition's
 description-based `log_meal` then fails with an error saying which host to
 grant in `apps.toml`.
+
+### The registry app: install apps live (Phase 3)
+
+`apps.toml` is only the BOOTSTRAP half of the desired state. An app flagged
+`registry = true` (the `apps/registry` app — itself an ordinary Tangram app)
+carries a replicated list of app specs mirroring the `apps.toml` schema; the
+host subscribes to its document and merges that list over the file, registry
+entries winning on name collision (except a registry app's own entry, which
+stays file-controlled). Installing is just an action — or the equivalent MCP
+tool call, or the fleet UI at `/registry/`:
+
+```sh
+curl -X POST http://127.0.0.1:8080/registry/api/actions/install_app \
+  -H "Authorization: Bearer $TANGRAM_AUTH_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"nutrition",
+       "component":"target/wasm32-wasip2/release/nutrition.wasm",
+       "ui":"apps/nutrition/ui",
+       "allow_hosts":["api.calorieninjas.com"],
+       "env":[{"key":"CALORIENINJAS_API_KEY","value":"${CALORIENINJAS_API_KEY}"}]}'
+```
+
+The app is serving at `/nutrition/` in well under a second; `remove_app`
+drops its routes, `set_enabled` parks it, and because the registry's list
+lives in its replicated automerge document, registry-installed apps come
+back after a host restart (and converge onto every replica of the registry
+doc). Live per-app status — running/healthy/error, file- vs
+registry-sourced — is a host-level observation, not replicated state:
+`GET /api/fleet`.
+
+### Auth: bearer token on mutating routes
+
+Set `TANGRAM_AUTH_TOKEN` (env or `.env`). Registry apps — and any app with
+`require_auth = true` in `apps.toml` — then require
+`Authorization: Bearer <token>` on every `POST /api/actions/*` and on MCP
+`tools/call` of MUTATING tools (anything else answers 401). Read surfaces
+(UI, state, SSE, sync, MCP initialize/tools/list, non-mutating tools) stay
+open. Without a token the host warns at startup and refuses to run a
+registry app on a non-loopback `BIND_ADDR` — never expose an
+unauthenticated registry.
 
 ## Getting started: a persistent remote + a local replica
 

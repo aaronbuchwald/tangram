@@ -171,6 +171,13 @@ impl AppRuntime {
             .map_err(|e| DispatchError::Internal(format!("internal error: bad result JSON: {e}")))
     }
 
+    /// Liveness probe for the fleet status: the instance is healthy if it
+    /// still renders state for the current document.
+    pub async fn healthy(&self) -> bool {
+        let doc_bytes = self.doc.save();
+        self.component.state_json(&doc_bytes).await.is_ok()
+    }
+
     /// The current state as JSON, rendered by the component.
     pub async fn state_json(&self) -> Value {
         let doc_bytes = self.doc.save();
