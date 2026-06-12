@@ -30,6 +30,7 @@ mod egress;
 mod fetch;
 mod gateway;
 mod mcp;
+mod policy;
 mod registry;
 mod routes;
 mod runtime;
