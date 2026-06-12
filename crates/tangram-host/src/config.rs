@@ -1485,6 +1485,108 @@ mod tests {
             assert!(format!("{err:#}").contains("**"), "{err:#}");
         }
 
+        // ── EC4: the JSON-RPC-method body rung (§9.1) end-to-end. The test
+        //    module name carries `jsonrpc_method_match` so the build plan's
+        //    filter `cargo test -p tangram-host jsonrpc_method_match` selects it.
+        mod jsonrpc_method_match {
+            use super::*;
+            use crate::egress::CanonicalRequest;
+
+            fn one_call(toml_body: &str) -> crate::egress::CallSpec {
+                let config = HostConfig::parse(&format!(
+                    r#"
+                    [apps.mcpproxy]
+                    component = "m.wasm"
+                    ui = "ui"
+                    allow_hosts = ["api.vendor.com"]
+                    enforcement = "enforce"
+                    [[apps.mcpproxy.calls]]
+                    method = "POST"
+                    host   = "api.vendor.com"
+                    path   = "/rpc"
+                    {toml_body}
+                    "#
+                ))
+                .unwrap();
+                let calls = config.apps["mcpproxy"].resolved_calls();
+                assert_eq!(calls.len(), 1);
+                calls.into_iter().next().unwrap()
+            }
+
+            fn rpc_req() -> CanonicalRequest {
+                let url = reqwest::Url::parse("https://api.vendor.com/rpc").unwrap();
+                CanonicalRequest::from_request("POST", &url, ["content-type"]).unwrap()
+            }
+
+            #[test]
+            fn json_method_membership_allows_only_declared_methods() {
+                let call = one_call(r#"body = { json_method = ["tools/list", "tools/call"] }"#);
+                let req = rpc_req();
+                // Declared methods match.
+                assert!(call.matches(&req, br#"{"method":"tools/list","id":1}"#));
+                assert!(call.matches(&req, br#"{"method":"tools/call","params":{}}"#));
+                // An undeclared JSON-RPC method does NOT match (→ denied).
+                assert!(!call.matches(&req, br#"{"method":"resources/read"}"#));
+                assert!(!call.matches(&req, br#"{"method":"tools/delete"}"#));
+            }
+
+            #[test]
+            fn body_is_parsed_only_when_a_matcher_is_declared() {
+                // No body matcher: the call matches regardless of body content
+                // (the body is NOT parsed). Even invalid JSON is fine.
+                let call = one_call("");
+                let req = rpc_req();
+                assert!(call.matches(&req, b"this is not json at all"));
+                assert!(call.matches(&req, br#"{"method":"anything"}"#));
+            }
+
+            #[test]
+            fn adversarial_bodies_are_denied_not_panicked() {
+                let call = one_call(r#"body = { json_method = ["tools/list"] }"#);
+                let req = rpc_req();
+                // non-JSON body → no match (deny), never a parse panic.
+                assert!(!call.matches(&req, b"\xff\xfe not json"));
+                // missing /method pointer → no match.
+                assert!(!call.matches(&req, br#"{"other":"x"}"#));
+                // /method present but wrong type (not a string) → no match.
+                assert!(!call.matches(&req, br#"{"method":123}"#));
+            }
+
+            #[test]
+            fn oversized_body_is_rejected_before_parse() {
+                // max_body_bytes caps the body the matcher will parse: a body
+                // over the cap is rejected (no match) BEFORE any JSON parse,
+                // even though it IS valid JSON with the declared method.
+                let call = one_call(
+                    r#"max_body_bytes = 16
+                       body = { json_method = ["tools/list"] }"#,
+                );
+                let req = rpc_req();
+                let small = br#"{"method":"tools/list"}"#; // 23 bytes > 16
+                assert!(
+                    !call.matches(&req, small),
+                    "a body over max_body_bytes must be rejected before parse"
+                );
+                // A body within the cap with the declared method matches.
+                let tiny = one_call(
+                    r#"max_body_bytes = 64
+                       body = { json_method = ["tools/list"] }"#,
+                );
+                assert!(tiny.matches(&req, br#"{"method":"tools/list"}"#));
+            }
+
+            #[test]
+            fn explicit_pointer_overrides_the_default_method_pointer() {
+                // The default pointer is /method; an explicit pointer selects a
+                // different field (still pointer + literal-set only — no
+                // operators, no value-matching on arbitrary fields).
+                let call = one_call(r#"body = { json_method = ["v2"], pointer = "/jsonrpc" }"#);
+                let req = rpc_req();
+                assert!(call.matches(&req, br#"{"jsonrpc":"v2","method":"x"}"#));
+                assert!(!call.matches(&req, br#"{"jsonrpc":"v1","method":"x"}"#));
+            }
+        }
+
         #[test]
         fn tenant_ceiling_drops_out_of_ceiling_calls() {
             use crate::registry::Source;
