@@ -2556,6 +2556,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-guided-learning"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tangram",
+ "tangram-core",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-host"
 version = "0.1.0"
 dependencies = [
