@@ -2542,6 +2542,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-automation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tangram-egress",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "tangram-core"
 version = "0.1.0"
 dependencies = [
@@ -2556,6 +2574,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-egress"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+]
+
+[[package]]
 name = "tangram-host"
 version = "0.1.0"
 dependencies = [
@@ -2567,7 +2592,6 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "notify",
- "percent-encoding",
  "reqwest",
  "rmcp",
  "secrecy",
@@ -2575,6 +2599,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tangram",
+ "tangram-egress",
  "tempfile",
  "tokio",
  "tokio-stream",

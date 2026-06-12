@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 tangram.workspace = true
+tangram-egress.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -14,7 +15,6 @@ base64.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true
 notify.workspace = true
-percent-encoding.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true
 secrecy.workspace = true

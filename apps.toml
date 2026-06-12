@@ -24,6 +24,21 @@ enabled = true
 # binary = "/usr/local/bin/agentgateway"  # default: `agentgateway` on $PATH
 # port = 19200                            # internal port; default: auto
 
+# Browser task automation (host-side; ADR-0010, docs/design/task-automation-
+# browser.md). When enabled, tangram-host supervises a browser-driver child
+# (like [gateway]) OUTSIDE the WASM sandbox and runs gated, credential-
+# brokering automations apps REQUEST (never drive). Default-off; missing
+# driver → warn and disable. The domain ceiling is default-DENY (empty ⇒ no
+# navigation): list the absolute maximum any automation may touch on this
+# host. Credentials come from the op:// resolver (OP_SERVICE_ACCOUNT_TOKEN in
+# .env, scoped to a single 1Password item). Read at startup; restart to change.
+# [automation]
+# enabled = true
+# driver = "/usr/local/bin/playwright"   # default: `playwright` on $PATH
+# headless = true                         # false = headed (attended record)
+# run_timeout_secs = 300
+# browser_domains_ceiling = ["www.amazon.com", "fls-na.amazon.com"]
+
 [apps.registry]
 component = "target/wasm32-wasip2/release/registry.wasm"
 ui = "apps/registry/ui"

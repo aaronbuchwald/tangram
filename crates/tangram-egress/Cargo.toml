@@ -1,0 +1,14 @@
+# The single egress canonicalization seam (the §2 SOCKS5 parser-differential
+# lesson): host + path canonicalization shared by EVERY egress fence in the
+# fleet — the host `http_fetch` enforcer (`tangram-host/src/egress.rs`), the
+# manifest verifier's call-grain arm, and the browser egress gate
+# (`tangram-automation/src/egress.rs`). One canonicalizer, so no two fences can
+# disagree on what a host/path means. Leaf crate: pure, wasm-clean, deps only
+# `percent-encoding`. See docs/design/fine-grained-egress.md and ADR-0008.
+[package]
+name = "tangram-egress"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+percent-encoding.workspace = true

@@ -3,6 +3,14 @@
 .env.*
 !.env.example
 
+# Persisted browser-automation sessions are AUTH BEARERS (cookies/storageState
+# + persistent profiles). They live OUTSIDE the repo by default
+# (~/.tangram-automation/profiles/<site>/); this is a belt-and-suspenders block
+# in case one is ever rooted under the tree. See crates/tangram-automation/src/session.rs.
+.tangram-automation/
+**/storage-state.json
+**/user-data/
+
 # Logs
 *.log
 logs/

@@ -33,6 +33,16 @@ symlink to `.agents/skills`.
   Opt-in escape hatch (NOT the default): a bounded, auditable egress POLICY that
   narrows the declarative grant (`src/policy.rs`, `[apps.<app>.policy]`; reuses
   the egress seam, latency-budgeted, fails closed; ADR-0009, fine-grained-egress §9.2)
+- `crates/tangram-automation` — host-side browser + credential automation
+  substrate (native-only, NOT wasm-clean; ADR-0010,
+  `docs/design/task-automation-browser.md`): supervised browser-driver runner
+  (`runner.rs`, reuses the `gateway.rs` Backoff/shutdown pattern), the browser
+  egress gate (`egress.rs`, which consumes the `tangram-host` `egress.rs`
+  canonicalization seam — one canonicalizer for the whole host), the `op://`
+  credential broker (`broker.rs`; resolver in `tangram-host/src/secrets.rs`),
+  the record→replay→validated-LLM-fallback engine (`script.rs`), and the
+  request-not-grant `AutomationRequest` + operator-policy intersection
+  (`request.rs`). Wired via `[automation]` in apps.toml
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in

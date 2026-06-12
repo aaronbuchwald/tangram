@@ -34,7 +34,13 @@
 
 use std::collections::BTreeSet;
 
-use percent_encoding::percent_decode_str;
+// THE canonicalization seam lives in the `tangram-egress` leaf crate so every
+// fence in the fleet — this host enforcer, the manifest verifier's call-grain
+// arm, and the browser egress gate (`tangram-automation`) — shares ONE
+// canonicalizer (the §2 SOCKS5 parser-differential lesson). Re-exported here so
+// existing call sites (`egress::canonical_host`, `egress::canonical_path`) and
+// downstream `crate::egress::` references are unchanged.
+pub use tangram_egress::{canonical_host, canonical_path};
 
 use crate::config::{InjectKind, InjectRule};
 
@@ -102,49 +108,6 @@ impl CanonicalRequest {
             query_names,
             header_names,
         })
-    }
-}
-
-/// Canonicalize a host: lowercase, strip a single trailing dot (the
-/// fully-qualified `good.com.` form), and REJECT a host that is empty or
-/// carries an embedded null byte (`attacker.com\0.good.com` — the SOCKS5
-/// parser-differential class). The reject is deliberate: a host the
-/// canonicalizer cannot make unambiguous must never reach a suffix/segment
-/// comparison.
-pub fn canonical_host(host: &str) -> Result<String, String> {
-    if host.contains('\0') {
-        return Err(format!(
-            "outbound host {host:?} contains a null byte — refused (ambiguous host, \
-             the parser-differential class)"
-        ));
-    }
-    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if host.is_empty() {
-        return Err("outbound request has an empty host".to_string());
-    }
-    Ok(host)
-}
-
-/// Canonicalize a path: percent-decode, normalize `.`/`..`/empty segments,
-/// re-join with a single leading `/`, and strip a trailing slash (except the
-/// root). `..` can never escape above `/` (extra `..` are dropped at the
-/// root). This is purely lexical — it does not consult the filesystem.
-pub fn canonical_path(raw: &str) -> String {
-    let decoded = percent_decode_str(raw).decode_utf8_lossy().into_owned();
-    let mut out: Vec<&str> = Vec::new();
-    for seg in decoded.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    if out.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", out.join("/"))
     }
 }
 
