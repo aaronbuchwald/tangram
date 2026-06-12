@@ -1,16 +1,21 @@
 //! Gmail source (Route A: a Gmail MCP server).
 //!
-//! The offline core provides the fixture inputs; MB2 adds the bare JSON-RPC
-//! request *builder* and the live tier (a later PR) wires the actual send
-//! through the host's credential-injecting `http-fetch`.
+//! Provides the fixture inputs (offline) and the bare JSON-RPC `tools/call`
+//! request builder for the read-only `list_messages` tool. The live tier (a
+//! later PR) wires the actual send through the host's credential-injecting,
+//! method-gated `http-fetch`.
 
 use serde::Deserialize;
+use serde_json::json;
 
 use super::{BriefInput, Source};
 use crate::SourceConfig;
 
 /// The bundled fixture mailbox (checked-in `fixtures/gmail.json`).
 const FIXTURE: &str = include_str!("../../fixtures/gmail.json");
+
+/// The read-only MCP tool this source calls live.
+pub const TOOL: &str = "list_messages";
 
 #[derive(Deserialize)]
 struct FixtureFile {
@@ -49,6 +54,19 @@ impl Source for Gmail {
             })
             .collect()
     }
+
+    fn live_request(&self, cfg: &SourceConfig, mcp_url: &str) -> tangram::http::Request {
+        super::jsonrpc_tools_call(
+            mcp_url,
+            TOOL,
+            json!({
+                "window_hours_back": cfg.window_hours_back,
+                "window_hours_fwd": cfg.window_hours_fwd,
+                "max_items": cfg.max_items,
+                "query": cfg.selector,
+            }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -73,5 +91,24 @@ mod tests {
         assert!(inputs.iter().all(|i| i.kind == "gmail"));
         let invoice = inputs.iter().find(|i| i.title.contains("Invoice")).unwrap();
         assert!(invoice.detail.contains("billing@acme-cloud.example"));
+    }
+
+    #[test]
+    fn live_request_is_a_bare_readonly_jsonrpc_tools_call() {
+        let req = Gmail.live_request(&cfg(), "https://gmail-mcp.internal/mcp");
+        assert_eq!(req.method, "POST");
+        assert!(
+            !req.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")
+                    || k.eq_ignore_ascii_case("x-api-key"))
+        );
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(body["method"], "tools/call");
+        assert_eq!(body["params"]["name"], TOOL);
+        assert_eq!(
+            body["params"]["arguments"]["query"],
+            "in:inbox newer_than:1d"
+        );
     }
 }

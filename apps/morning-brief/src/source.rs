@@ -9,13 +9,14 @@
 //! ## Live vs fixture
 //!
 //! Each source has two ways to produce inputs:
-//! - **fixture** ([`Sources::fixtures`]) — bundled, checked-in canned inputs
-//!   (see [`fixtures`]). Makes NO network call; this is the offline core's
-//!   path and CI's flagship (zero egress).
-//! - **live** ([`Source::fetch`]) — issues a bare `http-fetch` the host gates
-//!   and credentials (Route A: one JSON-RPC `POST` to a Google MCP server).
-//!   The request *builders* live here so they are unit-testable without
-//!   sending; the live wiring (real egress + grants) is the separate later PR.
+//! - **fixture** ([`Sources::fixtures`]) — bundled, checked-in canned inputs.
+//!   Makes NO network call; this is the offline core's path and CI's flagship
+//!   (zero egress).
+//! - **live** ([`Sources::live_request`] / [`Source::live_request`]) — builds
+//!   a bare `http-fetch` the host gates and credentials (Route A: one JSON-RPC
+//!   `POST` to a Google MCP server). The request *builders* live here so they
+//!   are unit-testable without sending; the live wiring (real egress + grants)
+//!   is the separate later PR.
 
 use crate::SourceConfig;
 
@@ -38,14 +39,41 @@ pub struct BriefInput {
 
 /// A pluggable way to fetch and normalize a kind of input.
 ///
-/// The offline core pins the **fixture** path here; MB2 adds the live request
-/// *builder* (`live_request`) so the exact JSON-RPC body the grants pin is
-/// unit-testable, and the live tier (a later PR) wires the actual send through
-/// the host's credential-injecting `http-fetch`.
+/// The offline core pins the **fixture** path ([`Source::fixtures`]) and the
+/// live request *builder* ([`Source::live_request`]) — the exact JSON-RPC body
+/// the egress grant will pin, constructed (not sent) so it is unit-testable
+/// with zero network. The live tier (a later PR) is what actually sends that
+/// request through the host's credential-injecting, method-gated `http-fetch`.
 pub trait Source {
     /// Bundled fixture inputs for this source, scoped by `cfg` (offline; no
     /// network).
     fn fixtures(&self, cfg: &SourceConfig) -> Vec<BriefInput>;
+
+    /// Build the BARE outbound request this source would issue live (Route A:
+    /// a JSON-RPC `tools/call` POST to the MCP endpoint). The request carries
+    /// NO credential — the host injects the MCP bearer and enforces the
+    /// JSON-RPC method rung at the egress boundary (ADR-0005 + PR #1). The
+    /// `tool` it calls is read-only by construction. Returned for inspection;
+    /// the live tier wires the actual `http::fetch`.
+    fn live_request(&self, cfg: &SourceConfig, mcp_url: &str) -> tangram::http::Request;
+}
+
+/// Build the bare JSON-RPC `tools/call` request body shared by every Route-A
+/// source: `{ "jsonrpc", "id", "method": "tools/call", "params": { name,
+/// arguments } }`. Centralized so the wire shape (the thing the EC4 method
+/// rung pins) is defined once.
+fn jsonrpc_tools_call(
+    mcp_url: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+) -> tangram::http::Request {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": tool, "arguments": arguments },
+    });
+    tangram::http::Request::post(mcp_url).json(&body)
 }
 
 /// Resolve a `SourceConfig.kind` to its [`Source`] implementation.
@@ -88,6 +116,19 @@ impl Sources {
                 .then_with(|| a.title.cmp(&b.title))
         });
         inputs
+    }
+
+    /// Build the bare outbound request a given source would issue live (the
+    /// JSON-RPC `tools/call` the egress grant pins), without sending it. The
+    /// offline core exposes this so the live tier (a later PR) can route it
+    /// through the host's credential-injecting `http-fetch`, and so the wire
+    /// shape is unit-testable now. Returns `None` for an unknown kind.
+    pub fn live_request(
+        kind: &str,
+        cfg: &SourceConfig,
+        mcp_url: &str,
+    ) -> Option<tangram::http::Request> {
+        source_for(kind).map(|s| s.live_request(cfg, mcp_url))
     }
 }
 
@@ -141,5 +182,18 @@ mod tests {
     fn fixtures_are_deterministic() {
         let configs = [cfg("calendar", true), cfg("gmail", true)];
         assert_eq!(Sources::fixtures(&configs), Sources::fixtures(&configs));
+    }
+
+    #[test]
+    fn live_request_dispatches_by_kind_and_rejects_unknown() {
+        let url = "https://mcp.internal/mcp";
+        for kind in ["calendar", "gmail"] {
+            let req = Sources::live_request(kind, &cfg(kind, true), url).expect("known kind");
+            assert_eq!(req.method, "POST");
+            assert_eq!(req.url, url);
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(body["method"], "tools/call", "kind {kind} uses tools/call");
+        }
+        assert!(Sources::live_request("slack", &cfg("slack", true), url).is_none());
     }
 }
