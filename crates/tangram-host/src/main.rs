@@ -36,6 +36,7 @@ mod routes;
 mod runtime;
 mod secrets;
 mod tenant;
+mod verify;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::IntoFuture;
@@ -151,6 +152,7 @@ fn tenant_bootstrap(
         calls: Vec::new(),
         enforcement: None,
         policy: None,
+        declared: None,
         remote: None,
         remote_token: None,
         registry: true,

@@ -153,6 +153,7 @@
       color: var(--dim);
     }
     .badge.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 35%, var(--line)); }
+    .badge.warn { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, var(--line)); }
     .cardtop .spacer { flex: 1; }
     .cardtop .ctl {
       background: none;
@@ -521,6 +522,37 @@
           installed.textContent = "installed";
           top.appendChild(installed);
         }
+        // The TRUST badge is sourced from the LOCAL HOST'S mechanical verdict
+        // (`/api/fleet` `verified`), NOT from this listing's self-asserted
+        // import_audit / capability manifest. An installed app shows green
+        // "verified" only when the host's own audit of the RUNNING bytes
+        // passed; an installed-but-flagged app shows "unverified" with the
+        // host's reasons; a not-yet-installed listing shows "verify on install"
+        // (the host has produced no verdict for bytes it has not run). This
+        // closes the "displayed, not verified" gap (plan §2.5, CP7).
+        const trust = document.createElement("span");
+        if (live && typeof live.verified === "boolean") {
+          if (live.verified) {
+            trust.className = "badge ok";
+            trust.textContent = "verified";
+          } else {
+            trust.className = "badge warn";
+            trust.textContent = "unverified";
+            const reasons = live.verify_reasons;
+            if (Array.isArray(reasons) && reasons.length) {
+              trust.title = reasons.join("\n");
+            } else if (live.error) {
+              trust.title = live.error;
+            }
+          }
+        } else {
+          trust.className = "badge";
+          trust.textContent = "verify on install";
+          trust.title =
+            "the host verifies an app's capabilities against its real imports " +
+            "when it runs it — install to get a verdict";
+        }
+        top.appendChild(trust);
         const spacer = document.createElement("span");
         spacer.className = "spacer";
         const remove = document.createElement("button");

@@ -242,6 +242,11 @@ pub fn parse_state(
                 // §9.2/§6 posture keeps operator-authoritative. A policy stays in
                 // the operator's apps.toml.
                 policy: None,
+                // The registry document carries no separate declared manifest
+                // yet; an installed app's declaration is derived from its
+                // granted fields (an honest install verifies trivially). The
+                // marketplace-manifest passthrough is future wiring (plan §2.4).
+                declared: None,
                 remote,
                 remote_token,
                 registry: false,
@@ -346,6 +351,7 @@ mod tests {
             calls: Vec::new(),
             enforcement: None,
             policy: None,
+            declared: None,
             remote: None,
             remote_token: None,
             registry,

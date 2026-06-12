@@ -219,6 +219,7 @@ mod tests {
             calls: Vec::new(),
             enforcement: None,
             policy: None,
+            declared: None,
             remote: None,
             remote_token: None,
             registry: false,

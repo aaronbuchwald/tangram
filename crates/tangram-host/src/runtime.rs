@@ -489,6 +489,11 @@ async fn send_and_strip(
 /// synchronous and quick, so the host simply serializes them per app.
 pub struct ComponentHandle {
     inner: tokio::sync::Mutex<Inner>,
+    /// The component's audited imports (plan §2.1), computed once from the
+    /// compiled `Component` at instantiation — the ground-truth link of the
+    /// verification chain. Read by `AppRuntime::build` after a successful
+    /// instantiation (it can only ADD a verdict, never perturb instantiation).
+    audited: crate::verify::AuditedImports,
 }
 
 struct Inner {
@@ -519,6 +524,11 @@ impl ComponentHandle {
         secrets: Arc<SecretRegistry>,
     ) -> anyhow::Result<Self> {
         let component = Component::from_file(engine, path)?;
+        // Audit the component's function-level imports BEFORE instantiation —
+        // the ground truth of the verification chain (plan §2.1). Reading the
+        // type graph is free here (the component is already compiled) and
+        // never instantiates anything.
+        let audited = crate::verify::AuditedImports::from_component(engine, &component);
         let mut linker = Linker::<HostState>::new(engine);
         // wasip2 std plumbing with an EMPTY context: no preopens, no
         // sockets — only env/clocks/random/stdio, which carry data, not
@@ -546,7 +556,14 @@ impl ComponentHandle {
         let bindings = App::instantiate_async(&mut store, &component, &linker).await?;
         Ok(Self {
             inner: tokio::sync::Mutex::new(Inner { store, bindings }),
+            audited,
         })
+    }
+
+    /// The component's audited imports (the chain's ground-truth link),
+    /// computed at instantiation (plan §2.1).
+    pub fn audited(&self) -> &crate::verify::AuditedImports {
+        &self.audited
     }
 
     pub async fn describe(&self) -> anyhow::Result<String> {

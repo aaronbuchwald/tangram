@@ -316,6 +316,21 @@ async fn aggregate_mcp(
 /// host — deliberately not part of the registry's replicated document.
 /// Tenant apps are NOT listed here (this route is unauthenticated); each
 /// tenant sees their own at `GET /t/<tenant>/api/fleet`.
+/// The `verified` / `verify_reasons` pair for a fleet entry, sourced from the
+/// host's own audit verdict on the RUNNING bytes (plan §2.5). A running app
+/// carries its `AppRuntime::verification`; a non-running app (hard-fail,
+/// disabled, policy-blocked) is reported `verified: false` with no reasons —
+/// the existing `error` field already carries any hard-fail discrepancy.
+fn verification_fields(entry: Option<&AppEntry>) -> (bool, serde_json::Value) {
+    match entry {
+        Some(entry) => {
+            let v = &entry.runtime.verification;
+            (v.is_verified(), json!(v.reasons()))
+        }
+        None => (false, serde_json::Value::Null),
+    }
+}
+
 async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_json::Value> {
     let statuses = host.fleet.read().await.clone();
     let apps = host.apps.read().await;
@@ -326,6 +341,11 @@ async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_j
             Some(entry) => entry.runtime.healthy().await,
             None => false,
         };
+        // `verified` is sourced from the HOST'S OWN audit of the running bytes
+        // (plan §2.5), not from any listing/manifest text: the verdict
+        // computed in `AppRuntime::build`. A hard-fail app never ran (its
+        // converge `error` carries the discrepancy) → not verified.
+        let (verified, verify_reasons) = verification_fields(entry);
         out.push(json!({
             "name": key.app,
             "source": status.source.as_str(),
@@ -334,6 +354,8 @@ async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_j
             "enabled": status.enabled,
             "running": entry.is_some(),
             "healthy": healthy,
+            "verified": verified,
+            "verify_reasons": verify_reasons,
             "error": status.error,
         }));
     }
@@ -530,6 +552,7 @@ async fn tenant_fleet(host: &Arc<Host>, tenant: &str) -> Response {
             Some(entry) => entry.runtime.healthy().await,
             None => false,
         };
+        let (verified, verify_reasons) = verification_fields(entry);
         out.push(json!({
             "name": key.app,
             "source": status.source.as_str(),
@@ -538,6 +561,8 @@ async fn tenant_fleet(host: &Arc<Host>, tenant: &str) -> Response {
             "running": entry.is_some(),
             "healthy": healthy,
             "allow_hosts": status.allow_hosts,
+            "verified": verified,
+            "verify_reasons": verify_reasons,
             "error": status.error,
         }));
     }
