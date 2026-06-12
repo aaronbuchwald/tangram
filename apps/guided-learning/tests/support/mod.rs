@@ -37,6 +37,15 @@ pub async fn act_err(ctx: &Ctx<GuidedLearning>, name: &str, args: serde_json::Va
     }
 }
 
+/// Serialize tests that mutate the process-global `GUIDED_LEARNING_LLM_URL`
+/// env var (set per test to point at that test's fixture server). Hold the
+/// guard for the test's duration. An async (tokio) mutex, so it can be held
+/// across the test's awaits without the `await_holding_lock` lint.
+pub async fn llm_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    LOCK.lock().await
+}
+
 // ── recorded-Anthropic fixture server ──────────────────────────────────────
 
 /// A canned Messages-API response wrapping a structured-output JSON string in
