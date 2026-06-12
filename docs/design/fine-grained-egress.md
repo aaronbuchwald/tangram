@@ -509,6 +509,123 @@ microarchitectural axis.
 
 ---
 
+## 9. v1 scope decisions (owner, 2026-06-12)
+
+Two decisions taken before dispatching the build, recorded so the checkpoints
+below are unambiguous:
+
+1. **Body matching is IN for v1, but ONLY the JSON-RPC-method rung — a
+   constrained declarative selector, never arbitrary body inspection.** The body
+   matcher is a fixed JSON-pointer selector (e.g. `/method`) plus
+   equality/membership against a literal set; nothing more. This covers the
+   high-value MCP/JSON-RPC case ("may call `tools/list` and `tools/call` but not
+   `resources/read`" on one POST endpoint) without building a query language and
+   without forcing a body parse on calls that don't declare a body matcher. The
+   selector grammar is closed (pointer + literal set); operators on body shape,
+   regex, and value-matching on arbitrary fields are explicitly out.
+   ```toml
+   [[apps.mcpproxy.calls]]
+   method = "POST"
+   host   = "api.vendor.com"
+   path   = "/rpc"
+   # JSON-RPC method rung: parse the body ONLY because this matcher is present;
+   # allow iff $.method ∈ the literal set. No other body inspection.
+   body   = { json_method = ["tools/list", "tools/call"] }
+   ```
+
+2. **A general policy engine is DEFERRED — and when built, it lands on a pushed
+   remote branch, reviewed, NOT merged.** The v1 contract stays declarative and
+   regex-free (the §3(b)/§8 parser-differential discipline). The imperative
+   policy-engine variant is NOT part of section 1. After section 1 finishes, it
+   gets its own branch, built to the same merge-ready quality bar as everything
+   else, **pushed to the remote** (unlike the manifest-verification branch, which
+   stays local), and left there for review rather than merged. It is the
+   deliberately-marked escape hatch (latency-budgeted, "this app uses custom
+   policy" surfaced), never the default grammar.
+
+## 10. Build plan — section 1 (the declarative engine), checkpointed
+
+Section 1 delivers the declarative call-level engine (decisions §9.1 included,
+§9.2 excluded). Same conventions as the manifest plan: each checkpoint is its
+own clearly-marked commit with its test; full gate green before commit
+(`cargo build --workspace`, `clippy -D warnings`, `fmt --check`,
+`cargo test -p tangram-host`, `cargo build -p tangram-core --target
+wasm32-wasip2`, plus the wasm32-wasip2 component builds the integration tests
+need). Built on a dedicated branch; **held for review, not merged** (egress
+enforcement on the converge/`http-fetch` hot path warrants the same careful
+human pass as manifest verification).
+
+- **EC1 — `CallSpec` grammar + the single canonicalization seam, pure-unit
+  tested.** The `CallSpec` type (§4.3) and `matches(canonical_request)`; the
+  canonicalization done **once** before any matching (method upper-cased; URL →
+  parsed `(host, path, query)`; host lowercased; path percent-decoded + dot-
+  segment normalized; header names lowercased). The make-or-break checkpoint
+  (the §2 SOCKS5 lesson): adversarial tests for mixed-case host, trailing-dot
+  host, `%2e`/`.`-encoded path, `..` segments, duplicate query keys, null-byte
+  host. No I/O, no wasm. *Run:* `cargo test -p tangram-host callspec`.
+
+- **EC2 — Config parse + `validate_calls` + the compat shim.**
+  `[[apps.<app>.calls]]` → `Vec<CallSpec>`; `validate_inject`→`validate_calls`
+  (each call's host ∈ `allow_hosts`; inject validated by existing
+  `InjectRule::kind()`; templates parsed once); the strictly-additive shim — a
+  host-keyed `[apps.X.inject]` / bare `allow_hosts` desugars to the
+  maximally-broad implicit `CallSpec { method=Any, path=Subtree }` (§4.2/§7).
+  Assert the live nutrition host-keyed inject parses to byte-identical effective
+  behavior, and the tenant `allow_hosts_ceiling` intersection drops out-of-ceiling
+  calls. *Run:* `cargo test -p tangram-host calls_config`.
+
+- **EC3 — Enforcement in `http_fetch` with the three modes.** Replace the
+  host-only match (`runtime.rs:104-111`) with: host fence (unchanged) → first-
+  matching declared call → inject on the matched call only → strip auth-bearing
+  response headers (§4.2 step 5). The `enforcement` toggle: `observe` (never
+  deny; log candidate), `warn` (allow undeclared, loud warning), `enforce` (deny
+  undeclared with a precise error naming the declared calls for that host).
+  Integration test through the real nutrition component: declared `GET
+  /v1/nutrition` is credentialed; an undeclared `POST .../accounts/x/import` is
+  denied + un-credentialed in `enforce`. *Run:* `cargo test -p tangram-host
+  egress_enforcement`.
+
+- **EC4 — The JSON-RPC-method body rung (§9.1).** The constrained body matcher:
+  fixed JSON-pointer + literal-set membership, body parsed **only** when a call
+  declares it (and only up to `max_body_bytes`). Test: `body = { json_method =
+  ["tools/list","tools/call"] }` on one POST `/rpc` allows `tools/list`, denies
+  `resources/read`; adversarial: non-JSON body, missing `/method`, oversized
+  body rejected before parse. *Run:* `cargo test -p tangram-host
+  jsonrpc_method_match`.
+
+- **EC5 — `describe()` declaration channel (request, not grant).** Extend the
+  component `describe()` with a declared-calls block (additive; `#[serde(default)]`
+  + autosurgeon-missing discipline; `tangram-core` stays wasip2-clean). The host
+  reads it at instantiation and **intersects** it with the operator spec — never
+  authority on its own (§6): a component declaring calls beyond its spec is
+  narrowed to the spec; declaring fewer narrows the spec. *Run:* `cargo test -p
+  tangram-host describe_calls`.
+
+- **EC6 — Observe-mode generator + authoring helper.** Observe mode logs each
+  bare `http-fetch` as a candidate canonical `CallSpec` (numeric/uuid segments →
+  `{id}`); a `tangram dev`-style pass prints a paste-ready `[[calls]]` block that
+  round-trips (re-parsing accepts exactly the observed calls). The `Call::get(host,
+  path).query_required([...])` helper (§5.2) that emits the `CallSpec` into
+  `describe()` *and* issues the fetch from one source. *Run:* `cargo test -p
+  tangram-host observe_generate`.
+
+- **EC7 — Migration defaults + ADR + docs.** Prod default modes (§7.2): `warn`
+  for legacy apps (no `calls`), `enforce` for apps declaring ≥1 call. Write the
+  ADR (egress call-level capabilities — the decision record paralleling ADR-0005),
+  update the RUNTIME_PLAN app-contract and README egress section, and the
+  CLAUDE.md index pointer. *Run:* gates + the scan.sh doc-drift section.
+
+**Shared canonicalization seam.** EC1's canonicalizer is the *same* seam the
+manifest verifier's call-grain arm (manifest-verification-plan CP6) consumes, so
+the egress enforcer and the verifier can never disagree on what a host/path means
+(the SOCKS5 parser-differential lesson). When section 1 lands, manifest CP6
+activates against this seam — that is the explicit cross-feature contract.
+
+**Estimate:** ~6–7 agent-sessions, mirroring the manifest plan's banding; EC1 and
+EC3 are the highest-complexity (canonicalization correctness; converge/`http-fetch`
+hot-path wiring without regressing ADR-0005's behavior-identical-by-default
+guarantee).
+
 ## Sources
 
 - Anthropic Engineering — *How we contain Claude across products* (deterministic
