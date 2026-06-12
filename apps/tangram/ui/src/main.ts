@@ -13,7 +13,6 @@ import {
   type VaultState,
 } from "./api";
 import { MdEditor } from "./editor";
-import { renderMarkdown } from "./markdown";
 import { authToken, registry, setAuthToken } from "./manage";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
@@ -32,7 +31,6 @@ const tabs = new TabStore();
 interface ActiveEditor {
   fileId: string;
   editor: MdEditor;
-  preview: HTMLElement;
   saveTimer?: number;
 }
 let activeEditor: ActiveEditor | null = null;
@@ -343,10 +341,12 @@ function stat(value: string, label: string): HTMLElement {
   return s;
 }
 
-// CodeMirror 6 source pane (markdown mode, Obsidian-style in-editor styling)
-// alongside the live rendered preview. Edits debounce-write to the model; the
-// preview re-renders live from the editor. The MdEditor is retained in
-// `activeEditor` so SSE state frames patch it echo-safely (see syncActiveNote).
+// A single Obsidian-style "Live Preview" CodeMirror 6 editor (issue #11): the
+// editable view *is* the rendered note — markdown syntax is concealed off the
+// active line and rendered inline (see editor.ts / livePreview.ts). There is no
+// separate preview pane. Edits debounce-write to the model; the MdEditor is
+// retained in `activeEditor` so SSE state frames patch it echo-safely (see
+// syncActiveNote).
 function renderNoteTab(fileId: string) {
   const file = filesById.get(fileId);
   if (!file) {
@@ -361,18 +361,13 @@ function renderNoteTab(fileId: string) {
   bar.appendChild(renameBtn);
   wrap.appendChild(bar);
 
-  const split = el("div", "note-split");
   const editorHost = el("div", "editor-host");
-  const preview = el("div", "preview markdown");
-  preview.innerHTML = renderMarkdown(file.body);
 
   const state: ActiveEditor = {
     fileId,
     editor: undefined as unknown as MdEditor,
-    preview,
   };
   const editor = new MdEditor(editorHost, file.body, (doc) => {
-    preview.innerHTML = renderMarkdown(doc);
     if (state.saveTimer) window.clearTimeout(state.saveTimer);
     state.saveTimer = window.setTimeout(() => {
       editor.markWritten(doc); // expect this body to echo back over SSE
@@ -381,9 +376,7 @@ function renderNoteTab(fileId: string) {
   });
   state.editor = editor;
 
-  split.appendChild(editorHost);
-  split.appendChild(preview);
-  wrap.appendChild(split);
+  wrap.appendChild(editorHost);
   contentEl.appendChild(wrap);
   activeEditor = state;
 }
@@ -391,13 +384,13 @@ function renderNoteTab(fileId: string) {
 // Apply a fresh vault snapshot to the live note editor, if any. Echo-safe:
 // MdEditor.syncRemote only adopts the remote body when it differs from both
 // the editor's current text and our last write (so a peer's edit lands but our
-// own in-progress typing is never clobbered). The preview follows.
+// own in-progress typing is never clobbered). The live-preview decorations
+// re-render automatically from the editor's own doc/selection changes.
 function syncActiveNote() {
   if (!activeEditor) return;
   const file = filesById.get(activeEditor.fileId);
   if (!file) return; // pruneNotes will close a vanished note's tab
   activeEditor.editor.syncRemote(file.body);
-  activeEditor.preview.innerHTML = renderMarkdown(activeEditor.editor.doc);
 }
 
 // ── vault operations (with light prompts; richer UX is a later phase) ────────

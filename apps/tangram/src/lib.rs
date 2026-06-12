@@ -17,10 +17,10 @@
 //! the shared genesis commit).
 //!
 //! Phase S1 (this slice) ships the model + actions and the shell UI (sidebar
-//! folder tree + live apps list + tabbed main window with markdown rendering
-//! and app-iframe embedding). See `ui/README.md` for the deferred follow-up
-//! phases (`CodeMirror` live-preview, marketplace upload, default-`/` route,
-//! `postMessage` coordination, etc.).
+//! folder tree + live apps list + tabbed main window with an Obsidian-style
+//! `CodeMirror` live-preview markdown editor and app-iframe embedding). See
+//! `ui/README.md` for the deferred follow-up phases (marketplace upload,
+//! default-`/` route, `postMessage` coordination, etc.).
 
 use tangram::prelude::*;
 
@@ -32,7 +32,7 @@ pub struct Vault {
 /// `Default` is the shared genesis commit, so it must be DETERMINISTIC and
 /// byte-identical across native and wasm builds (no random ids, no clock).
 /// We seed exactly one welcome note with a fixed id and zero timestamps —
-/// proving markdown rendering end to end on a fresh vault.
+/// proving the live-preview editor end to end on a fresh vault.
 impl Default for Vault {
     fn default() -> Self {
         Self {
@@ -59,7 +59,8 @@ pub struct MdFile {
     /// `/`-separated virtual path including the filename, e.g.
     /// `projects/roadmap.md`. Unique within the vault.
     path: String,
-    /// Raw markdown text. Rendered to HTML client-side (marked + `DOMPurify`).
+    /// Raw markdown text. Rendered inline by the client's Obsidian-style
+    /// `CodeMirror` live-preview editor (the editable view *is* the render).
     body: String,
     created_at_ms: i64,
     /// When the body was last edited. `None` on documents written by older
