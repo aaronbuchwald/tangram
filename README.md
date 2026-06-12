@@ -98,9 +98,22 @@ immediately. Kill A, keep using B offline, restart A — they reconverge.
 
 ### Run them all in one server
 
+Tangram has two ways to serve every app under one port — pick by what you
+need:
+
+- **`tangram-shell`** (this section): a plain Axum router that links the
+  example app crates directly and mounts each under a prefix. No WASM, no
+  config — `cargo run` and you have notes + nutrition with a card index at
+  `/`. Best for quick local dev of an app.
+- **`tangram-host`** (["Run apps as WASM components"](#run-apps-as-wasm-components-tangram-host)
+  below): the real sandboxed runtime. It runs each app as a `wasm32-wasip2`
+  component per `apps.toml`, and — when the `tangram` app is present — serves
+  the Obsidian-style shell at `/` (307 → `/tangram/`). Use it for the full
+  shell experience and anything close to production.
+
 The shell mounts every example app on one port, each under its own path
 prefix with its full surface intact (`/notes/`, `/notes/mcp`, `/notes/sync`,
-`/nutrition/`, …) and an index page at `/`:
+`/nutrition/`, …) and a card index at `/`:
 
 ```sh
 cargo run -p tangram-shell        # http://127.0.0.1:8080
@@ -175,12 +188,27 @@ protocol, MCP, persistence, and static UI files. The component's world
 the only thing that touches `$HOME/.<app-name>`, so an app cannot name a
 file, socket, or non-granted host at all.
 
+Unlike `tangram-shell` (the no-WASM Axum router above), the host is the real
+sandboxed runtime and the only way to get the full **shell experience**: with
+the `tangram` app present in `apps.toml`, `/` 307-redirects to `/tangram/` —
+the Obsidian-style shell with a sidebar (markdown vault + the live apps on
+this host) and a tabbed main window. That app is the one app with a build
+pipeline ([ADR-0007](docs/adr/0007-shell-build-pipeline-exception.md)): its UI is a
+Vite `dist/` the host serves, so the full path builds the wasm components,
+builds the shell UI, then runs the host:
+
 ```sh
 rustup target add wasm32-wasip2                                       # once
 cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
-  -p tangram-marketplace --lib --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace}.wasm
+  -p tangram-marketplace -p tangram-app-tangram --lib \
+  --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace,tangram_app}.wasm
+(cd apps/tangram/ui && npm ci && npm run build)                      # the shell UI → apps/tangram/ui/dist
 cargo run -p tangram-host --release -- apps.toml
+# open http://127.0.0.1:8080/ — 307 → /tangram/ (the Obsidian-style shell)
 ```
+
+(The committed `apps/tangram/ui/dist` is checked in CI against a fresh build,
+so a clean checkout already has it; rebuild only when you change the UI.)
 
 `apps.toml` is the desired state — the host watches it and converges live
 (add/remove/reload apps, including when a component file is rebuilt, without
