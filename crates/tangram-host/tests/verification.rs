@@ -344,3 +344,117 @@ hosts = ["api.calorieninjas.com"]
         assert_eq!(entry["running"], true, "{app} running");
     }
 }
+
+/// CP7 (optional) — the marketplace trust badge is sourced from the LOCAL
+/// HOST'S `/api/fleet` `verified` verdict, NOT from the listing's
+/// self-asserted `import_audit` / `CapabilityManifest`. This is the
+/// "displayed, not verified" gap (plan §2.5, CP7).
+///
+/// The load-bearing check is the served UI's badge wiring (it reads
+/// `live.verified` off the fleet, never derives trust from `listing`); the
+/// end-to-end leg confirms an installed app's fleet entry carries the
+/// host-produced `verified` boolean the badge consumes.
+#[tokio::test]
+async fn marketplace_badge_sourced_from_host_verdict() {
+    if !have_components(
+        &["registry", "marketplace", "notes"],
+        "marketplace_badge_sourced_from_host_verdict",
+    ) {
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+
+[apps.marketplace]
+component = "{marketplace}"
+ui = "{root}/apps/marketplace/ui"
+"#,
+            registry = component("registry").display(),
+            marketplace = component("marketplace").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    wait_for("marketplace healthy", Duration::from_secs(120), || async {
+        status_of(&client, &format!("{base}/marketplace/healthz")).await
+            == Some(reqwest::StatusCode::OK)
+    })
+    .await;
+
+    // ── the served UI sources the trust badge from the HOST fleet verdict ──
+    let ui_html = client
+        .get(format!("{base}/marketplace/"))
+        .send()
+        .await
+        .expect("marketplace ui")
+        .text()
+        .await
+        .expect("ui body");
+    assert!(
+        ui_html.contains("live.verified"),
+        "the trust badge must read /api/fleet's `verified` field"
+    );
+    assert!(
+        ui_html.contains("verify on install"),
+        "a not-yet-installed listing shows 'verify on install', not a green badge"
+    );
+    // The badge must NOT be derived from the listing's self-asserted audit.
+    // (The listing's import_audit/capabilities are still DISPLAYED for humans;
+    // what must not happen is the *trust verdict* coming from them.) Assert the
+    // verified badge text is only ever assigned in the `live.verified` arm.
+    let verified_arm = ui_html
+        .split("trust.textContent = \"verified\"")
+        .next()
+        .expect("ui has a verified badge arm");
+    assert!(
+        verified_arm.contains("live.verified"),
+        "the 'verified' badge is gated on the host verdict, not the listing"
+    );
+
+    // ── end to end: install notes; its fleet entry carries the host verdict ─
+    client
+        .post(format!("{base}/registry/api/actions/install_app"))
+        .json(&serde_json::json!({
+            "name": "notes",
+            "component": component("notes").display().to_string(),
+            "ui": root.join("apps/notes/ui").display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("install notes");
+    wait_for(
+        "notes verified in fleet",
+        Duration::from_secs(120),
+        || async {
+            match fleet_entry(&client, &base, "notes").await {
+                Some(entry) => entry["running"] == true && entry["verified"] == true,
+                None => false,
+            }
+        },
+    )
+    .await;
+    let notes = fleet_entry(&client, &base, "notes")
+        .await
+        .expect("notes in fleet");
+    assert_eq!(
+        notes["verified"], true,
+        "the badge's source — the host's own verdict on the running bytes — is true"
+    );
+}
