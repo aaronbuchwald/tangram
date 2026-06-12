@@ -207,6 +207,35 @@ NUTRITION_STRATEGY = "calorieninjas"                 # a non-secret selector
 "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
 ```
 
+**Call-level egress (ADR-0008, fine-grained-egress).** The host-keyed
+`allow_hosts`/`inject` above is the *coarse* grant — it credentials every path
+on the host. Go a grain finer by declaring the exact **calls** the app makes;
+the credential is then bound to the matched call, and an undeclared call on the
+allowlisted host is denied (and un-credentialed). A host-keyed grant is exactly
+the maximally-broad call, so the form above keeps working unchanged.
+
+```toml
+[apps.nutrition]
+allow_hosts = ["api.calorieninjas.com"]   # the coarse outer fence (cheap first gate)
+enforcement = "enforce"                    # observe | warn | enforce (see below)
+
+[[apps.nutrition.calls]]                   # the inner, authoritative gate
+method = "GET"
+host   = "api.calorieninjas.com"
+path   = "/v1/nutrition"                   # exact, /v1/items/{id} template, or /** subtree
+query  = { required = ["query"] }          # name-level only (never values)
+inject = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
+# Optional MCP/JSON-RPC body rung (the only body matcher): allow iff $.method ∈ set
+# body = { json_method = ["tools/list", "tools/call"] }
+```
+
+`enforcement` is `enforce` (deny undeclared calls — the prod posture) or `warn`
+/ `observe` (allow but log the `[[calls]]` you should add — the dev posture).
+Default by migration: `warn` for a legacy app with no `[[calls]]`, `enforce`
+for one that declares any. An app can also declare its calls in its own
+`describe()` output; the host *intersects* that with the spec (a request that
+can only narrow, never a grant).
+
 Every app serves its full surface under one port, exactly like the shell:
 `/<app>/` (UI), `/<app>/api/*` (state, actions, SSE), `/<app>/sync` (the
 HTTP sync protocol — interoperates bidirectionally with native instances and

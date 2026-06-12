@@ -1280,6 +1280,47 @@ mod tests {
         use super::*;
         use crate::egress::{MethodMatch, PathPattern};
 
+        // EC7: the migration default modes (§7.2). An app declaring no
+        // `[[calls]]` (legacy) defaults to `warn` — never a surprise prod
+        // denial; an app declaring >=1 call has signaled intent and defaults to
+        // `enforce` — the strict deterministic boundary. An explicit
+        // `enforcement` always wins.
+        #[test]
+        fn migration_default_enforcement_modes() {
+            let legacy = HostConfig::parse(
+                "[apps.a]\ncomponent = \"a.wasm\"\nui = \"ui\"\nallow_hosts = [\"h.com\"]",
+            )
+            .unwrap();
+            assert_eq!(
+                legacy.apps["a"].effective_enforcement(),
+                EnforcementMode::Warn,
+                "a legacy app (no [[calls]]) defaults to warn — never a surprise prod deny"
+            );
+
+            let declared = HostConfig::parse(
+                "[apps.a]\ncomponent = \"a.wasm\"\nui = \"ui\"\n\
+                 allow_hosts = [\"h.com\"]\n[[apps.a.calls]]\nhost = \"h.com\"",
+            )
+            .unwrap();
+            assert_eq!(
+                declared.apps["a"].effective_enforcement(),
+                EnforcementMode::Enforce,
+                "an app declaring >=1 call signals intent and defaults to enforce"
+            );
+
+            let explicit = HostConfig::parse(
+                "[apps.a]\ncomponent = \"a.wasm\"\nui = \"ui\"\n\
+                 allow_hosts = [\"h.com\"]\nenforcement = \"observe\"\n\
+                 [[apps.a.calls]]\nhost = \"h.com\"",
+            )
+            .unwrap();
+            assert_eq!(
+                explicit.apps["a"].effective_enforcement(),
+                EnforcementMode::Observe,
+                "an explicit enforcement always wins over the migration default"
+            );
+        }
+
         #[test]
         fn parses_a_calls_block_with_all_constraints() {
             let config = HostConfig::parse(
