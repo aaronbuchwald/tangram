@@ -1,3 +1,588 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Guided Learning</title></head>
-<body><p>Guided Learning UI — built in checkpoint GL8.</p></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Guided Learning</title>
+  <!-- Buildless, single-file (the app contract): vanilla DOM + vendored
+       marked + DOMPurify (single files, no CDN, no bundler). The richer
+       CM6-grade editor, if ever wanted, is reached by opening the artifact in
+       the tangram shell tab (which owns the build exception) — NOT a second
+       ADR-0007 exception here. -->
+  <style>
+    /* ── "study" variant of the fleet's dark performance-console language ──
+       calmer, single-column: the book is about attention on retrieval, so the
+       question card is the focus and the artifact/schedule sit to the side. */
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --panel: #15171b;
+      --panel-2: #1b1e23;
+      --line: #23262b;
+      --text: #f2f4f7;
+      --dim: #8d95a2;
+      --faint: #5d6470;
+      --accent: #7c5cff;      /* study violet — the signature for this app */
+      --good: #2fd27a;
+      --warn: #ffb340;
+      --bad: #ff4554;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.55 var(--sans);
+    }
+    .micro {
+      font-size: 10px; font-weight: 600; letter-spacing: .18em;
+      text-transform: uppercase; color: var(--dim);
+    }
+    a { color: var(--accent); }
+    button {
+      font: inherit; cursor: pointer; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+      padding: 8px 14px;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    textarea, input[type=text] {
+      font: inherit; width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; resize: vertical;
+    }
+    textarea:focus, input:focus { outline: none; border-color: var(--accent); }
+
+    /* ── top bar ─────────────────────────────────────────────────────────── */
+    header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 22px; border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0; font-size: 13px; font-weight: 700; letter-spacing: .3em;
+      text-transform: uppercase;
+    }
+    .sep { color: var(--faint); }
+    .title-now { color: var(--dim); font-weight: 600; }
+    .live { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; }
+    .live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good);
+      box-shadow: 0 0 6px color-mix(in srgb, var(--good) 70%, transparent); }
+    .live.off .dot { background: var(--faint); box-shadow: none; }
+
+    .layout { display: grid; grid-template-columns: 1fr; gap: 0; }
+    @media (min-width: 1000px) { .layout { grid-template-columns: 1.4fr 1fr; } }
+
+    .main { padding: 22px; min-height: 0; }
+    .side { padding: 22px; border-top: 1px solid var(--line); }
+    @media (min-width: 1000px) { .side { border-top: none; border-left: 1px solid var(--line); } }
+
+    /* ── session list / start ───────────────────────────────────────────── */
+    .sessions { list-style: none; margin: 0 0 18px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+    .sessions li button {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+    }
+    .sessions li button.sel { border-color: var(--accent); }
+    .sess-meta { font-size: 11px; color: var(--dim); }
+    .badge { display: inline-block; min-width: 18px; text-align: center; padding: 0 6px;
+      border-radius: 999px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; }
+
+    .start { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-bottom: 18px; }
+    .start textarea { min-height: 120px; }
+    .row { display: flex; gap: 10px; align-items: center; }
+    .row.wrap { flex-wrap: wrap; }
+    .grow { flex: 1; }
+    .spacer { flex: 1; }
+
+    /* ── question card ──────────────────────────────────────────────────── */
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      padding: 22px; margin-bottom: 16px;
+    }
+    .qkind { display: flex; gap: 10px; align-items: baseline; margin-bottom: 12px; }
+    .pill { font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+      color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--line));
+      border-radius: 999px; padding: 2px 8px; }
+    .prompt { font-size: 18px; line-height: 1.4; margin: 4px 0 18px; }
+    .ans-label { margin-bottom: 6px; }
+    .conf { display: flex; align-items: center; gap: 12px; margin: 14px 0; }
+    .conf input[type=range] { flex: 1; accent-color: var(--accent); }
+    .conf .val { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; font-weight: 700; }
+    .actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+
+    .reveal { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .calib { font-weight: 700; margin-bottom: 8px; }
+    .calib.over { color: var(--bad); }
+    .calib.under { color: var(--warn); }
+    .calib.ok { color: var(--good); }
+    .feedback, .modelans { margin: 8px 0; }
+    .modelans { color: var(--dim); }
+    .peek { margin-top: 14px; }
+    details.source summary { cursor: pointer; color: var(--dim); }
+    details.source[open] summary { color: var(--text); }
+    .source pre { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px; color: var(--dim); margin-top: 8px; }
+
+    /* ── side panels ────────────────────────────────────────────────────── */
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+      padding: 16px; margin-bottom: 16px; }
+    .panel h2 { font-size: 10px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
+      color: var(--dim); margin: 0 0 12px; }
+    .due { list-style: none; margin: 0; padding: 0; }
+    .due li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0;
+      border-bottom: 1px solid var(--line); }
+    .due li:last-child { border-bottom: none; }
+    .due button { padding: 4px 10px; font-size: 12px; }
+    .due .when { color: var(--faint); font-size: 12px; }
+
+    .bars { display: flex; align-items: flex-end; gap: 4px; height: 56px; margin-top: 6px; }
+    .bars .bar { flex: 1; min-width: 6px; border-radius: 3px 3px 0 0; background: var(--accent); }
+    .bars .bar.over { background: var(--bad); }
+    .bars .bar.under { background: var(--warn); }
+    .calib-note { font-size: 12px; color: var(--dim); margin-top: 8px; }
+
+    .arttabs { display: flex; gap: 6px; margin-bottom: 10px; }
+    .arttabs button { padding: 4px 12px; font-size: 12px; }
+    .arttabs button.sel { border-color: var(--accent); color: var(--accent); }
+    .preview { background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+      padding: 14px; max-height: 420px; overflow: auto; }
+    .preview h1 { font-size: 20px; letter-spacing: 0; text-transform: none; margin: .2em 0 .4em; }
+    .preview h2 { font-size: 15px; letter-spacing: 0; text-transform: none; color: var(--text); margin: 1em 0 .4em; }
+    .preview h3 { font-size: 14px; color: var(--dim); margin: 1em 0 .3em; }
+    .preview blockquote { border-left: 2px solid var(--accent); margin: .6em 0; padding-left: 12px; color: var(--dim); }
+    .preview code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+    #artifact-edit { min-height: 380px; font-family: var(--mono); font-size: 13px; }
+
+    .empty { color: var(--faint); padding: 10px 0; }
+    .banner { background: color-mix(in srgb, var(--warn) 14%, var(--panel)); border: 1px solid var(--warn);
+      border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; color: var(--text); font-size: 13px; }
+    .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+      padding: 10px 16px; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Guided Learning</h1>
+    <span class="sep">·</span>
+    <span class="title-now" id="session-title">no session</span>
+    <span class="live" id="live"><span class="dot"></span><span class="micro" data-livetext>connecting…</span></span>
+  </header>
+
+  <div class="layout">
+    <section class="main">
+      <div class="banner hidden" id="tutor-banner">
+        Configure <code>ANTHROPIC_API_KEY</code> (host-side) to enable the tutor.
+        You can still write and edit the study artifact by hand.
+      </div>
+
+      <ul class="sessions" id="session-list"></ul>
+
+      <div class="start" id="start-panel">
+        <div class="micro" style="margin-bottom:8px">Start a session</div>
+        <textarea id="material" placeholder="Paste or type the material you want to learn — the tutor will quiz you on it (it won't just show it back)."></textarea>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="title" class="grow" placeholder="Title (optional — defaults to the first line)" />
+          <button class="primary" id="start-btn">Start →</button>
+        </div>
+      </div>
+
+      <!-- the focus: a question, NOT the material -->
+      <div class="card hidden" id="qcard">
+        <div class="qkind">
+          <span class="pill" id="q-kind">factual</span>
+          <span class="micro" id="q-topic">topic</span>
+          <span class="spacer"></span>
+          <span class="micro" id="q-progress"></span>
+        </div>
+        <div class="prompt" id="q-prompt"></div>
+
+        <div id="answer-zone">
+          <div class="micro ans-label">Your answer — generate BEFORE you reveal</div>
+          <textarea id="answer" rows="3" placeholder="Recall it in your own words…"></textarea>
+          <div class="conf">
+            <span class="micro">Confidence</span>
+            <input type="range" id="confidence" min="0" max="100" value="60" />
+            <span class="val" id="conf-val">60%</span>
+          </div>
+          <div class="actions">
+            <button id="idk-btn">I don't know</button>
+            <span class="spacer"></span>
+            <button class="primary" id="reveal-btn" disabled>Reveal &amp; check ▸</button>
+          </div>
+        </div>
+
+        <div class="reveal hidden" id="reveal-zone">
+          <div class="calib" id="calib-line"></div>
+          <div class="feedback" id="feedback"></div>
+          <div class="modelans" id="model-answer"></div>
+          <div class="actions">
+            <span class="spacer"></span>
+            <button class="primary" id="next-btn">Next question ▸</button>
+          </div>
+        </div>
+
+        <details class="source peek" id="source-toggle">
+          <summary>▸ show source (peeking is logged — it weakens retrieval)</summary>
+          <pre id="source-text"></pre>
+        </details>
+      </div>
+
+      <div class="card hidden" id="done-card">
+        <div class="prompt">No more questions right now.</div>
+        <p class="empty">Generate more, come back for due reviews, or close out with a reflection.</p>
+        <div class="row wrap">
+          <button id="more-btn">Generate more questions</button>
+        </div>
+        <div style="margin-top:14px">
+          <div class="micro" style="margin-bottom:6px">Reflection — what surprised you? what was hardest?</div>
+          <textarea id="reflection" rows="2"></textarea>
+          <div class="actions"><span class="spacer"></span><button id="reflect-btn">Save reflection</button></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="panel" id="due-panel">
+        <h2>Due for review (<span id="due-count">0</span>)</h2>
+        <ul class="due" id="due-list"></ul>
+      </div>
+
+      <div class="panel" id="calib-panel">
+        <h2>Calibration</h2>
+        <div class="bars" id="calib-bars"></div>
+        <div class="calib-note" id="calib-summary">Answer a few questions to see your confidence vs accuracy.</div>
+      </div>
+
+      <div class="panel" id="art-panel">
+        <h2>Study note <span style="color:var(--faint)">· live</span></h2>
+        <div class="arttabs">
+          <button id="tab-preview" class="sel">Preview</button>
+          <button id="tab-edit">Edit</button>
+        </div>
+        <div class="preview" id="artifact-preview"></div>
+        <textarea id="artifact-edit" class="hidden"></textarea>
+      </div>
+    </aside>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    // ── action dispatch (relative paths only — prefix-mounted under the shell) ──
+    async function act(name, args) {
+      const res = await fetch(`api/actions/${name}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args ?? {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data.result;
+    }
+
+    function renderMarkdown(md) {
+      const html = marked.parse(md ?? "", { gfm: true, breaks: false });
+      return DOMPurify.sanitize(html);
+    }
+
+    let toastTimer = null;
+    function toast(msg) {
+      const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 4000);
+    }
+
+    // ── UI state ────────────────────────────────────────────────────────────
+    let state = null;          // full replicated state from SSE
+    let currentSession = null; // selected session id
+    let currentQ = null;       // the question id on the card
+    let tutorAvailable = true; // from capabilities
+    let artMode = "preview";   // preview | edit
+    let artDirty = false, artTimer = null;
+    let busy = false;          // an LLM call is in flight
+
+    const sessionOf = (id) => (state?.sessions ?? []).find((s) => s.id === id);
+
+    // The next question: not-yet-revealed, interleaved by document order across
+    // topics (a light client-side mirror of the server's interleave selector;
+    // the canonical ordering is the server's next_questions action).
+    function pickNextQuestion(s) {
+      if (!s) return null;
+      const open = (s.questions ?? []).filter((q) => !q.revealed && q.attempts.length === 0);
+      if (!open.length) return null;
+      // round-robin across topics
+      const byTopic = new Map();
+      for (const q of open) {
+        if (!byTopic.has(q.topic_id)) byTopic.set(q.topic_id, []);
+        byTopic.get(q.topic_id).push(q);
+      }
+      const groups = [...byTopic.values()];
+      for (let i = 0; ; i++) {
+        let any = false;
+        for (const g of groups) { if (g[i]) { return g[i].id; } if (g.length > i) any = true; }
+        if (!any) break;
+      }
+      return open[0].id;
+    }
+
+    function fmtDue(ms) {
+      const now = Date.now();
+      if (ms <= now) return "now";
+      const days = Math.round((ms - now) / 86400000);
+      if (days <= 0) return "today";
+      return `in ${days}d`;
+    }
+
+    // ── render ────────────────────────────────────────────────────────────
+    function render() {
+      if (!state) return;
+      $("tutor-banner").classList.toggle("hidden", tutorAvailable);
+      renderSessionList();
+      const s = sessionOf(currentSession);
+      $("session-title").textContent = s ? s.title : "no session";
+      $("start-panel").classList.toggle("hidden", !!s);
+      if (!s) { $("qcard").classList.add("hidden"); $("done-card").classList.add("hidden"); clearSidePanels(); return; }
+      renderCard(s);
+      renderDue(s);
+      renderCalibration(s);
+      renderArtifact(s);
+    }
+
+    function renderSessionList() {
+      const el = $("session-list");
+      const sessions = [...(state.sessions ?? [])].sort((a, b) =>
+        (b.updated_at_ms ?? b.created_at_ms) - (a.updated_at_ms ?? a.created_at_ms));
+      el.replaceChildren(...sessions.map((s) => {
+        const li = document.createElement("li");
+        const b = document.createElement("button");
+        if (s.id === currentSession) b.classList.add("sel");
+        const t = document.createElement("strong"); t.textContent = s.title || "Untitled";
+        const m = document.createElement("span"); m.className = "sess-meta";
+        const due = dueQuestions(s).length;
+        m.textContent = `${s.questions.length} q` + (due ? ` · ${due} due` : "");
+        b.append(t, m);
+        b.addEventListener("click", () => { currentSession = s.id; currentQ = null; render(); });
+        li.append(b);
+        return li;
+      }));
+    }
+
+    function renderCard(s) {
+      // keep the card on the same question while answering
+      if (currentQ) {
+        const q = s.questions.find((x) => x.id === currentQ);
+        if (!q) currentQ = null;
+        else if (q.revealed) { /* show reveal zone */ }
+      }
+      if (!currentQ) currentQ = pickNextQuestion(s);
+
+      if (!currentQ) {
+        $("qcard").classList.add("hidden");
+        $("done-card").classList.remove("hidden");
+        return;
+      }
+      $("done-card").classList.add("hidden");
+      $("qcard").classList.remove("hidden");
+      const q = s.questions.find((x) => x.id === currentQ);
+      $("q-kind").textContent = q.kind;
+      $("q-topic").textContent = "topic: " + (s.topics.find((t) => t.id === q.topic_id)?.name ?? q.topic_id);
+      const answered = s.questions.filter((x) => x.revealed).length;
+      $("q-progress").textContent = `${answered}/${s.questions.length} done`;
+      $("q-prompt").textContent = q.prompt;
+      $("source-text").textContent = s.material;
+
+      const lastAttempt = q.attempts[q.attempts.length - 1];
+      if (q.revealed && lastAttempt) {
+        $("answer-zone").classList.add("hidden");
+        $("reveal-zone").classList.remove("hidden");
+        const grade = lastAttempt.grade ?? 0;
+        const delta = lastAttempt.confidence - grade;
+        const cl = $("calib-line");
+        cl.className = "calib " + (delta >= 20 ? "over" : delta <= -20 ? "under" : "ok");
+        cl.textContent = delta >= 20
+          ? `You said ${lastAttempt.confidence}% sure — that was off. Grade ${grade}/100.`
+          : delta <= -20
+          ? `You said ${lastAttempt.confidence}% sure — you knew more than you thought. Grade ${grade}/100.`
+          : `Confidence ${lastAttempt.confidence}% vs grade ${grade}/100 — well calibrated.`;
+        $("feedback").textContent = lastAttempt.feedback ?? "";
+        $("model-answer").innerHTML = "<strong>Model answer:</strong> " + DOMPurify.sanitize(q.model_answer ?? "");
+      } else {
+        $("answer-zone").classList.remove("hidden");
+        $("reveal-zone").classList.add("hidden");
+        // reset inputs only when switching question
+        if ($("answer").dataset.qid !== q.id) {
+          $("answer").value = ""; $("answer").dataset.qid = q.id;
+          $("confidence").value = 60; $("conf-val").textContent = "60%";
+        }
+        updateRevealEnabled();
+      }
+    }
+
+    function dueQuestions(s) {
+      const now = Date.now();
+      return (s.questions ?? []).filter((q) => q.attempts.length > 0 && q.schedule.due_at_ms <= now);
+    }
+
+    function renderDue(s) {
+      const due = dueQuestions(s);
+      $("due-count").textContent = due.length;
+      const el = $("due-list");
+      el.replaceChildren(...due.map((q) => {
+        const li = document.createElement("li");
+        const name = document.createElement("span");
+        name.textContent = (q.prompt || "").slice(0, 44) + (q.prompt.length > 44 ? "…" : "");
+        const right = document.createElement("span"); right.className = "row";
+        const when = document.createElement("span"); when.className = "when"; when.textContent = fmtDue(q.schedule.due_at_ms);
+        const b = document.createElement("button"); b.textContent = "Review";
+        b.addEventListener("click", () => { currentQ = q.id; render(); window.scrollTo({ top: 0, behavior: "smooth" }); });
+        right.append(when, b);
+        li.append(name, right);
+        return li;
+      }));
+      if (!due.length) el.innerHTML = '<li class="empty">Nothing due. Spacing lets some forgetting happen.</li>';
+    }
+
+    function renderCalibration(s) {
+      const points = [];
+      for (const q of s.questions ?? [])
+        for (const a of q.attempts) if (a.grade != null) points.push(a.confidence - a.grade);
+      const bars = $("calib-bars");
+      bars.replaceChildren(...points.map((d) => {
+        const bar = document.createElement("div");
+        bar.className = "bar " + (d >= 20 ? "over" : d <= -20 ? "under" : "");
+        bar.style.height = Math.max(8, Math.min(100, 50 + d / 2)) + "%";
+        bar.title = `Δ ${d}`;
+        return bar;
+      }));
+      const over = points.filter((d) => d >= 20).length;
+      $("calib-summary").textContent = points.length
+        ? `over-confident on ${over}/${points.length}` + (over ? " — the illusion of knowing" : " — well calibrated")
+        : "Answer a few questions to see your confidence vs accuracy.";
+    }
+
+    function renderArtifact(s) {
+      $("artifact-preview").innerHTML = renderMarkdown(s.artifact_md);
+      if (artMode === "edit" && document.activeElement !== $("artifact-edit") && !artDirty) {
+        $("artifact-edit").value = s.artifact_md;
+      }
+    }
+
+    function clearSidePanels() {
+      $("due-list").innerHTML = ""; $("calib-bars").innerHTML = ""; $("artifact-preview").innerHTML = "";
+    }
+
+    // ── interactions ────────────────────────────────────────────────────────
+    function updateRevealEnabled() {
+      const hasText = $("answer").value.trim().length > 0;
+      $("reveal-btn").disabled = busy || !(hasText);
+    }
+    $("answer").addEventListener("input", updateRevealEnabled);
+    $("confidence").addEventListener("input", () => { $("conf-val").textContent = $("confidence").value + "%"; });
+
+    $("start-btn").addEventListener("click", async () => {
+      const material = $("material").value.trim();
+      if (!material) { toast("Paste some material first"); return; }
+      try {
+        const id = await act("start_session", { material, title: $("title").value.trim() || null });
+        currentSession = id; currentQ = null;
+        $("material").value = ""; $("title").value = "";
+        if (tutorAvailable) { await generate(id); }
+        else toast("Session started. The tutor is offline — write the note by hand, or configure a key.");
+      } catch (e) { toast(e.message); }
+    });
+
+    async function generate(sessionId) {
+      busy = true; updateRevealEnabled();
+      toast("Generating questions…");
+      try {
+        await act("generate_questions", { session_id: sessionId, count: 6 });
+        toast("Questions ready.");
+      } catch (e) { toast(e.message); }
+      finally { busy = false; updateRevealEnabled(); }
+    }
+
+    async function submitAndReveal(idk) {
+      const s = sessionOf(currentSession); if (!s || !currentQ) return;
+      const answer = idk ? "" : $("answer").value.trim();
+      const confidence = parseInt($("confidence").value, 10);
+      busy = true; updateRevealEnabled();
+      try {
+        await act("submit_answer", { session_id: currentSession, question_id: currentQ, answer, idk: !!idk, confidence });
+        if (tutorAvailable) {
+          toast("Grading…");
+          await act("evaluate_answer", { session_id: currentSession, question_id: currentQ });
+        } else {
+          toast("Attempt recorded (tutor offline — no grade).");
+        }
+      } catch (e) { toast(e.message); }
+      finally { busy = false; }
+    }
+    $("reveal-btn").addEventListener("click", () => submitAndReveal(false));
+    $("idk-btn").addEventListener("click", () => submitAndReveal(true));
+    $("next-btn").addEventListener("click", () => { currentQ = null; render(); });
+    $("more-btn").addEventListener("click", () => currentSession && generate(currentSession));
+
+    $("reflect-btn").addEventListener("click", async () => {
+      const text = $("reflection").value.trim(); if (!text || !currentSession) return;
+      try { await act("record_reflection", { session_id: currentSession, text }); $("reflection").value = ""; toast("Reflection saved."); }
+      catch (e) { toast(e.message); }
+    });
+
+    $("source-toggle").addEventListener("toggle", () => {
+      if ($("source-toggle").open && currentSession && currentQ)
+        act("mark_peeked", { session_id: currentSession, question_id: currentQ }).catch(() => {});
+    });
+
+    // artifact edit/preview
+    $("tab-preview").addEventListener("click", () => setArtMode("preview"));
+    $("tab-edit").addEventListener("click", () => setArtMode("edit"));
+    function setArtMode(mode) {
+      artMode = mode;
+      $("tab-preview").classList.toggle("sel", mode === "preview");
+      $("tab-edit").classList.toggle("sel", mode === "edit");
+      $("artifact-preview").classList.toggle("hidden", mode !== "preview");
+      $("artifact-edit").classList.toggle("hidden", mode !== "edit");
+      const s = sessionOf(currentSession);
+      if (mode === "edit" && s) $("artifact-edit").value = s.artifact_md;
+    }
+    $("artifact-edit").addEventListener("input", () => {
+      artDirty = true; clearTimeout(artTimer);
+      artTimer = setTimeout(saveArtifact, 700);
+    });
+    $("artifact-edit").addEventListener("blur", saveArtifact);
+    async function saveArtifact() {
+      clearTimeout(artTimer);
+      if (!artDirty || !currentSession) return;
+      const new_md = $("artifact-edit").value; artDirty = false;
+      try { await act("edit_artifact", { session_id: currentSession, new_md }); }
+      catch (e) { artDirty = true; toast(e.message); }
+    }
+
+    // ── capabilities probe ───────────────────────────────────────────────
+    fetch("api/capabilities").then((r) => r.ok ? r.json() : null).then((caps) => {
+      if (caps && "description_input" in caps) { tutorAvailable = !!caps.description_input; render(); }
+    }).catch(() => {});
+
+    // ── live updates over SSE ──────────────────────────────────────────────
+    function setLive(on, text) {
+      const el = $("live"); el.classList.toggle("off", !on);
+      el.querySelector("[data-livetext]").textContent = text;
+    }
+    const events = new EventSource("api/events");
+    events.addEventListener("state", (e) => {
+      state = JSON.parse(e.data);
+      setLive(true, "live");
+      if (!currentSession && state.sessions?.length)
+        currentSession = [...state.sessions].sort((a, b) =>
+          (b.updated_at_ms ?? b.created_at_ms) - (a.updated_at_ms ?? a.created_at_ms))[0].id;
+      render();
+    });
+    events.onerror = () => setLive(false, "reconnecting…");
+  </script>
+</body>
+</html>
