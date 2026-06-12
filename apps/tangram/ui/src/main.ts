@@ -18,6 +18,33 @@ import { authToken, registry, setAuthToken } from "./manage";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
 
+// ── icons ────────────────────────────────────────────────────────────────────
+// Inline 16px stroke icons (Lucide-style, currentColor) so vault affordances
+// read as quiet glyphs rather than clunky bordered buttons — the Obsidian
+// "typography + minimal iconography" idiom. Kept tiny and stroke-only so they
+// inherit the surrounding text colour and animate with it on hover.
+const ICON = {
+  // file with a small plus — "new note"
+  file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M11.5 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8l6 6v3"/><path d="M16 18h6"/><path d="M19 15v6"/></svg>`,
+  // folder with a small plus — "new folder"
+  folderPlus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H20a2 2 0 0 1 2 2v3"/><path d="M16 19h6"/><path d="M19 16v6"/></svg>`,
+  // pencil — "rename"
+  pencil: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
+  // trash — "delete"
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>`,
+};
+
+/** Build a quiet, hover-revealed row-action button (icon glyph). */
+function rowAction(icon: string, title: string, danger = false): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.className = danger ? "row-action danger" : "row-action";
+  btn.type = "button";
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.innerHTML = icon;
+  return btn;
+}
+
 // ── shared mutable shell state ──────────────────────────────────────────────
 
 let files: MdFile[] = [];
@@ -51,8 +78,8 @@ root.innerHTML = `
           <div class="side-head">
             <span class="micro">Vault</span>
             <div class="side-actions">
-              <button class="ghost" id="new-note" title="New note">+ note</button>
-              <button class="ghost" id="new-folder" title="New folder">+ folder</button>
+              <button class="head-action" id="new-note" title="New note" aria-label="New note">${ICON.file}</button>
+              <button class="head-action" id="new-folder" title="New folder" aria-label="New folder">${ICON.folderPlus}</button>
             </div>
           </div>
           <div class="tree" id="tree"></div>
@@ -132,13 +159,34 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
     const isCollapsed = collapsed.has(node.path);
     row.appendChild(el("span", "twisty", isCollapsed ? "▸" : "▾"));
     row.appendChild(el("span", "label", node.name));
-    const del = el("button", "row-del", "✕");
-    del.title = `Delete folder ${node.path}`;
+
+    // Hover-revealed folder actions, ordered by frequency: new note inside,
+    // new subfolder, rename, delete. Each carries the folder's path as context
+    // so creation targets THIS folder (the #14 fix — folders previously had no
+    // create affordance, so notes could only be made at the vault root).
+    const actions = el("div", "row-actions");
+    const addNote = rowAction(ICON.file, `New note in ${node.path}`);
+    addNote.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void newNote(node.path);
+    });
+    const addFolder = rowAction(ICON.folderPlus, `New folder in ${node.path}`);
+    addFolder.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void newFolder(node.path);
+    });
+    const ren = rowAction(ICON.pencil, `Rename folder ${node.path}`);
+    ren.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void renameFolder(node.path);
+    });
+    const del = rowAction(ICON.trash, `Delete folder ${node.path}`, true);
     del.addEventListener("click", (e) => {
       e.stopPropagation();
       void deleteFolder(node.path);
     });
-    row.appendChild(del);
+    actions.append(addNote, addFolder, ren, del);
+    row.appendChild(actions);
     row.addEventListener("click", () => {
       if (collapsed.has(node.path)) collapsed.delete(node.path);
       else collapsed.add(node.path);
@@ -158,13 +206,19 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
     row.classList.add("active");
   }
   row.appendChild(el("span", "label", node.name));
-  const del = el("button", "row-del", "✕");
-  del.title = `Delete ${node.path}`;
+  const actions = el("div", "row-actions");
+  const ren = rowAction(ICON.pencil, `Rename / move ${node.path}`);
+  ren.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void renameFile(node.file);
+  });
+  const del = rowAction(ICON.trash, `Delete ${node.path}`, true);
   del.addEventListener("click", (e) => {
     e.stopPropagation();
     void deleteFile(node.file.id);
   });
-  row.appendChild(del);
+  actions.append(ren, del);
+  row.appendChild(actions);
   row.addEventListener("click", () => tabs.openNote(node.file.id));
   return row;
 }
@@ -395,24 +449,55 @@ function syncActiveNote() {
 
 // ── vault operations (with light prompts; richer UX is a later phase) ────────
 
+// Create a note inside `folder` (empty string = vault root). We prompt for the
+// filename only and join it to the target folder, so the file always lands in
+// the folder whose "+ note" the user clicked — the path context the old
+// root-only button never carried (#14). The user can still type a `/` to nest
+// further; the backend normalizes and rejects collisions.
 async function newNote(folder: string) {
-  const suggestion = folder ? `${folder}/untitled.md` : "untitled.md";
-  const path = window.prompt("New note path", suggestion);
-  if (!path) return;
+  const where = folder ? `${folder}/` : "vault root";
+  const name = window.prompt(`New note in ${where}`, "untitled.md");
+  if (!name) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const path = folder ? `${folder}/${trimmed}` : trimmed;
+  // Reveal the target folder so a freshly-created note isn't hidden.
+  collapsed.delete(folder);
+  const title = (trimmed.split("/").pop() ?? trimmed).replace(/\.md$/i, "");
   try {
-    const id = await vault.createFile(path, `# ${path.split("/").pop()}\n\n`);
+    const id = await vault.createFile(path, `# ${title}\n\n`);
     tabs.openNote(id);
   } catch (e) {
     window.alert(String(e));
   }
 }
 
+// Create a folder inside `parent` (empty string = vault root). As with notes,
+// we prompt for the new folder's name and join it to the parent so it nests
+// where clicked.
 async function newFolder(parent: string) {
-  const suggestion = parent ? `${parent}/folder` : "folder";
-  const path = window.prompt("New folder path", suggestion);
-  if (!path) return;
+  const where = parent ? `${parent}/` : "vault root";
+  const name = window.prompt(`New folder in ${where}`, "folder");
+  if (!name) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const path = parent ? `${parent}/${trimmed}` : trimmed;
+  if (parent) collapsed.delete(parent);
   try {
     await vault.createFolder(path);
+  } catch (e) {
+    window.alert(String(e));
+  }
+}
+
+// Rename / move a whole folder (rewrites the prefix of every file under it).
+async function renameFolder(path: string) {
+  const next = window.prompt("Rename / move folder", path);
+  if (!next) return;
+  const trimmed = next.trim();
+  if (!trimmed || trimmed === path) return;
+  try {
+    await vault.renameFolder(path, trimmed);
   } catch (e) {
     window.alert(String(e));
   }
