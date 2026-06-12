@@ -38,7 +38,7 @@ async function registryAction(name: string, args: unknown): Promise<unknown> {
     error?: string;
   };
   if (res.status === 401) {
-    throw new Error("unauthorized — set the auth token first");
+    throw new Error("Unauthorized — set the auth token first");
   }
   if (!res.ok) {
     throw new Error(data.error ?? `action ${name} failed (${res.status})`);

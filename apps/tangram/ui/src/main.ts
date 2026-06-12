@@ -71,7 +71,7 @@ root.innerHTML = `
   <div class="shell">
     <header class="topbar">
       <div class="brand">tangram</div>
-      <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">connecting…</span></div>
+      <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">Connecting…</span></div>
     </header>
     <div class="body">
       <aside class="sidebar">
@@ -89,7 +89,7 @@ root.innerHTML = `
           <div class="side-head">
             <span class="micro">Apps</span>
             <div class="side-actions">
-              <button class="ghost" id="open-marketplace" title="Browse the marketplace">+ install</button>
+              <button class="ghost" id="open-marketplace" title="Browse the marketplace">+ Install</button>
             </div>
           </div>
           <div class="applist" id="applist"></div>
@@ -146,7 +146,7 @@ function renderTree() {
   treeEl.replaceChildren();
   const nodes = buildTree(files);
   if (nodes.length === 0) {
-    treeEl.appendChild(el("div", "empty", "no notes yet"));
+    treeEl.appendChild(el("div", "empty", "No notes yet"));
     return;
   }
   for (const node of nodes) treeEl.appendChild(renderNode(node, 0));
@@ -236,7 +236,7 @@ function statusClass(app: FleetApp): string {
 function renderApps() {
   applistEl.replaceChildren();
   if (fleet.length === 0) {
-    applistEl.appendChild(el("div", "empty", "no apps"));
+    applistEl.appendChild(el("div", "empty", "No apps"));
     return;
   }
   for (const app of fleet) {
@@ -298,7 +298,7 @@ function tabTitle(tab: Tab): string {
   if (tab.kind === "home") return "tangram";
   if (tab.kind === "app") return tab.app;
   const file = filesById.get(tab.fileId);
-  if (!file) return "(missing)";
+  if (!file) return "(Missing)";
   const name = file.path.split("/").pop() ?? file.path;
   return name.replace(/\.md$/i, "");
 }
@@ -405,13 +405,13 @@ function stat(value: string, label: string): HTMLElement {
 function renderNoteTab(fileId: string) {
   const file = filesById.get(fileId);
   if (!file) {
-    contentEl.appendChild(el("div", "empty", "this note no longer exists"));
+    contentEl.appendChild(el("div", "empty", "This note no longer exists"));
     return;
   }
   const wrap = el("div", "note");
   const bar = el("div", "note-bar");
   bar.appendChild(el("span", "note-path", file.path));
-  const renameBtn = el("button", "ghost", "rename");
+  const renameBtn = el("button", "ghost", "Rename");
   renameBtn.addEventListener("click", () => void renameFile(file));
   bar.appendChild(renameBtn);
   wrap.appendChild(bar);
@@ -634,7 +634,7 @@ async function deleteFolder(path: string) {
 
 function setLive(on: boolean) {
   liveDot.classList.toggle("on", on);
-  liveLabel.textContent = on ? "live" : "offline";
+  liveLabel.textContent = on ? "Live" : "Offline";
 }
 
 function onVaultState(state: VaultState) {
