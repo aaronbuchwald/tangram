@@ -54,6 +54,13 @@ symlink to `.agents/skills`.
   "fixture" is zero-network (CI's flagship); the source/LLM seam
   (`src/source.rs` + `src/llm.rs`) is where the live egress tier slots in.
   Spec + checkpoints: `docs/design/morning-brief.md`
+- `apps/guided-learning` — a *Make It Stick*-driven tutor (an AI-enabled
+  component): quizzes over pasted material, gates reveal on an attempt,
+  calibrates confidence vs grade, schedules spaced reviews, and co-authors a
+  collaboratively-editable `.md` study artifact in its Automerge doc; the only
+  egress is the Anthropic Messages call (host-injected credential, ADR-0005;
+  `[apps.guided-learning]` inject in `apps.toml`). `docs/design/guided-learning.md`;
+  CI is fixture-LLM (no live key)
 - `apps/registry` — the fleet's source of truth (RUNTIME_PLAN Phase 3): a
   Tangram app whose replicated spec list the host merges over `apps.toml`;
   bearer auth via `TANGRAM_AUTH_TOKEN` (README "The registry app"). Give it a
