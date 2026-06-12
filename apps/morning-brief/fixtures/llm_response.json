@@ -1,0 +1,16 @@
+{
+  "sections": [
+    {
+      "section_id": "sec_summary",
+      "content": "A focused day: a morning standup, the egress-grants design review at 11, a 1:1 with Priya, and a dentist appointment late afternoon. One billing item and a review sign-off need attention before 11."
+    },
+    {
+      "section_id": "sec_highlights",
+      "content": "Design review on egress grants at 11:00 in Room 4B with Aaron and Lena.\n1:1 with Priya — good moment for the roadmap question.\nDentist appointment downtown closes out the day."
+    },
+    {
+      "section_id": "sec_actions",
+      "content": "Reply to Lena with the two egress call examples — she's blocked on it for the 11am review.\nPay invoice #4471 ($1,204.00) — due tomorrow, will go overdue otherwise."
+    }
+  ]
+}

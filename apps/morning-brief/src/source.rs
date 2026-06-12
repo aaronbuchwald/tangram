@@ -21,6 +21,7 @@
 use crate::SourceConfig;
 
 pub mod calendar;
+pub mod fixtures;
 pub mod gmail;
 
 /// One normalized input item the prompt is built from (a calendar event, an
@@ -130,6 +131,35 @@ impl Sources {
     ) -> Option<tangram::http::Request> {
         source_for(kind).map(|s| s.live_request(cfg, mcp_url))
     }
+}
+
+/// A bounded, human-readable snapshot of the inputs a run saw — stored on the
+/// `BriefRun` so a run is reproducible and the human can see what the model
+/// saw (NOT the raw mailbox). Deterministic from the inputs.
+pub fn summarize_inputs(inputs: &[BriefInput]) -> String {
+    if inputs.is_empty() {
+        return "no inputs (no source enabled, or fixtures empty)".to_string();
+    }
+    let calendar = inputs.iter().filter(|i| i.kind == "calendar").count();
+    let gmail = inputs.iter().filter(|i| i.kind == "gmail").count();
+    // A bounded preview: the first few titles, so the snapshot stays small.
+    const PREVIEW: usize = 5;
+    let preview: Vec<String> = inputs
+        .iter()
+        .take(PREVIEW)
+        .map(|i| format!("[{}] {}", i.kind, i.title))
+        .collect();
+    let more = inputs.len().saturating_sub(PREVIEW);
+    let tail = if more > 0 {
+        format!("; +{more} more")
+    } else {
+        String::new()
+    };
+    format!(
+        "{} inputs ({calendar} calendar, {gmail} gmail): {}{tail}",
+        inputs.len(),
+        preview.join("; ")
+    )
 }
 
 #[cfg(test)]

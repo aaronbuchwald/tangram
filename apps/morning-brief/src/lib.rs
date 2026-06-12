@@ -29,8 +29,11 @@ use tangram::prelude::*;
 
 #[cfg(not(target_family = "wasm"))]
 mod api;
+mod llm;
+mod prompt;
 mod source;
 
+use llm::Llm;
 pub use source::{BriefInput, Sources};
 
 #[model]
@@ -328,6 +331,126 @@ impl MorningBrief {
         learned.sort_by_key(|l| std::cmp::Reverse(l.weight));
         learned
     }
+
+    // ── The one async action (network in the live tier; the four-step
+    //    AI-enabled-component pattern) ─────────────────────────────────────
+
+    /// Generate a brief now. `input_mode = "fixture"` (the default in the
+    /// offline core, and CI's flagship) resolves the bundled fixture sources
+    /// and a recorded LLM response — making ZERO network calls. `"live"` would
+    /// fetch the configured sources and call the LLM through the host's
+    /// allowlist-gated, credential-injecting `http-fetch` — that egress path
+    /// is the separate later PR and is not enabled here.
+    ///
+    /// Resolves everything OUTSIDE the store lock (CLAUDE.md: the lock is
+    /// never held across an await) and commits the run via `ctx.mutate`. The
+    /// brief is written to OUR OWN replicated document — the only "output",
+    /// and not an egress. Returns the new run id.
+    pub async fn run_brief(ctx: Ctx<Self>, input_mode: Option<String>) -> Result<String, String> {
+        let state = ctx.state().map_err(|e| e.to_string())?;
+        let mode = input_mode.unwrap_or_else(|| "fixture".into());
+
+        // The sections this run produces: the enabled ones, in render order.
+        let mut sections: Vec<OutputSection> = state
+            .sections
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
+        sections.sort_by_key(|s| s.position);
+        if sections.is_empty() {
+            return Err("no enabled output sections — add or enable a section first".into());
+        }
+
+        // 1. Resolve sources OUTSIDE the lock. The offline core supports the
+        //    fixture path; the live source fetch + grants land in the egress PR.
+        let (inputs, llm) = match mode.as_str() {
+            "fixture" => (Sources::fixtures(&state.sources), Llm::Fixture),
+            "live" => {
+                return Err(
+                    "live mode (real Google + LLM egress) is not enabled in the offline core; \
+                     it lands with the egress grants in a later PR. Use input_mode \"fixture\"."
+                        .into(),
+                );
+            }
+            other => return Err(format!("unknown input_mode {other:?} (use \"fixture\")")),
+        };
+
+        // 2. Build the prompt (pure, in-memory).
+        let prompt = prompt::build_prompt(&state.config, &sections, &state.learned, &inputs);
+
+        // 3. Call the LLM (fixture = no network).
+        let outputs = llm.generate(&state.config, &prompt, &sections).await?;
+
+        // 4. Commit the run to OUR OWN doc (the only output — not an egress).
+        let summary = source::summarize_inputs(&inputs);
+        let effective = prompt.effective();
+        ctx.mutate("run_brief", |m| {
+            m.record_run(mode, summary, effective, outputs)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    /// Push a completed run, applying the `max_runs` cap (private — not an
+    /// action). Eviction keeps feedback-bearing runs preferentially (the
+    /// dreaming signal): when over cap, drop the oldest UNRATED run; if every
+    /// run carries feedback, drop the oldest outright. Returns the new run id.
+    fn record_run(
+        &mut self,
+        input_mode: String,
+        input_summary: String,
+        effective_prompt: String,
+        outputs: Vec<SectionOutput>,
+    ) -> String {
+        let id = format!("run_{}", uuid::Uuid::new_v4());
+        self.runs.push(BriefRun {
+            id: id.clone(),
+            created_at_ms: now_ms(),
+            input_mode,
+            input_summary,
+            outputs,
+            effective_prompt,
+            status: "ok".into(),
+            feedback: None,
+        });
+        self.evict_runs();
+        id
+    }
+
+    /// Enforce `config.max_runs`, evicting oldest-unrated-first so the human's
+    /// feedback investment is preserved (design §8.3).
+    fn evict_runs(&mut self) {
+        let cap = self.config.max_runs.max(1) as usize;
+        while self.runs.len() > cap {
+            // Prefer evicting the oldest run with no feedback; if all have
+            // feedback, evict the oldest outright. `runs` is append-ordered,
+            // so the first match by created_at is the oldest.
+            let victim = self
+                .runs
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.feedback.is_none())
+                .min_by_key(|(_, r)| r.created_at_ms)
+                .map(|(i, _)| i)
+                .or_else(|| {
+                    self.runs
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, r)| r.created_at_ms)
+                        .map(|(i, _)| i)
+                });
+            match victim {
+                Some(i) => {
+                    self.runs.remove(i);
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    tangram::time::now_ms()
 }
 
 /// Normalize a free-text render-hint into one of the known formats, defaulting
@@ -582,5 +705,144 @@ mod tests {
         assert!(m.set_max_runs(0).is_err());
         assert!(m.set_max_runs(5).is_ok());
         assert_eq!(m.get_config().max_runs, 5);
+    }
+
+    // ── MB3: the fixture-offline run_brief flow (the CI flagship) ─────────
+    //
+    // Drives the async `run_brief` through tangram-core's Store/dispatch —
+    // the exact path the host uses — proving the whole pipeline runs with
+    // ZERO network: fixture sources + recorded LLM response → a recorded run
+    // with one output per enabled section.
+
+    use std::sync::Arc;
+    use tangram_core::Store;
+
+    fn store_from_default() -> Arc<Store<MorningBrief>> {
+        let bytes = tangram_core::genesis_bytes::<MorningBrief>().expect("genesis");
+        Arc::new(Store::in_memory(&bytes).expect("store"))
+    }
+
+    async fn dispatch(
+        store: &Arc<Store<MorningBrief>>,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        store.dispatch(name, args).await.expect("dispatch ok")
+    }
+
+    #[tokio::test]
+    async fn fixture_run_brief_records_one_output_per_enabled_section() {
+        let store = store_from_default();
+        // Enable a source so there are fixture inputs (genesis sources are off).
+        dispatch(
+            &store,
+            "set_source",
+            serde_json::json!({
+                "kind": "calendar", "enabled": true,
+                "window_hours_back": 0, "window_hours_fwd": 24,
+                "max_items": 25, "selector": ""
+            }),
+        )
+        .await;
+
+        let run_id = dispatch(
+            &store,
+            "run_brief",
+            serde_json::json!({ "input_mode": "fixture" }),
+        )
+        .await;
+        let run_id = run_id.as_str().expect("run id string").to_string();
+
+        // The run is recorded with one SectionOutput per enabled section (3).
+        let run = dispatch(&store, "get_run", serde_json::json!({ "run_id": run_id })).await;
+        assert_eq!(run["input_mode"], "fixture");
+        assert_eq!(run["status"], "ok");
+        let outputs = run["outputs"].as_array().expect("outputs array");
+        assert_eq!(outputs.len(), 3, "one output per enabled section");
+        // The fixture content actually mapped onto the sections.
+        let summary = outputs
+            .iter()
+            .find(|o| o["section_id"] == "sec_summary")
+            .expect("summary output");
+        assert!(!summary["content"].as_str().unwrap().is_empty());
+        // The effective prompt is auditable and reflects the inputs.
+        assert!(
+            run["effective_prompt"]
+                .as_str()
+                .unwrap()
+                .contains("Team standup")
+        );
+        // input_summary records what the model saw.
+        assert!(run["input_summary"].as_str().unwrap().contains("calendar"));
+    }
+
+    #[tokio::test]
+    async fn fixture_run_with_no_enabled_sources_still_produces_a_brief() {
+        // Genesis sources are all disabled — a run has no inputs but still
+        // produces one (empty-ish) output per section rather than erroring.
+        let store = store_from_default();
+        let run_id = dispatch(
+            &store,
+            "run_brief",
+            serde_json::json!({ "input_mode": "fixture" }),
+        )
+        .await;
+        let run = dispatch(
+            &store,
+            "get_run",
+            serde_json::json!({ "run_id": run_id.as_str().unwrap() }),
+        )
+        .await;
+        assert_eq!(run["outputs"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn live_mode_is_rejected_in_the_offline_core() {
+        let store = store_from_default();
+        let err = store
+            .dispatch("run_brief", serde_json::json!({ "input_mode": "live" }))
+            .await
+            .expect_err("live must be rejected");
+        assert!(err.to_string().contains("offline core"));
+    }
+
+    #[test]
+    fn record_run_applies_max_runs_cap_keeping_feedback() {
+        let mut m = MorningBrief::default();
+        let mk = |id: &str, at: i64, rated: bool| BriefRun {
+            id: id.into(),
+            created_at_ms: at,
+            input_mode: "fixture".into(),
+            input_summary: "s".into(),
+            outputs: vec![],
+            effective_prompt: "p".into(),
+            status: "ok".into(),
+            feedback: rated.then(|| RunFeedback {
+                rating: 5,
+                note: "great".into(),
+                corrections: vec![],
+                created_at_ms: at,
+            }),
+        };
+        // Oldest run is RATED; the middle and newest are unrated.
+        m.runs = vec![
+            mk("r1", 100, true),
+            mk("r2", 200, false),
+            mk("r3", 300, false),
+        ];
+        m.config.max_runs = 2;
+        m.evict_runs();
+
+        // Capped at 2; the unrated oldest (r2) evicted, the rated r1 preserved.
+        assert_eq!(m.runs.len(), 2);
+        assert!(
+            m.runs.iter().any(|r| r.id == "r1"),
+            "feedback-bearing run kept"
+        );
+        assert!(m.runs.iter().any(|r| r.id == "r3"), "newest run kept");
+        assert!(
+            !m.runs.iter().any(|r| r.id == "r2"),
+            "unrated middle evicted"
+        );
     }
 }
