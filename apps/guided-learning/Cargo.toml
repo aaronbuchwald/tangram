@@ -24,6 +24,7 @@ tokio.workspace = true
 tokio = { workspace = true }
 tangram-core = { workspace = true }
 serde_json = { workspace = true }
+automerge = { workspace = true }
 
 [lib]
 name = "guided_learning"

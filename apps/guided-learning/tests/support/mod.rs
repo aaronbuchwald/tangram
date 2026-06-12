@@ -12,9 +12,20 @@ use tangram_core::{Ctx, Store, genesis_bytes};
 
 /// A fresh `Ctx` over a genesis document, in memory (no disk, no sync).
 pub fn fresh_ctx() -> Ctx<GuidedLearning> {
-    let bytes = genesis_bytes::<GuidedLearning>().expect("genesis bytes");
-    let store = Store::<GuidedLearning>::in_memory(&bytes).expect("in-memory store");
-    Ctx::new(Arc::new(store))
+    ctx_from_bytes(&genesis_bytes::<GuidedLearning>().expect("genesis bytes"))
+}
+
+/// A `Ctx` over the given document bytes (e.g. a replica's save), plus the
+/// store handle so the caller can `save()` to merge with a peer.
+pub fn store_and_ctx(bytes: &[u8]) -> (Arc<Store<GuidedLearning>>, Ctx<GuidedLearning>) {
+    let store = Arc::new(Store::<GuidedLearning>::in_memory(bytes).expect("in-memory store"));
+    let ctx = Ctx::new(store.clone());
+    (store, ctx)
+}
+
+/// A `Ctx` over the given document bytes.
+pub fn ctx_from_bytes(bytes: &[u8]) -> Ctx<GuidedLearning> {
+    store_and_ctx(bytes).1
 }
 
 /// Run an action by name with JSON args; panics on dispatch error so tests
