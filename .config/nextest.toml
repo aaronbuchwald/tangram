@@ -1,0 +1,51 @@
+# cargo-nextest configuration for the Tangram workspace.
+#
+# Why this exists: the `tangram-host` integration tests each spawn one or more
+# REAL `tangram-host` (and helper) subprocesses, drive sync/convergence between
+# them, and poll health with `wait_for`. They are convergence-/IO-bound, not
+# CPU-light. Run at nextest's default full fan-out (one thread per core) on a
+# many-core box they all land at once, each spawning several hosts, and the
+# machine oversubscribes badly: measured here, `federated_fleet` took 55s alone
+# but 244s when contending with the others, and `registry_lifecycle` went 31s →
+# 235s (~4-7x inflation). The oversubscription is also what flaked the
+# gateway test (a 502 "gateway unreachable (restarting?)" while the supervised
+# agentgateway child was starved). Bounding the concurrency of this group both
+# cuts total wall-clock and removes the flake source.
+#
+# The cheap unit tests (lib/bin `#[test]`s, rmcp parity, sdk mcp) are NOT in the
+# group, so they still run at full parallelism for a fast inner loop.
+
+[profile.default]
+# Absorb genuinely-transient flakes (process startup races, the agentgateway
+# child's restart window) without masking real failures: a test that only
+# passes on retry is reported as FLAKY, not silently green.
+retries = 2
+
+# Surface the heavy host-spawning tests in the run output.
+slow-timeout = { period = "60s", terminal-after = 3 }
+
+[profile.ci]
+# CI inherits default but keeps going to collect every failure rather than
+# cancelling on the first, and prints the slow ones at the end.
+retries = 2
+failure-output = "immediate-final"
+fail-fast = false
+slow-timeout = { period = "60s", terminal-after = 4 }
+
+# -- test groups --------------------------------------------------------------
+
+[test-groups]
+# Every tangram-host integration-test binary spawns real host subprocesses and
+# is IO/convergence-bound; cap how many run at once so they don't oversubscribe
+# the box. 3 is a good balance on an 8-16 core machine: enough overlap to hide
+# each test's wait_for latency, few enough to avoid the contention cliff. Lower
+# to 2 on a 2-core CI runner via a profile override if needed.
+host-integration = { max-threads = 3 }
+
+[[profile.default.overrides]]
+filter = 'package(tangram-host) and kind(test)'
+test-group = 'host-integration'
+
+[[profile.ci.overrides]]
+filter = 'package(tangram-host) and kind(test)'
+test-group = 'host-integration'
