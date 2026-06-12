@@ -13,9 +13,20 @@
 //! - [`script`] — Primitive D: the record → replay → LLM-fallback engine (§7).
 //! - [`request`] — Primitive A.3: the request-not-grant `AutomationRequest`
 //!   channel + operator-policy intersection (§4.3).
+//!
+//! Session-reuse extension (make login/CAPTCHA a one-time cost):
+//! - [`session`] — durable session persistence (userDataDir + portable
+//!   `storageState`), treated as a credential; expiry/invalidation detection.
+//! - [`preflight`] — the upfront "are we already signed in?" check run first,
+//!   every time, before any login attempt.
+//! - [`decision`] — the not-signed-in decision point: interactive headed solve
+//!   vs bounded LLM-assisted CAPTCHA solve, surfaced through the request channel.
 
 pub mod broker;
+pub mod decision;
 pub mod egress;
+pub mod preflight;
 pub mod request;
 pub mod runner;
 pub mod script;
+pub mod session;
