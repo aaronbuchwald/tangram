@@ -378,11 +378,16 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     })
     .await;
 
-    // ── 5. a ${SECRET} unset on B → degraded, no leak, no converge crash ────
-    // Install nutrition with CALORIENINJAS_API_KEY = ${CALORIENINJAS_API_KEY}
-    // and NO explicit NUTRITION_STRATEGY: the host expands the host var, so A
-    // (secret present) auto-enables CalorieNinjas; B (secret absent) gets an
-    // empty value → offline, healthy but degraded.
+    // ── 5. an egress secret unset on B → degraded, no leak, no converge crash ─
+    // Install nutrition with a host-side credential-injection rule whose secret
+    // reference is `env://CALORIENINJAS_API_KEY` (ADR-0005): the component never
+    // sees the key; the host resolves it at the egress boundary. A (secret
+    // present in its process env) resolves it → the capabilities probe reports
+    // `description_input: true`; B (secret absent) cannot resolve it → the host
+    // ANDs the probe down to `description_input: false`, healthy but degraded.
+    // (The component's `can_resolve()` is unconditionally true post-#28, so the
+    // online/offline split is now driven host-side off whether the inject
+    // secret resolves — not off an env var the component reads.)
     let nutr_sha = sha256_of(&component("nutrition"));
     let nutr_args = serde_json::json!({
         "name": "nutrition",
@@ -390,7 +395,11 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
         "component_sha256": nutr_sha,
         "ui": root.join("apps/nutrition/ui").display().to_string(),
         "allow_hosts": ["api.calorieninjas.com"],
-        "env": [{ "key": "CALORIENINJAS_API_KEY", "value": "${CALORIENINJAS_API_KEY}" }],
+        "inject": [{
+            "host": "api.calorieninjas.com",
+            "header": "X-Api-Key",
+            "secret": "env://CALORIENINJAS_API_KEY",
+        }],
     });
     assert_eq!(
         install(&client, &base_a, &nutr_args).await,
@@ -407,28 +416,37 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
 
     // A resolved the secret → it can resolve descriptions; B did not →
     // offline (degraded), but both are healthy. Convergence never crashed on
-    // B (its registry stays up and nutrition runs).
-    let caps_a: serde_json::Value = client
-        .get(format!("{base_a}/nutrition/api/capabilities"))
-        .send()
-        .await
-        .expect("caps A")
-        .json()
-        .await
-        .expect("caps A json");
-    let caps_b: serde_json::Value = client
-        .get(format!("{base_b}/nutrition/api/capabilities"))
-        .send()
-        .await
-        .expect("caps B")
-        .json()
-        .await
-        .expect("caps B json");
-    assert_eq!(caps_a["description_input"], true, "A has the key → online");
-    assert_eq!(
-        caps_b["description_input"], false,
-        "B lacks the secret → degraded to offline, NOT crashed"
-    );
+    // B (its registry stays up and nutrition runs). The probe value is fixed at
+    // app instantiation, but instantiation on each host lags the install's
+    // propagation, so poll rather than read once (robust against the race).
+    let description_input = |base: &str| {
+        let client = client.clone();
+        let base = base.to_string();
+        async move {
+            client
+                .get(format!("{base}/nutrition/api/capabilities"))
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?
+                .get("description_input")
+                .and_then(serde_json::Value::as_bool)
+        }
+    };
+    wait_for(
+        "A reports description_input:true (key resolves)",
+        Duration::from_secs(120),
+        || async { description_input(&base_a).await == Some(true) },
+    )
+    .await;
+    wait_for(
+        "B reports description_input:false (secret absent → degraded)",
+        Duration::from_secs(120),
+        || async { description_input(&base_b).await == Some(false) },
+    )
+    .await;
     assert_eq!(
         fleet_error(&client, &base_b, "nutrition").await,
         None,
@@ -436,7 +454,8 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
     );
 
     // The secret value NEVER leaks onto B: it is nowhere in B's registry doc
-    // (only the ${VAR} reference replicates) nor in B's fleet/state surfaces.
+    // (only the `env://` secret REFERENCE replicates) nor in B's fleet/state
+    // surfaces.
     let reg_state_b = client
         .get(format!("{base_b}/registry/api/state"))
         .send()
@@ -446,8 +465,8 @@ async fn federated_fleet_propagates_installs_removes_and_persists() {
         .await
         .expect("registry state B text");
     assert!(
-        reg_state_b.contains("${CALORIENINJAS_API_KEY}"),
-        "the ${{VAR}} reference (not the value) is what replicates"
+        reg_state_b.contains("env://CALORIENINJAS_API_KEY"),
+        "the secret REFERENCE (not the value) is what replicates"
     );
     for surface in ["registry/api/state", "nutrition/api/state", "api/fleet"] {
         let body = client
