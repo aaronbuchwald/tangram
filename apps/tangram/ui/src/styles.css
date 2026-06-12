@@ -74,7 +74,25 @@ body {
   display: flex; align-items: center; justify-content: space-between;
   padding: 2px 8px 8px;
 }
-.side-actions { display: flex; gap: 4px; }
+.side-actions { display: flex; align-items: center; gap: 2px; }
+
+/* Section-header actions (Vault: new note / new folder). Borderless icon
+   glyphs that sit quietly beside the "VAULT" label and brighten to the accent
+   on hover — typography-driven affordances in the Obsidian idiom rather than
+   bordered "+ note" pills. */
+.head-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0;
+  background: transparent; border: 0; border-radius: 5px;
+  color: var(--faint); cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.head-action svg { width: 15px; height: 15px; display: block; }
+.head-action:hover { color: var(--blue); background: var(--panel-2); }
+.head-action:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* The old bordered button, kept only for the Apps-section "+ install" entry
+   point and the note-bar rename (outside the vault tree). */
 .ghost {
   background: transparent; color: var(--dim); border: 1px solid var(--line);
   border-radius: 6px; font: inherit; font-size: 11px; padding: 2px 7px;
@@ -97,13 +115,29 @@ body {
 }
 .twisty { width: 12px; color: var(--dim); font-size: 10px; }
 .folder-row .label { color: var(--dim); }
-.row-del {
-  visibility: hidden;
-  background: transparent; border: 0; color: var(--faint);
-  cursor: pointer; font-size: 11px; padding: 0 2px;
+
+/* Per-row vault actions (folder: new note / new folder / rename / delete;
+   file: rename / delete). Hidden at rest so the tree reads as a calm list of
+   names; on row hover they fade in as a quiet cluster of icon glyphs. Each
+   glyph brightens to the text colour (or red, for delete) on its own hover —
+   the same restrained, icon-led language as the section header. */
+.row-actions {
+  display: flex; align-items: center; gap: 1px; margin-left: auto;
+  opacity: 0; transition: opacity 0.12s ease;
 }
-.tree-row:hover .row-del, .app-row:hover .row-del { visibility: visible; }
-.row-del:hover { color: var(--red); }
+.tree-row:hover .row-actions,
+.tree-row:focus-within .row-actions { opacity: 1; }
+.row-action {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; padding: 0;
+  background: transparent; border: 0; border-radius: 4px;
+  color: var(--faint); cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.row-action svg { width: 13px; height: 13px; display: block; }
+.row-action:hover { color: var(--text); background: var(--panel); }
+.row-action.danger:hover { color: var(--red); }
+.row-action:focus-visible { opacity: 1; outline: 2px solid var(--blue); outline-offset: 1px; }
 
 /* apps list status dots */
 .app-row .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
