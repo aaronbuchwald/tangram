@@ -332,6 +332,140 @@ impl MorningBrief {
         learned
     }
 
+    // ── Feedback / dreaming loop (sync, pure mutations — design §8) ───────
+
+    /// Rate a run (1..=5; 0 = unrated) and attach a free-text note. Creates
+    /// the run's feedback record if absent, else updates the rating + note
+    /// while preserving any per-section corrections already typed.
+    pub fn rate_run(&mut self, run_id: String, rating: i64, note: String) -> Result<(), String> {
+        if !(0..=5).contains(&rating) {
+            return Err("rating must be between 0 and 5 (0 = unrated)".into());
+        }
+        let now = now_ms();
+        let run = self
+            .runs
+            .iter_mut()
+            .find(|r| r.id == run_id)
+            .ok_or_else(|| format!("no run with id {run_id}"))?;
+        match &mut run.feedback {
+            Some(fb) => {
+                fb.rating = rating;
+                fb.note = note;
+            }
+            None => {
+                run.feedback = Some(RunFeedback {
+                    rating,
+                    note,
+                    corrections: Vec::new(),
+                    created_at_ms: now,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the human's corrected text for one section of a run. These
+    /// become candidate few-shot examples (promote_to_learned). Creates the
+    /// run's feedback record if absent; replaces an existing correction for
+    /// the same section.
+    pub fn correct_section(
+        &mut self,
+        run_id: String,
+        section_id: String,
+        corrected: String,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let run = self
+            .runs
+            .iter_mut()
+            .find(|r| r.id == run_id)
+            .ok_or_else(|| format!("no run with id {run_id}"))?;
+        let fb = run.feedback.get_or_insert_with(|| RunFeedback {
+            rating: 0,
+            note: String::new(),
+            corrections: Vec::new(),
+            created_at_ms: now,
+        });
+        match fb
+            .corrections
+            .iter_mut()
+            .find(|c| c.section_id == section_id)
+        {
+            Some(existing) => existing.corrected = corrected,
+            None => fb.corrections.push(SectionCorrection {
+                section_id,
+                corrected,
+            }),
+        }
+        Ok(())
+    }
+
+    /// Distill a run's feedback into a `LearnedExample` folded into future
+    /// prompts (the in-tangram learning step). If `note` is empty, a note is
+    /// synthesized from the run's rating + corrections so the call is useful
+    /// with one click. Returns the new learned-example id.
+    pub fn promote_to_learned(
+        &mut self,
+        run_id: String,
+        note: String,
+        weight: i64,
+    ) -> Result<String, String> {
+        let run = self
+            .runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .ok_or_else(|| format!("no run with id {run_id}"))?;
+
+        let note = if note.trim().is_empty() {
+            synthesize_learned_note(run)
+        } else {
+            note.trim().to_string()
+        };
+        if note.is_empty() {
+            return Err("nothing to learn from this run (no note and no feedback)".into());
+        }
+
+        let id = format!("learn_{}", uuid::Uuid::new_v4());
+        self.learned.push(LearnedExample {
+            id: id.clone(),
+            note,
+            weight: weight.clamp(0, 100),
+            created_at_ms: now_ms(),
+        });
+        Ok(id)
+    }
+
+    /// Adjust a learned example's weight (higher = folded in preferentially).
+    pub fn set_learned_weight(&mut self, id: String, weight: i64) -> Result<(), String> {
+        let ex = self
+            .learned
+            .iter_mut()
+            .find(|l| l.id == id)
+            .ok_or_else(|| format!("no learned example with id {id}"))?;
+        ex.weight = weight.clamp(0, 100);
+        Ok(())
+    }
+
+    /// Remove a learned example.
+    pub fn remove_learned(&mut self, id: String) -> Result<(), String> {
+        let before = self.learned.len();
+        self.learned.retain(|l| l.id != id);
+        if self.learned.len() == before {
+            return Err(format!("no learned example with id {id}"));
+        }
+        Ok(())
+    }
+
+    /// Prune a run from history by hand.
+    pub fn delete_run(&mut self, run_id: String) -> Result<(), String> {
+        let before = self.runs.len();
+        self.runs.retain(|r| r.id != run_id);
+        if self.runs.len() == before {
+            return Err(format!("no run with id {run_id}"));
+        }
+        Ok(())
+    }
+
     // ── The one async action (network in the live tier; the four-step
     //    AI-enabled-component pattern) ─────────────────────────────────────
 
@@ -451,6 +585,38 @@ impl MorningBrief {
 
 fn now_ms() -> i64 {
     tangram::time::now_ms()
+}
+
+/// Synthesize a `LearnedExample` note from a run's feedback when the human
+/// didn't type one — so "promote" is one click. Folds in the rating, the
+/// free-text note, and any per-section corrections (a high-signal "prefer Y"
+/// pair). Returns empty when there is no feedback to learn from.
+fn synthesize_learned_note(run: &BriefRun) -> String {
+    let Some(fb) = &run.feedback else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if !fb.note.trim().is_empty() {
+        parts.push(fb.note.trim().to_string());
+    }
+    for c in &fb.corrections {
+        if c.corrected.trim().is_empty() {
+            continue;
+        }
+        // Title the section if we can, else fall back to its id.
+        let title = run
+            .outputs
+            .iter()
+            .find(|o| o.section_id == c.section_id)
+            .map(|o| o.title.as_str())
+            .unwrap_or(c.section_id.as_str());
+        parts.push(format!(
+            "For the \"{}\" section, prefer output like: {}",
+            title,
+            c.corrected.trim()
+        ));
+    }
+    parts.join(" ")
 }
 
 /// Normalize a free-text render-hint into one of the known formats, defaulting
@@ -844,5 +1010,128 @@ mod tests {
             !m.runs.iter().any(|r| r.id == "r2"),
             "unrated middle evicted"
         );
+    }
+
+    // ── MB4: the dreaming / feedback loop ────────────────────────────────
+
+    #[tokio::test]
+    async fn promote_feedback_folds_into_the_next_run_prompt() {
+        let store = store_from_default();
+        dispatch(
+            &store,
+            "set_source",
+            serde_json::json!({
+                "kind": "calendar", "enabled": true,
+                "window_hours_back": 0, "window_hours_fwd": 24,
+                "max_items": 25, "selector": ""
+            }),
+        )
+        .await;
+
+        // Run once, then give poor feedback + a correction.
+        let run_id = dispatch(
+            &store,
+            "run_brief",
+            serde_json::json!({ "input_mode": "fixture" }),
+        )
+        .await
+        .as_str()
+        .unwrap()
+        .to_string();
+        dispatch(
+            &store,
+            "rate_run",
+            serde_json::json!({ "run_id": run_id, "rating": 2, "note": "too verbose" }),
+        )
+        .await;
+        dispatch(
+            &store,
+            "correct_section",
+            serde_json::json!({
+                "run_id": run_id, "section_id": "sec_summary",
+                "corrected": "Three meetings; reply to Lena before 11."
+            }),
+        )
+        .await;
+
+        // Promote to a learned example (synthesized note, no manual text).
+        let learned_id = dispatch(
+            &store,
+            "promote_to_learned",
+            serde_json::json!({ "run_id": run_id, "note": "", "weight": 10 }),
+        )
+        .await;
+        assert!(learned_id.as_str().unwrap().starts_with("learn_"));
+
+        // The next run's effective prompt folds in the learned preference.
+        let run2 = dispatch(
+            &store,
+            "run_brief",
+            serde_json::json!({ "input_mode": "fixture" }),
+        )
+        .await
+        .as_str()
+        .unwrap()
+        .to_string();
+        let run = dispatch(&store, "get_run", serde_json::json!({ "run_id": run2 })).await;
+        let prompt = run["effective_prompt"].as_str().unwrap();
+        assert!(prompt.contains("Learned preferences"));
+        assert!(prompt.contains("reply to Lena before 11"));
+    }
+
+    /// A default model carrying one run (with the given outputs), so feedback
+    /// tests don't reassign a field after `default()`.
+    fn model_with_run(outputs: Vec<SectionOutput>) -> MorningBrief {
+        MorningBrief {
+            runs: vec![BriefRun {
+                id: "r1".into(),
+                created_at_ms: 1,
+                input_mode: "fixture".into(),
+                input_summary: "s".into(),
+                outputs,
+                effective_prompt: "p".into(),
+                status: "ok".into(),
+                feedback: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rate_then_correct_preserves_both() {
+        let mut m = model_with_run(vec![SectionOutput {
+            section_id: "sec_summary".into(),
+            title: "Summary".into(),
+            content: "old".into(),
+        }]);
+        m.rate_run("r1".into(), 4, "good but trim".into()).unwrap();
+        m.correct_section("r1".into(), "sec_summary".into(), "tighter summary".into())
+            .unwrap();
+        let fb = m.runs[0].feedback.as_ref().unwrap();
+        assert_eq!(fb.rating, 4);
+        assert_eq!(fb.note, "good but trim");
+        assert_eq!(fb.corrections.len(), 1);
+        assert_eq!(fb.corrections[0].corrected, "tighter summary");
+
+        // synthesized note pulls in the correction with the section title.
+        let note = synthesize_learned_note(&m.runs[0]);
+        assert!(note.contains("Summary"));
+        assert!(note.contains("tighter summary"));
+
+        assert!(m.rate_run("r1".into(), 9, String::new()).is_err()); // out of range
+        assert!(m.rate_run("nope".into(), 3, String::new()).is_err()); // unknown run
+    }
+
+    #[test]
+    fn learned_curation_set_weight_and_remove() {
+        let mut m = model_with_run(vec![]);
+        let id = m
+            .promote_to_learned("r1".into(), "Always name the sender.".into(), 5)
+            .unwrap();
+        m.set_learned_weight(id.clone(), 42).unwrap();
+        assert_eq!(m.list_learned()[0].weight, 42);
+        m.remove_learned(id.clone()).unwrap();
+        assert!(m.list_learned().is_empty());
+        assert!(m.remove_learned(id).is_err());
     }
 }
