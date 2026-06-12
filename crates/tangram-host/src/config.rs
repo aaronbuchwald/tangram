@@ -604,17 +604,43 @@ impl AppSpec {
             .collect()
     }
 
+    /// The effective egress enforcement mode for this app. An explicit
+    /// `enforcement` wins; otherwise the migration default (§7.2): `warn` for a
+    /// legacy app declaring no `[[calls]]`, `enforce` for an app that has
+    /// signaled intent by declaring ≥1 call. This keeps existing configs
+    /// (which declare none) non-blocking while an app that opts into the call
+    /// grammar gets the strict deterministic boundary.
+    pub fn effective_enforcement(&self) -> EnforcementMode {
+        self.enforcement.unwrap_or(if self.calls.is_empty() {
+            EnforcementMode::Warn
+        } else {
+            EnforcementMode::Enforce
+        })
+    }
+
+    /// Whether this app declares ANY egress injection — host-keyed
+    /// `[apps.X.inject]` OR a call-level `inject` on a `[[calls]]` entry. The
+    /// capabilities-probe gate uses this to decide whether to derive the
+    /// "configured" signal host-side (ADR-0005); a call-grained app must be
+    /// treated the same as a host-keyed one.
+    pub fn has_any_inject(&self) -> bool {
+        !self.inject.is_empty() || self.calls.iter().any(|c| c.inject.is_some())
+    }
+
     /// Whether this app has at least one injection rule whose secret resolves
     /// — i.e. an egress credential is genuinely configured (ADR-0005). The
     /// capabilities probe derives "configured" from this (host-side) instead
     /// of from the component seeing an env var. `false` when there are no
     /// rules or none resolve (→ the app stays offline/degraded, cleanly).
+    /// Considers BOTH host-keyed inject and call-level inject (the effective
+    /// `resolved_calls`), so a call-grained credential counts as configured.
     pub async fn any_inject_resolves(&self, registry: &SecretRegistry, app: &str) -> bool {
-        for (host, _kind, rule) in self.resolved_inject() {
-            if rule
-                .resolve_secret(registry, &format!("{app}: inject {host}"))
-                .await
-                .is_some()
+        for call in self.resolved_calls() {
+            if let Some(rule) = &call.inject
+                && rule
+                    .resolve_secret(registry, &format!("{app}: call inject {}", call.host))
+                    .await
+                    .is_some()
             {
                 return true;
             }

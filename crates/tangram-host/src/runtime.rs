@@ -16,7 +16,9 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use crate::config::{InjectKind, InjectRule};
+use crate::config::EnforcementMode;
+use crate::config::InjectKind;
+use crate::egress::{CallSpec, CanonicalRequest};
 use crate::secrets::SecretRegistry;
 
 // In their own module so the generated `tangram::app::...` paths can't
@@ -43,12 +45,22 @@ pub struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
     app: String,
+    /// The coarse outer host fence (the cheap first gate): an outbound request
+    /// whose canonical host is not here is denied before any call match
+    /// (ADR-0005's invariant — the call match is the inner authoritative gate,
+    /// never a bypass).
     allow_hosts: Vec<String>,
-    /// Egress credential-injection rules (ADR-0005, Phase 10b), keyed by
-    /// lowercased outbound host. For a matching `http-fetch` the host
-    /// resolves the rule's secret through `secrets` and attaches it just
-    /// before the real request — the component never holds the plaintext.
-    inject: Vec<(String, InjectKind, InjectRule)>,
+    /// Call-level egress capabilities (fine-grained-egress §4): the
+    /// authoritative inner gate. The host picks the FIRST matching declared
+    /// call and injects ONLY that call's credential — resolved host-side at
+    /// request time so the component never holds the plaintext (ADR-0005).
+    /// For an app with no `[[calls]]` this is the compat shim (one broad
+    /// implicit call per allowlisted host), so behavior is byte-identical.
+    calls: Vec<CallSpec>,
+    /// The enforcement posture (observe / warn / enforce). Decides the
+    /// disposition of an UNDECLARED call: log a candidate (observe), allow +
+    /// warn (warn), or deny with a precise error (enforce).
+    enforcement: EnforcementMode,
     /// The secret-resolution seam, used host-side at request time to turn an
     /// inject rule's `scheme://locator` reference into a `SecretString`.
     secrets: Arc<SecretRegistry>,
@@ -76,114 +88,148 @@ impl host::Host for HostState {
             .and_then(serde_json::Value::as_str)
             .ok_or("request is missing url")?;
         let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid url {url:?}: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| format!("url {url:?} has no host"))?;
 
-        // The capability check: the app spec grants exact outbound hosts.
+        // The component's raw method + header names, needed for canonicalization.
+        let method_raw = request
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("GET");
+        let header_names: Vec<String> = request
+            .get("headers")
+            .and_then(serde_json::Value::as_object)
+            .map(|h| h.keys().cloned().collect())
+            .unwrap_or_default();
+        // The request body, decoded ONCE up front: needed for the body matcher
+        // (EC4) and the `max_body_bytes` checks. An empty body is `&[]`.
+        let body_bytes: Vec<u8> = match request.get("body-b64").and_then(serde_json::Value::as_str)
+        {
+            Some(b64) if !b64.is_empty() => B64
+                .decode(b64)
+                .map_err(|e| format!("body-b64 is not base64: {e}"))?,
+            _ => Vec::new(),
+        };
+
+        // ── Step 1: canonicalize ONCE, before any matching (the single seam;
+        //    the §2 SOCKS5 parser-differential lesson). Both the host fence and
+        //    the call match run against this same value. ─────────────────────
+        let canon = CanonicalRequest::from_request(
+            method_raw,
+            &parsed,
+            header_names.iter().map(String::as_str),
+        )?;
+
+        // ── Step 2: the host fence (unchanged, the cheap first gate). A host
+        //    not in allow_hosts is denied before any call match — ADR-0005's
+        //    invariant; the call match is the inner gate, never a bypass. ─────
         if !self
             .allow_hosts
             .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(host))
+            .any(|allowed| allowed.eq_ignore_ascii_case(&canon.host))
         {
-            tracing::warn!(app = %self.app, %host, "denied outbound request (not in allow_hosts)");
+            tracing::warn!(app = %self.app, host = %canon.host, "denied outbound request (not in allow_hosts)");
             return Err(format!(
-                "outbound request to {host:?} denied: it is not in app {:?}'s allow_hosts \
+                "outbound request to {:?} denied: it is not in app {:?}'s allow_hosts \
                  (granted: {:?}); add it to the app's allow_hosts in apps.toml to grant access",
-                self.app, self.allow_hosts
+                canon.host, self.app, self.allow_hosts
             ));
         }
 
-        // Egress credential injection (ADR-0005): if an injection rule
-        // matches this (allowlisted) host, resolve its secret host-side and
-        // attach the credential just before the real request — the component
-        // issued a BARE request and never held the plaintext. A rule whose
-        // secret does not resolve is skipped (the request goes out
-        // unauthenticated → degraded, never a crash). The `SecretString`
-        // lives only for this call and is never logged.
-        let host_lc = host.to_ascii_lowercase();
-        let injected = match self.inject.iter().find(|(h, _, _)| *h == host_lc) {
-            Some((_, kind, rule)) => rule
-                .resolve_secret(&self.secrets, &format!("{}: inject {host_lc}", self.app))
-                .await
-                .map(|secret| (kind.clone(), secret)),
-            None => None,
+        // ── Step 3: the call match — the first declared call whose
+        //    method ∧ host ∧ path ∧ query ∧ headers ∧ body all match. ─────────
+        let matched = self
+            .calls
+            .iter()
+            .find(|call| call.matches(&canon, &body_bytes));
+
+        // ── Disposition of an UNDECLARED call, by enforcement mode. A matched
+        //    call (incl. the compat-shim broad call) always falls through to
+        //    step 4. ───────────────────────────────────────────────────────
+        let matched = match matched {
+            Some(call) => call,
+            None => match self.enforcement {
+                EnforcementMode::Enforce => {
+                    // Deny with a precise error naming the declared calls for
+                    // this host (the operator-facing diagnosis).
+                    let declared = self.declared_calls_for_host(&canon.host);
+                    tracing::warn!(
+                        app = %self.app, method = %canon.method, host = %canon.host,
+                        path = %canon.path, "denied outbound request (no declared call matches)"
+                    );
+                    return Err(format!(
+                        "outbound {} {}{} denied: no declared call matches it (app {:?}, \
+                         enforcement=enforce). Declared calls for this host: {}",
+                        canon.method, canon.host, canon.path, self.app, declared
+                    ));
+                }
+                EnforcementMode::Warn => {
+                    // Allow, but loudly warn and name the candidate to declare.
+                    tracing::warn!(
+                        app = %self.app,
+                        "would DENY in enforce mode: {} {}{} matches no declared call — \
+                         add a [[calls]] entry: {}",
+                        canon.method, canon.host, canon.path,
+                        Self::candidate_call_toml(&canon)
+                    );
+                    // Send un-credentialed (no matched call ⇒ no inject).
+                    return send_and_strip(
+                        &self.client,
+                        &canon,
+                        &parsed,
+                        &header_names,
+                        &request,
+                        &body_bytes,
+                        None,
+                    )
+                    .await;
+                }
+                EnforcementMode::Observe => {
+                    // Never deny; log the candidate declared call.
+                    tracing::info!(
+                        app = %self.app,
+                        "observe: candidate declared call for {} {}{} — {}",
+                        canon.method, canon.host, canon.path,
+                        Self::candidate_call_toml(&canon)
+                    );
+                    return send_and_strip(
+                        &self.client,
+                        &canon,
+                        &parsed,
+                        &header_names,
+                        &request,
+                        &body_bytes,
+                        None,
+                    )
+                    .await;
+                }
+            },
         };
 
-        let mut parsed = parsed;
-        if let Some((InjectKind::Query(name), secret)) = &injected {
-            // Query injection must mutate the URL before it is consumed by
-            // the request builder.
-            parsed
-                .query_pairs_mut()
-                .append_pair(name, secret.expose_secret());
-        }
-
-        let method: reqwest::Method = request
-            .get("method")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("GET")
-            .parse()
-            .map_err(|e| format!("invalid method: {e}"))?;
-        let mut builder = self
-            .client
-            .request(method, parsed)
-            .timeout(std::time::Duration::from_secs(30));
-        if let Some(headers) = request
-            .get("headers")
-            .and_then(serde_json::Value::as_object)
-        {
-            for (name, value) in headers {
-                builder = builder.header(name, value.as_str().unwrap_or_default());
-            }
-        }
-        // Apply header/bearer injection AFTER the component's own headers, so
-        // the host-attached credential is authoritative (a component cannot
-        // pre-set the injected header to a value of its choosing).
-        match &injected {
-            Some((InjectKind::Header(name), secret)) => {
-                builder = builder.header(name, secret.expose_secret());
-            }
-            Some((InjectKind::Bearer, secret)) => {
-                builder = builder.bearer_auth(secret.expose_secret());
-            }
-            _ => {}
-        }
-        if let Some(b64) = request.get("body-b64").and_then(serde_json::Value::as_str)
-            && !b64.is_empty()
-        {
-            let body = B64
-                .decode(b64)
-                .map_err(|e| format!("body-b64 is not base64: {e}"))?;
-            builder = builder.body(body);
-        }
-
-        tracing::debug!(app = %self.app, %url, injected = injected.is_some(), "outbound http-fetch");
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
-        let status = response.status().as_u16();
-        let headers: serde_json::Map<String, serde_json::Value> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string(),
-                    serde_json::Value::String(String::from_utf8_lossy(v.as_bytes()).into()),
+        // ── Step 4: inject on the matched call ONLY (ADR-0005): resolve its
+        //    secret host-side and attach it. A matched call with no inject goes
+        //    out un-credentialed (a declared public call). The `SecretString`
+        //    lives only for this call and is never logged. ───────────────────
+        let injected = match (&matched.inject_kind, &matched.inject) {
+            (Some(kind), Some(rule)) => rule
+                .resolve_secret(
+                    &self.secrets,
+                    &format!("{}: call inject {}", self.app, canon.host),
                 )
-            })
-            .collect();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|e| format!("reading response body: {e}"))?;
-        Ok(serde_json::json!({
-            "status": status,
-            "headers": headers,
-            "body-b64": B64.encode(&body),
-        })
-        .to_string())
+                .await
+                .map(|secret| (kind.clone(), secret)),
+            _ => None,
+        };
+
+        // Clone what `send_and_strip` needs before the store-free network send.
+        send_and_strip(
+            &self.client,
+            &canon,
+            &parsed,
+            &header_names,
+            &request,
+            &body_bytes,
+            injected,
+        )
+        .await
     }
 
     async fn log(&mut self, level: String, message: String) {
@@ -205,6 +251,152 @@ impl host::Host for HostState {
     }
 }
 
+/// Response headers stripped before the body is handed back to the component
+/// (fine-grained-egress §4.2 step 5): auth-bearing headers the upstream might
+/// echo, so a component can never read a credential out of a response now that
+/// the host owns it per-call. Cookies are credentials too. Names are matched
+/// case-insensitively.
+const STRIPPED_RESPONSE_HEADERS: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "www-authenticate",
+    "proxy-authenticate",
+    "set-cookie",
+];
+
+impl HostState {
+    /// The declared calls for one host, rendered for the enforce-mode denial
+    /// message (the operator-facing diagnosis). `<none>` when the host has no
+    /// declared call (only the host fence let it reach here).
+    fn declared_calls_for_host(&self, host: &str) -> String {
+        let mut shown: Vec<String> = self
+            .calls
+            .iter()
+            .filter(|c| c.host == host)
+            .map(|c| format!("{} {}", c.method_str(), c.path_str()))
+            .collect();
+        if shown.is_empty() {
+            "<none>".to_string()
+        } else {
+            shown.sort();
+            shown.dedup();
+            shown.join(", ")
+        }
+    }
+
+    /// A paste-ready `[[calls]]` candidate for an observed/undeclared request
+    /// (the warn/observe diagnostic and the EC6 generator's per-line form):
+    /// canonical method + host + path. Numeric/uuid path segments are
+    /// parameterized to `{id}` so the candidate generalizes (EC6).
+    fn candidate_call_toml(canon: &CanonicalRequest) -> String {
+        let path = crate::egress::templatize_path(&canon.segments);
+        format!(
+            "[[calls]] method = {:?}, host = {:?}, path = {:?}",
+            canon.method, canon.host, path
+        )
+    }
+}
+
+/// Build the outbound request, apply the (already-resolved) inject on the
+/// MATCHED call only, send, and strip auth-bearing response headers before
+/// returning the body to the component (fine-grained-egress §4.2 steps 4-5).
+///
+/// A FREE function (not a `&self` method) on purpose: `HostState` carries the
+/// WASI streams and is not `Sync`, so holding `&HostState` across the network
+/// await would make the `http_fetch` future non-`Send`. We pass only the
+/// `Sync` pieces (`&reqwest::Client`) and owned data, so nothing non-`Send`
+/// crosses the await. The store lock is never held here.
+#[allow(clippy::too_many_arguments)]
+async fn send_and_strip(
+    client: &reqwest::Client,
+    canon: &CanonicalRequest,
+    parsed: &reqwest::Url,
+    header_names: &[String],
+    request: &serde_json::Value,
+    body_bytes: &[u8],
+    injected: Option<(InjectKind, secrecy::SecretString)>,
+) -> Result<String, String> {
+    let mut url = parsed.clone();
+    if let Some((InjectKind::Query(name), secret)) = &injected {
+        // Query injection must mutate the URL before the builder consumes it.
+        url.query_pairs_mut()
+            .append_pair(name, secret.expose_secret());
+    }
+
+    let method: reqwest::Method = canon
+        .method
+        .parse()
+        .map_err(|e| format!("invalid method: {e}"))?;
+    let mut builder = client
+        .request(method, url)
+        .timeout(std::time::Duration::from_secs(30));
+    // The component's own headers (values come from the request object;
+    // names from `header_names`, preserving the component's casing).
+    if let Some(headers) = request
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+    {
+        for name in header_names {
+            if let Some(value) = headers.get(name).and_then(serde_json::Value::as_str) {
+                builder = builder.header(name, value);
+            }
+        }
+    }
+    // Apply header/bearer injection AFTER the component's own headers, so the
+    // host-attached credential is authoritative (a component cannot pre-set
+    // the injected header to a value of its choosing).
+    match &injected {
+        Some((InjectKind::Header(name), secret)) => {
+            builder = builder.header(name, secret.expose_secret());
+        }
+        Some((InjectKind::Bearer, secret)) => {
+            builder = builder.bearer_auth(secret.expose_secret());
+        }
+        _ => {}
+    }
+    if !body_bytes.is_empty() {
+        builder = builder.body(body_bytes.to_vec());
+    }
+
+    tracing::debug!(
+        method = %canon.method, host = %canon.host, path = %canon.path,
+        injected = injected.is_some(), "outbound http-fetch"
+    );
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status().as_u16();
+    // Strip auth-bearing response headers before handing the body back to the
+    // component (§4.2 step 5): now that the host owns the credential per-call,
+    // the component must never read one back out of a response.
+    let headers: serde_json::Map<String, serde_json::Value> = response
+        .headers()
+        .iter()
+        .filter(|(k, _)| {
+            !STRIPPED_RESPONSE_HEADERS
+                .iter()
+                .any(|s| k.as_str().eq_ignore_ascii_case(s))
+        })
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                serde_json::Value::String(String::from_utf8_lossy(v.as_bytes()).into()),
+            )
+        })
+        .collect();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("reading response body: {e}"))?;
+    Ok(serde_json::json!({
+        "status": status,
+        "headers": headers,
+        "body-b64": B64.encode(&body),
+    })
+    .to_string())
+}
+
 /// A live component instance plus its store, behind a mutex: guest calls are
 /// synchronous and quick, so the host simply serializes them per app.
 pub struct ComponentHandle {
@@ -218,9 +410,12 @@ struct Inner {
 
 impl ComponentHandle {
     /// Compile + instantiate the component at `path` with this app's grants.
-    /// `inject` carries the egress credential-injection rules (ADR-0005) and
-    /// `secrets` the resolver seam used to turn their references into values
-    /// host-side at request time — neither is ever exposed to the component.
+    /// `calls` carries the effective call-level egress capabilities
+    /// (fine-grained-egress; for a no-`[[calls]]` app this is the compat shim,
+    /// so behavior is byte-identical), `enforcement` the posture for undeclared
+    /// calls, and `secrets` the resolver seam used to turn a matched call's
+    /// inject reference into a value host-side at request time — none of these
+    /// is ever exposed to the component.
     #[allow(clippy::too_many_arguments)]
     pub async fn instantiate(
         engine: &Engine,
@@ -228,7 +423,8 @@ impl ComponentHandle {
         app: &str,
         allow_hosts: &[String],
         env: &[(String, String)],
-        inject: Vec<(String, InjectKind, InjectRule)>,
+        calls: Vec<CallSpec>,
+        enforcement: EnforcementMode,
         secrets: Arc<SecretRegistry>,
     ) -> anyhow::Result<Self> {
         let component = Component::from_file(engine, path)?;
@@ -249,7 +445,8 @@ impl ComponentHandle {
             table: ResourceTable::new(),
             app: app.to_string(),
             allow_hosts: allow_hosts.to_vec(),
-            inject,
+            calls,
+            enforcement,
             secrets,
             client: reqwest::Client::new(),
         };

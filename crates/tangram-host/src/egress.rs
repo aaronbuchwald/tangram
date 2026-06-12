@@ -148,6 +148,49 @@ pub fn canonical_path(raw: &str) -> String {
     }
 }
 
+/// Generalize a canonical path's segments into a template string for the
+/// observe-mode generator (fine-grained-egress §5.2 / EC6): a segment that
+/// looks like an opaque identifier — all-numeric, or a UUID — becomes `{id}`
+/// so the generated `[[calls]]` declares the SHAPE of the call rather than one
+/// specific resource. Other segments are kept literal. Re-parsing the result
+/// with [`PathPattern::parse`] yields a template that matches the observed
+/// call (the round-trip EC6 asserts).
+pub fn templatize_path(segments: &[String]) -> String {
+    if segments.is_empty() {
+        return "/".to_string();
+    }
+    let parts: Vec<String> = segments
+        .iter()
+        .map(|seg| {
+            if is_identifier_segment(seg) {
+                "{id}".to_string()
+            } else {
+                seg.clone()
+            }
+        })
+        .collect();
+    format!("/{}", parts.join("/"))
+}
+
+/// Whether a path segment looks like an opaque identifier (parameterized to
+/// `{id}` by the generator): all-digits, or a canonical 8-4-4-4-12 UUID.
+fn is_identifier_segment(seg: &str) -> bool {
+    if !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    is_uuid(seg)
+}
+
+fn is_uuid(seg: &str) -> bool {
+    let groups = [8, 4, 4, 4, 12];
+    let parts: Vec<&str> = seg.split('-').collect();
+    parts.len() == groups.len()
+        && parts
+            .iter()
+            .zip(groups)
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// How a [`CallSpec`] constrains the method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MethodMatch {
@@ -229,6 +272,25 @@ impl PathPattern {
             }
         }
         Ok(Self::Template(segs))
+    }
+
+    /// Render the pattern back to its declared form (for diagnostics): an
+    /// exact path verbatim, a template with `{}` placeholders, `/**` subtree.
+    pub fn render(&self) -> String {
+        match self {
+            Self::Subtree => "/**".to_string(),
+            Self::Exact(p) => p.clone(),
+            Self::Template(segs) => {
+                let parts: Vec<&str> = segs
+                    .iter()
+                    .map(|s| match s {
+                        Seg::Literal(lit) => lit.as_str(),
+                        Seg::Param => "{}",
+                    })
+                    .collect();
+                format!("/{}", parts.join("/"))
+            }
+        }
     }
 
     fn matches(&self, req: &CanonicalRequest) -> bool {
@@ -398,6 +460,20 @@ impl CallSpec {
             return body_match.evaluate(body, self.max_body_bytes) == BodyVerdict::Match;
         }
         true
+    }
+
+    /// The method rendered for diagnostics (`*` for `Any`).
+    pub fn method_str(&self) -> &str {
+        match &self.method {
+            MethodMatch::Exact(m) => m,
+            MethodMatch::Any => "*",
+        }
+    }
+
+    /// The path pattern rendered for diagnostics (the operator-facing denial
+    /// message and the candidate-call generator).
+    pub fn path_str(&self) -> String {
+        self.path.render()
     }
 
     /// The maximally-broad implicit call for the legacy compat shim (§4.2/§7):

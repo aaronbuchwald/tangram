@@ -176,14 +176,20 @@ impl AppRuntime {
     ) -> anyhow::Result<Self> {
         let component_mtime = component_mtime(component_path);
         let env = spec.resolved_env(secrets, name).await;
-        let inject = spec.resolved_inject();
+        // The effective call-level egress capabilities (fine-grained-egress):
+        // either the app's declared `[[calls]]` or the host-keyed compat shim
+        // (byte-identical for legacy apps). The enforcement posture decides the
+        // disposition of an undeclared call.
+        let calls = spec.resolved_calls();
+        let enforcement = spec.effective_enforcement();
         let component = ComponentHandle::instantiate(
             engine,
             component_path,
             name,
             &spec.allow_hosts,
             &env,
-            inject,
+            calls,
+            enforcement,
             secrets.clone(),
         )
         .await
@@ -200,7 +206,7 @@ impl AppRuntime {
         // reports `description_input: false` and stays offline/degraded
         // cleanly. Apps with no injection rules are left exactly as the
         // component reported (env-injected/native parity preserved).
-        if !spec.inject.is_empty() {
+        if spec.has_any_inject() {
             let configured = spec.any_inject_resolves(secrets, name).await;
             if let Some(caps) = describe.capabilities.as_mut()
                 && let Some(di) = caps.get_mut("description_input")
