@@ -15,6 +15,7 @@ import {
 } from "./api";
 import { MdEditor } from "./editor";
 import { authToken, registry, setAuthToken } from "./manage";
+import { promptName } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -447,23 +448,99 @@ function syncActiveNote() {
   activeEditor.editor.syncRemote(file.body);
 }
 
-// ── vault operations (with light prompts; richer UX is a later phase) ────────
+// ── vault naming: validation + custom modal ──────────────────────────────────
+
+// Characters the backend would either choke on or that make for hostile paths.
+// The model normalizes whitespace and slashes and rejects `.`/`..` segments
+// (see `normalize_path` in apps/tangram/src/lib.rs); we mirror those rules in
+// the modal so the user is corrected inline rather than after a failed action,
+// and additionally forbid the control/wildcard chars that have no place in a
+// vault path. `/` is allowed — it nests, and is validated per-segment.
+const INVALID_NAME_CHARS = /[<>:"\\|?*\x00-\x1f]/;
+const NAME_HINT =
+  'Use / to nest. Avoid < > : " \\ | ? *. Enter to confirm, Esc to cancel.';
+
+// Normalize a candidate path the same way the backend does (trim segments,
+// drop empties) so duplicate-detection compares apples to apples.
+function normalizePath(path: string): string {
+  return path
+    .split("/")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .join("/");
+}
+
+// Validate a candidate vault path against the model's rules + known names.
+// `existing` is the set of normalized paths already taken (files, and for
+// folders the folder paths); `self` is the path being renamed (allowed to keep
+// its own slot). Returns an error string for the hint line, or null if valid.
+function validatePath(
+  candidate: string,
+  existing: Set<string>,
+  self?: string,
+): string | null {
+  const segments = candidate.split("/").map((s) => s.trim());
+  if (segments.some((s) => s.length === 0)) {
+    return "Name can't have empty path segments";
+  }
+  if (segments.some((s) => s === "." || s === "..")) {
+    return "Name can't contain '.' or '..' segments";
+  }
+  if (INVALID_NAME_CHARS.test(candidate)) {
+    return 'Name can\'t contain < > : " \\ | ? * or control characters';
+  }
+  const normalized = normalizePath(candidate);
+  if (!normalized) return "Name can't be empty";
+  if (normalized !== self && existing.has(normalized)) {
+    return `"${normalized}" already exists`;
+  }
+  return null;
+}
+
+/** Normalized paths currently taken by files. */
+function takenFilePaths(): Set<string> {
+  return new Set(files.map((f) => normalizePath(f.path)));
+}
+
+/** Normalized folder paths currently in the vault (every ancestor of a file). */
+function takenFolderPaths(): Set<string> {
+  const set = new Set<string>();
+  for (const f of files) {
+    const segs = normalizePath(f.path).split("/");
+    segs.pop(); // drop the filename
+    let acc = "";
+    for (const s of segs) {
+      acc = acc ? `${acc}/${s}` : s;
+      set.add(acc);
+    }
+  }
+  return set;
+}
+
+// ── vault operations (custom modal; folder-context preserved) ────────────────
 
 // Create a note inside `folder` (empty string = vault root). We prompt for the
-// filename only and join it to the target folder, so the file always lands in
-// the folder whose "+ note" the user clicked — the path context the old
-// root-only button never carried (#14). The user can still type a `/` to nest
-// further; the backend normalizes and rejects collisions.
+// filename only (via the custom modal) and join it to the target folder, so the
+// file always lands in the folder whose "+ note" the user clicked — the path
+// context the old root-only button never carried (#14). The user can still type
+// a `/` to nest further. The modal validates against the model's path rules and
+// existing names so a collision is caught inline, not after a failed action.
 async function newNote(folder: string) {
   const where = folder ? `${folder}/` : "vault root";
-  const name = window.prompt(`New note in ${where}`, "untitled.md");
+  const taken = takenFilePaths();
+  const name = await promptName({
+    title: `New note in ${where}`,
+    hint: NAME_HINT,
+    value: "untitled.md",
+    placeholder: "untitled.md",
+    selection: { start: 0, end: "untitled".length },
+    validate: (v) => validatePath(folder ? `${folder}/${v}` : v, taken),
+  });
   if (!name) return;
-  const trimmed = name.trim();
-  if (!trimmed) return;
-  const path = folder ? `${folder}/${trimmed}` : trimmed;
+  const path = folder ? `${folder}/${name}` : name;
   // Reveal the target folder so a freshly-created note isn't hidden.
   collapsed.delete(folder);
-  const title = (trimmed.split("/").pop() ?? trimmed).replace(/\.md$/i, "");
+  const title = (name.split("/").pop() ?? name).replace(/\.md$/i, "");
   try {
     const id = await vault.createFile(path, `# ${title}\n\n`);
     tabs.openNote(id);
@@ -473,15 +550,20 @@ async function newNote(folder: string) {
 }
 
 // Create a folder inside `parent` (empty string = vault root). As with notes,
-// we prompt for the new folder's name and join it to the parent so it nests
-// where clicked.
+// we prompt for the new folder's name (modal) and join it to the parent so it
+// nests where clicked.
 async function newFolder(parent: string) {
   const where = parent ? `${parent}/` : "vault root";
-  const name = window.prompt(`New folder in ${where}`, "folder");
+  const taken = takenFolderPaths();
+  const name = await promptName({
+    title: `New folder in ${where}`,
+    hint: NAME_HINT,
+    placeholder: "folder",
+    confirmLabel: "Create folder",
+    validate: (v) => validatePath(parent ? `${parent}/${v}` : v, taken),
+  });
   if (!name) return;
-  const trimmed = name.trim();
-  if (!trimmed) return;
-  const path = parent ? `${parent}/${trimmed}` : trimmed;
+  const path = parent ? `${parent}/${name}` : name;
   if (parent) collapsed.delete(parent);
   try {
     await vault.createFolder(path);
@@ -492,10 +574,18 @@ async function newFolder(parent: string) {
 
 // Rename / move a whole folder (rewrites the prefix of every file under it).
 async function renameFolder(path: string) {
-  const next = window.prompt("Rename / move folder", path);
+  const taken = takenFolderPaths();
+  const next = await promptName({
+    title: "Rename / move folder",
+    hint: NAME_HINT,
+    value: path,
+    confirmLabel: "Rename",
+    selection: { start: 0, end: path.length },
+    validate: (v) => validatePath(v, taken, normalizePath(path)),
+  });
   if (!next) return;
-  const trimmed = next.trim();
-  if (!trimmed || trimmed === path) return;
+  const trimmed = normalizePath(next);
+  if (trimmed === normalizePath(path)) return;
   try {
     await vault.renameFolder(path, trimmed);
   } catch (e) {
@@ -504,8 +594,16 @@ async function renameFolder(path: string) {
 }
 
 async function renameFile(file: MdFile) {
-  const next = window.prompt("Rename / move file", file.path);
-  if (!next || next === file.path) return;
+  const taken = takenFilePaths();
+  const next = await promptName({
+    title: "Rename / move file",
+    hint: NAME_HINT,
+    value: file.path,
+    confirmLabel: "Rename",
+    selection: { start: 0, end: file.path.length },
+    validate: (v) => validatePath(v, taken, normalizePath(file.path)),
+  });
+  if (!next || normalizePath(next) === normalizePath(file.path)) return;
   try {
     await vault.renameFile(file.id, next);
   } catch (e) {
