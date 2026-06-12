@@ -579,6 +579,38 @@ impl GuidedLearning {
             .ok_or_else(|| format!("no session with id {session_id}"))
     }
 
+    /// Test seam: push a question with its withheld answer directly, standing
+    /// in for `generate_questions` when a test must exercise the pure sync
+    /// gates without an LLM. Not an action (no `&self`/`Ctx` action shape on
+    /// the registry) — a plain `#[doc(hidden)]` helper.
+    #[doc(hidden)]
+    pub fn test_push_question(
+        &mut self,
+        session_id: &str,
+        question_id: &str,
+        prompt: &str,
+        model_answer: &str,
+    ) {
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            s.questions.push(Question {
+                id: question_id.to_string(),
+                topic_id: "topic_test".into(),
+                kind: "factual".into(),
+                prompt: prompt.to_string(),
+                model_answer: None,
+                attempts: Vec::new(),
+                revealed: false,
+                peeked: false,
+                schedule: ReviewSchedule::genesis(),
+                created_at_ms: 0,
+            });
+            s.pending_answers.push(PendingAnswer {
+                question_id: question_id.to_string(),
+                model_answer: model_answer.to_string(),
+            });
+        }
+    }
+
     fn question_mut(
         &mut self,
         session_id: &str,
