@@ -129,7 +129,7 @@
         let out = "";
         switch (item.phase) {
           case "DRAFTED":
-            out = b("Discover", "discover");
+            out = b("Discover", "discover") + b("Discover (LLM assist)", "discover_assisted");
             break;
           case "DISCOVERED":
             out = b("Classify", "classify");
@@ -156,6 +156,7 @@
 
       const dispatch = {
         discover: (id) => call("discover", { id }),
+        discover_assisted: (id) => call("discover_assisted", { id }),
         classify: (id) => call("classify", { id }),
         plan: (id) => call("plan", { id }),
         approve: async (id) => {

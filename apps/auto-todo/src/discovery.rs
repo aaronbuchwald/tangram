@@ -12,6 +12,86 @@
 
 use crate::{InferredRequirements, NeedDisposition, Plan, PlanStep};
 
+mod llm;
+
+/// Discovery mode (design §5.1, AC2). Mirrors nutrition's strategy seam: an
+/// explicit `AUTO_TODO_DISCOVERY` wins; unset falls back to the LLM only when
+/// an Anthropic key is present, otherwise the deterministic offline rules.
+/// Tests always run offline — CI never makes a live call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryMode {
+    /// Deterministic, rule-based only (keyless default).
+    Offline,
+    /// Rule-based PLUS an LLM assist that may PROPOSE extra needs; the
+    /// proposal is merged and then re-classified deterministically.
+    Llm,
+}
+
+impl DiscoveryMode {
+    /// Select from the environment (nutrition's `Strategy::from_env` shape).
+    #[must_use]
+    pub fn from_env() -> Self {
+        match std::env::var("AUTO_TODO_DISCOVERY").as_deref() {
+            Ok("llm") => Self::Llm,
+            Ok("offline") => Self::Offline,
+            _ => {
+                let has_key = std::env::var("ANTHROPIC_API_KEY")
+                    .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
+                    .is_ok_and(|k| !k.trim().is_empty());
+                if has_key { Self::Llm } else { Self::Offline }
+            }
+        }
+    }
+}
+
+/// Discover requirements for an item, optionally with the LLM assist (AC2).
+///
+/// The DETERMINISTIC rules are always run and are authoritative for
+/// irreversibility/credentials. In `Llm` mode an Anthropic call (through the
+/// `tangram::http` egress facade, one declared call, ADR-0005 host-side
+/// credential injection) may PROPOSE additional capabilities/connections/
+/// human-assistance — over-disclosure is cheap (design §5.1). The proposal is
+/// MERGED into the rule output (union; never lowers irreversibility), so the
+/// gates never depend on the model's judgement. On any LLM error or in offline
+/// mode this is exactly the deterministic [`infer_requirements`].
+pub async fn discover(text: &str) -> InferredRequirements {
+    let mut base = infer_requirements(text);
+    if DiscoveryMode::from_env() == DiscoveryMode::Llm {
+        match llm::propose(text).await {
+            Ok(Some(proposal)) => merge_proposal(&mut base, proposal),
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("auto-todo LLM discovery assist failed, using rules only: {e}")
+            }
+        }
+    }
+    base
+}
+
+/// Merge an LLM proposal into the deterministic base: UNION the additive
+/// lists and RAISE (never lower) irreversibility. The rules stay
+/// authoritative; the model can only widen disclosure, raising confidence
+/// when it agrees there is something concrete to do.
+fn merge_proposal(base: &mut InferredRequirements, p: llm::Proposal) {
+    for c in p.capabilities {
+        push_unique(&mut base.capabilities, &c);
+    }
+    for c in p.connections {
+        push_unique(&mut base.connections, &c);
+    }
+    for c in p.credentials {
+        push_unique(&mut base.credentials, &c);
+    }
+    for h in p.human_assistance {
+        push_unique(&mut base.human_assistance, &h);
+    }
+    let irr = base.irreversibility.clone();
+    base.irreversibility = worse(&irr, &p.irreversibility).to_string();
+    if !base.capabilities.is_empty() && base.confidence < 0.85 {
+        base.confidence = 0.85;
+    }
+}
+
 /// The classification of a single inferred need (design §5.2), in
 /// risk-ascending preference order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,5 +523,74 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
 fn push_unique_string(v: &mut Vec<String>, s: String) {
     if !v.contains(&s) {
         v.push(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_proposal_unions_and_raises_irreversibility() {
+        // Base: a read-only calendar read (irreversibility "none").
+        let mut base = infer_requirements("what's on my calendar Tuesday");
+        assert_eq!(base.irreversibility, "none");
+        // An LLM proposal adds a connection + raises irreversibility.
+        let proposal = llm::Proposal {
+            capabilities: vec!["email.send".into(), "calendar.read".into()], // dup is deduped
+            connections: vec!["Gmail".into()],
+            credentials: vec!["oauth".into()],
+            human_assistance: vec!["payment confirmation".into()],
+            irreversibility: "irreversible".into(),
+        };
+        merge_proposal(&mut base, proposal);
+        assert!(base.capabilities.contains(&"email.send".to_string()));
+        assert!(base.capabilities.contains(&"calendar.read".to_string()));
+        // Union, not duplication.
+        assert_eq!(
+            base.capabilities
+                .iter()
+                .filter(|c| *c == "calendar.read")
+                .count(),
+            1
+        );
+        assert!(base.connections.contains(&"Gmail".to_string()));
+        // Irreversibility only ever RISES.
+        assert_eq!(base.irreversibility, "irreversible");
+    }
+
+    #[test]
+    fn merge_never_lowers_irreversibility() {
+        let mut base = infer_requirements("renew my domain"); // irreversible
+        assert_eq!(base.irreversibility, "irreversible");
+        let proposal = llm::Proposal {
+            capabilities: vec![],
+            connections: vec![],
+            credentials: vec![],
+            human_assistance: vec![],
+            irreversibility: "none".into(), // model under-disclosed
+        };
+        merge_proposal(&mut base, proposal);
+        assert_eq!(
+            base.irreversibility, "irreversible",
+            "rules stay authoritative"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_discover_equals_deterministic_rules() {
+        // With no key and no explicit mode, discover() is exactly the rules.
+        // (CI has no ANTHROPIC_API_KEY; this never touches the network.)
+        unsafe {
+            std::env::set_var("AUTO_TODO_DISCOVERY", "offline");
+        }
+        let got = discover("renew my domain").await;
+        let want = infer_requirements("renew my domain");
+        assert_eq!(got.capabilities, want.capabilities);
+        assert_eq!(got.irreversibility, want.irreversibility);
+        assert_eq!(got.confidence, want.confidence);
+        unsafe {
+            std::env::remove_var("AUTO_TODO_DISCOVERY");
+        }
     }
 }

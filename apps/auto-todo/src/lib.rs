@@ -243,6 +243,21 @@ impl AutoTodo {
             .find(|i| i.id == id)
             .ok_or_else(|| format!("no item with id {id}"))
     }
+
+    /// Store discovered requirements on an item and move it to DISCOVERED,
+    /// invalidating any downstream dispositions/plan/approval (re-discovery
+    /// re-opens the cycle, design §8). Shared by the sync `discover` and the
+    /// async `discover_assisted` commit step.
+    fn apply_requirements(&mut self, id: &str, req: InferredRequirements) -> Result<(), String> {
+        let item = self.find_mut(id)?;
+        item.requirements = Some(req);
+        item.dispositions.clear();
+        item.plan = None;
+        item.approval = None;
+        item.confirmed_steps.clear();
+        item.set_phase(Phase::Discovered);
+        Ok(())
+    }
 }
 
 impl Item {
@@ -303,22 +318,36 @@ impl AutoTodo {
         Ok(())
     }
 
-    /// `discover()` — DRAFTED → DISCOVERED. AC1 records a deterministic,
-    /// rule-based requirements inference over the item text (the LLM assist
-    /// arrives in AC2 behind the offline fixture seam). Re-discovering from a
-    /// later phase resets the item to DISCOVERED and clears the downstream
-    /// plan/approval (re-planning re-opens approval, design §8).
+    /// `discover()` — DRAFTED → DISCOVERED, DETERMINISTIC (rule-based, no
+    /// network). Records a reviewable requirements inference over the item
+    /// text. This is the keyless/offline path and the floor every other path
+    /// builds on; the LLM-assisted variant is [`discover_assisted`]. Re-running
+    /// from a later phase resets the item to DISCOVERED and clears the
+    /// downstream plan/approval (re-planning re-opens approval, design §8).
     pub fn discover(&mut self, id: String) -> Result<(), String> {
-        let item = self.find_mut(&id)?;
-        let req = discovery::infer_requirements(&item.text);
-        item.requirements = Some(req);
-        // Re-discovery invalidates everything downstream.
-        item.dispositions.clear();
-        item.plan = None;
-        item.approval = None;
-        item.confirmed_steps.clear();
-        item.set_phase(Phase::Discovered);
-        Ok(())
+        let req = discovery::infer_requirements(&self.find(&id)?.text);
+        self.apply_requirements(&id, req)
+    }
+
+    /// `discover_assisted()` — DRAFTED → DISCOVERED with the optional LLM
+    /// assist (AC2, design §5.1). The deterministic rules are always run and
+    /// stay authoritative; in `AUTO_TODO_DISCOVERY=llm` mode an Anthropic call
+    /// (resolved OUTSIDE the store lock, through the host's egress facade) may
+    /// PROPOSE additional needs that are merged (union; never lowers
+    /// irreversibility). With no key / offline mode this is exactly
+    /// [`discover`]. The merge result is reviewable DATA — no action is taken.
+    pub async fn discover_assisted(ctx: Ctx<Self>, id: String) -> Result<(), String> {
+        // Read the item text outside the lock (the LLM call must not hold it).
+        let text = ctx
+            .state()
+            .map_err(|e| e.to_string())?
+            .find(&id)?
+            .text
+            .clone();
+        let req = discovery::discover(&text).await;
+        // Commit the resolved requirements as one attributed change.
+        ctx.mutate("discover_assisted", |m| m.apply_requirements(&id, req))
+            .map_err(|e| e.to_string())?
     }
 
     /// `classify()` — DISCOVERED → CLASSIFIED. Annotate each inferred need
