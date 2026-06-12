@@ -17,9 +17,6 @@
 use tangram::prelude::*;
 
 pub mod schedule;
-#[cfg(not(target_family = "wasm"))]
-mod tutor;
-#[cfg(target_family = "wasm")]
 pub mod tutor;
 
 // ── model ────────────────────────────────────────────────────────────────────
