@@ -30,6 +30,13 @@ symlink to `.agents/skills`.
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in
   `apps/nutrition/src/strategy/` (see README "Nutrition strategies")
+- `apps/morning-brief` — the **AI-enabled-component pattern** (fetch sources →
+  build prompt → call LLM → write the brief to the component's own doc, not an
+  egress): a configurable brief over calendar/email with an in-tangram
+  feedback/"dreaming" loop. Offline core only — `run_brief` input_mode
+  "fixture" is zero-network (CI's flagship); the source/LLM seam
+  (`src/source.rs` + `src/llm.rs`) is where the live egress tier slots in.
+  Spec + checkpoints: `docs/design/morning-brief.md`
 - `apps/registry` — the fleet's source of truth (RUNTIME_PLAN Phase 3): a
   Tangram app whose replicated spec list the host merges over `apps.toml`;
   bearer auth via `TANGRAM_AUTH_TOKEN` (README "The registry app"). Give it a

@@ -2609,6 +2609,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-morning-brief"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "axum",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tangram",
+ "tangram-core",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-notes"
 version = "0.1.0"
 dependencies = [
