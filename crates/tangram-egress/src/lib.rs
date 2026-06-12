@@ -64,7 +64,10 @@ mod tests {
 
     #[test]
     fn host_lowercases_and_strips_trailing_dot() {
-        assert_eq!(canonical_host("WWW.Example.COM.").unwrap(), "www.example.com");
+        assert_eq!(
+            canonical_host("WWW.Example.COM.").unwrap(),
+            "www.example.com"
+        );
     }
 
     #[test]
