@@ -640,10 +640,32 @@ async fn sync_events(
 
 // ── index ────────────────────────────────────────────────────────────────────
 
-/// The root index lists TOP-LEVEL apps only — tenant apps are private to
-/// their (authenticated) tenant index at `/t/<tenant>/`.
-async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
+/// `GET /` — the host's default view. When a top-level app named `tangram`
+/// is present (the Obsidian-style shell, docs/design/tangram-shell-redesign.md),
+/// `/` redirects to `/tangram/` so the shell becomes the default landing view.
+/// Otherwise it falls back to the built-in centered app-list index, so a host
+/// without the shell app still has a usable root. Either way the index lists
+/// TOP-LEVEL apps only — tenant apps stay private to their (authenticated)
+/// tenant index at `/t/<tenant>/`, which keeps the built-in list (the shell is
+/// the top-level, trusted-localhost surface for now — see the redesign doc's
+/// "Multi-tenant shell chrome" non-goal).
+///
+/// We REDIRECT rather than serve the shell bundle at `/` deliberately: the
+/// shell is built with Vite `base: "./"` and its UI fetches relative paths
+/// that assume a `/tangram/` mount — `./assets/...` (served by the host at
+/// `/tangram/assets/...`, NOT `/assets/...`), `../api/fleet`, `../registry/...`,
+/// and `<iframe src="../<app>/">`. Serving the same bytes at `/` would break
+/// asset loading outright (the host has no `/assets/` route) and shift every
+/// relative path's depth. A 307 to `/tangram/` preserves every relative-path
+/// assumption and keeps `/tangram/` itself working unchanged.
+async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Response {
     let apps = host.apps.read().await;
+    if apps.contains_key(&AppKey::top("tangram")) {
+        // Temporary (307), not permanent: `/` stays the canonical default-view
+        // URL, so if the shell app is later removed the fallback index below
+        // takes over without a cached permanent redirect getting in the way.
+        return Redirect::temporary("/tangram/").into_response();
+    }
     // Deterministic order — alphabetical by app name — so this host, a local
     // replica, and the Cloudflare worker all list apps identically. The live
     // table is a HashMap, whose iteration order is otherwise non-deterministic
@@ -659,6 +681,7 @@ async fn index(State((host, _)): State<(Arc<Host>, bool)>) -> Html<String> {
         "WASM components running on this host",
         cards,
     )
+    .into_response()
 }
 
 /// `GET /t/<tenant>/` — the tenant's own index (bearer-gated by the
