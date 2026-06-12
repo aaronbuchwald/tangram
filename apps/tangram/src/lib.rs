@@ -344,6 +344,30 @@ mod tests {
         assert!(v.rename_file(b, "sub/a.md".into()).is_err());
     }
 
+    /// The #14 happy path the shell UI now drives: create a folder, create a
+    /// file *inside* it (the UI joins the clicked folder's path to the typed
+    /// name), edit the body, and confirm the edit persists and the file lives
+    /// under the folder. Guards against a regression where a note created "in"
+    /// a folder silently landed at the vault root.
+    #[test]
+    fn create_file_inside_folder_then_edit_persists() {
+        let mut v = empty();
+        v.create_folder("projects".into()).unwrap();
+        // UI joins folder + filename → "projects/roadmap.md".
+        let id = v
+            .create_file("projects/roadmap.md".into(), "# Roadmap\n\n".into())
+            .unwrap();
+        assert!(
+            v.list_files()
+                .iter()
+                .any(|f| f.path == "projects/roadmap.md"),
+            "the new file should live under the folder, not at the root"
+        );
+        v.write_file(id.clone(), "# Roadmap\n\n- ship it\n".into())
+            .unwrap();
+        assert_eq!(v.read_file(id).unwrap(), "# Roadmap\n\n- ship it\n");
+    }
+
     #[test]
     fn folder_create_rename_delete() {
         let mut v = empty();
