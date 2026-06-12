@@ -203,3 +203,65 @@ ui = "{root}/apps/notes/ui"
         Some(reqwest::StatusCode::NOT_FOUND),
     );
 }
+
+/// CP4 — a manifest under-claiming the real imports is FLAGGED, not failed:
+/// nutrition (imports http-fetch) granted nothing, declaring `network: none`,
+/// RUNS but is stamped `verified: false` with a reason naming http-fetch.
+#[tokio::test]
+async fn under_claim_is_flagged() {
+    if !have_components(&["nutrition"], "under_claim_is_flagged") {
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    // Grant nothing (so no hard fail), but declare network: none while the
+    // component imports http-fetch → declared ⊄ audited → SOFT FLAG.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[apps.nutrition]
+component = "{nutrition}"
+ui = "{root}/apps/nutrition/ui"
+
+[apps.nutrition.declared.network]
+kind = "none"
+"#,
+            nutrition = component("nutrition").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    wait_for("nutrition healthy", Duration::from_secs(120), || async {
+        status_of(&client, &format!("{base}/nutrition/healthz")).await
+            == Some(reqwest::StatusCode::OK)
+    })
+    .await;
+
+    let entry = fleet_entry(&client, &base, "nutrition")
+        .await
+        .expect("nutrition in fleet");
+    assert_eq!(entry["running"], true, "the flagged app still runs");
+    assert_eq!(
+        entry["error"],
+        serde_json::Value::Null,
+        "soft flag, not error"
+    );
+    assert_eq!(entry["verified"], false, "under-claiming is unverified");
+    let reasons = entry["verify_reasons"].as_array().expect("verify_reasons");
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.as_str().is_some_and(|s| s.contains("http-fetch"))),
+        "reason names the http-fetch discrepancy: {reasons:?}"
+    );
+}
