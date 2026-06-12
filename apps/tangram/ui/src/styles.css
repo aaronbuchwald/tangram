@@ -110,11 +110,6 @@ body {
 .app-row .dot.healthy { background: var(--green); }
 .app-row .dot.parked { background: var(--faint); }
 .app-row .dot.error { background: var(--red); }
-.tag {
-  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--blue); border: 1px solid var(--line); border-radius: 4px;
-  padding: 0 4px;
-}
 
 /* app management controls (enable/disable, remove) — revealed on hover so the
    list stays calm at rest, matching the vault row delete affordance */

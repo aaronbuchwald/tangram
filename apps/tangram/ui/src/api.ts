@@ -17,6 +17,13 @@ export interface VaultState {
   files: MdFile[];
 }
 
+// The shell's own app name on the host. The shell is the outer container and
+// must never appear in its own selectable APPS list (opening it would nest
+// tangram inside tangram). The host's `/api/fleet` payload carries no explicit
+// "this is the shell" flag, so the name is the identifier — kept here as the
+// single source of truth and reused wherever the self-entry must be excluded.
+export const SHELL_APP = "tangram";
+
 export interface FleetApp {
   name: string;
   // "file" = a bootstrap app from apps.toml (host-owned, not managed here);

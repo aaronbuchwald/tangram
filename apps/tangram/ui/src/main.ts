@@ -6,6 +6,7 @@
 import "./styles.css";
 import {
   fetchFleet,
+  SHELL_APP,
   subscribeVault,
   vault,
   type FleetApp,
@@ -196,7 +197,6 @@ function renderApps() {
     const label = el("span", "label", app.name);
     label.addEventListener("click", () => tabs.openApp(app.name));
     row.appendChild(label);
-    if (app.name === "tangram") row.appendChild(el("span", "tag", "shell"));
 
     // Management controls (Phase S2c): only registry-managed apps
     // (source === "registry") can be toggled/removed — apps.toml bootstrap
@@ -478,7 +478,14 @@ function onVaultState(state: VaultState) {
 async function refreshFleet() {
   try {
     const f = await fetchFleet();
-    fleet = (f.apps ?? []).sort((a, b) => a.name.localeCompare(b.name));
+    // Exclude the shell's own entry: it is the outer container, not a
+    // selectable app. Without this, opening tangram → clicking tangram in the
+    // sidebar would nest the shell inside itself. Filtering at the single
+    // fleet-ingest point keeps it out of the APPS list, the tab path, and the
+    // home stats alike.
+    fleet = (f.apps ?? [])
+      .filter((a) => a.name !== SHELL_APP)
+      .sort((a, b) => a.name.localeCompare(b.name));
     renderApps();
     // Keep the landing/home stats (APPS / HEALTHY) in step with the fleet:
     // the home tab is otherwise only re-rendered on tab/vault changes, so it
