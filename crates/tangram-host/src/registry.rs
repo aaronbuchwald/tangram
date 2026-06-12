@@ -230,6 +230,11 @@ pub fn parse_state(
                 allow_hosts: entry.allow_hosts,
                 env: entry.env.into_iter().map(|e| (e.key, e.value)).collect(),
                 inject,
+                // The registry document carries no separate declared manifest
+                // yet; an installed app's declaration is derived from its
+                // granted fields (an honest install verifies trivially). The
+                // marketplace-manifest passthrough is future wiring (plan §2.4).
+                declared: None,
                 remote,
                 remote_token,
                 registry: false,
@@ -330,6 +335,7 @@ mod tests {
             allow_hosts: Vec::new(),
             env: BTreeMap::new(),
             inject: BTreeMap::new(),
+            declared: None,
             remote: None,
             remote_token: None,
             registry,

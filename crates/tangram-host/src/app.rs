@@ -143,6 +143,12 @@ pub struct AppRuntime {
     pub component: ComponentHandle,
     pub doc: Arc<AppDoc>,
     pub describe: Describe,
+    /// The mechanical capability-manifest verdict for the running bytes (plan
+    /// §2.3): the result of `granted ⊆ declared ⊆ audited`. A HARD fail
+    /// (`granted ⊄ declared`) never reaches here — it aborts `build` with an
+    /// `Err`; this carries only the SOFT-flag outcome (Verified, or Unverified
+    /// with reasons) of an app that DID instantiate.
+    pub verification: crate::verify::Verification,
     pub sessions: tangram::sync::Sessions,
     /// The dial-out sync client, if a remote is configured; aborted when the
     /// runtime is dropped (app removed or reloaded).
@@ -188,6 +194,28 @@ impl AppRuntime {
         )
         .await
         .with_context(|| format!("instantiating component {}", component_path.display()))?;
+
+        // Mechanical capability-manifest verification (plan §2.3), slotted in
+        // AFTER a successful instantiation so it can only ADD a verdict, never
+        // perturb the instantiate/error/reload paths. The chain is
+        // `granted ⊆ declared ⊆ audited`:
+        //   - granted: the EFFECTIVE (post-ceiling) spec grant — `spec` here is
+        //     already the effective spec the converge loop resolved.
+        //   - declared: the spec's `declared` manifest, or — absent — derived
+        //     from the grant (an honest spec verifies trivially).
+        //   - audited: the component's real function-level imports.
+        // A HARD fail (`granted ⊄ declared`, or granting reach to a no-
+        // http-fetch component) is an `Err` here → recorded as the app's
+        // converge error exactly like a sha-256 mismatch; the app does not run.
+        let verification = crate::verify::verify(
+            &spec.granted_capabilities(),
+            &spec.declared_capabilities(),
+            component.audited(),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        if let crate::verify::Verification::Unverified { reasons } = &verification {
+            tracing::warn!("{name}: running UNVERIFIED — {}", reasons.join("; "));
+        }
 
         let mut describe: Describe = serde_json::from_str(&component.describe().await?)
             .context("parsing the component's describe() manifest")?;
@@ -241,6 +269,7 @@ impl AppRuntime {
             component,
             doc,
             describe,
+            verification,
             sessions: tangram::sync::Sessions::default(),
             remote_task,
         })

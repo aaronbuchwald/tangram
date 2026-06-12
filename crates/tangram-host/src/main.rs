@@ -147,6 +147,7 @@ fn tenant_bootstrap(
         allow_hosts: Vec::new(),
         env: BTreeMap::new(),
         inject: BTreeMap::new(),
+        declared: None,
         remote: None,
         remote_token: None,
         registry: true,

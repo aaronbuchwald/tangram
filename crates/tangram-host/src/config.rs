@@ -105,6 +105,63 @@ impl InjectRule {
     }
 }
 
+/// What an app DECLARES it needs — the middle link of the verification chain
+/// `granted ⊆ declared ⊆ audited` (design:
+/// `docs/design/manifest-verification-plan.md` §2.4). This is a REQUEST, never
+/// an authority: it is bounded above by the operator grant (`allow_hosts`/
+/// `env`/`inject`) and below by the component's audited imports. The host
+/// reads it but never trusts it as a grant.
+///
+/// Sourced from the marketplace `CapabilityManifest` on install, or written
+/// directly under `[apps.<app>.declared]` for a file spec. ABSENT (the common
+/// case for first-party apps) → the host derives the declaration from the
+/// granted spec itself, so an honest spec verifies trivially (plan §2.4
+/// back-compat).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredManifest {
+    /// The declared outbound-network claim. Absent → derived from the granted
+    /// `allow_hosts` (back-compat). `{ network = "none" }` is the explicit
+    /// "no network" claim — verifies for zero hosts and must import no
+    /// `http-fetch`.
+    #[serde(default)]
+    pub network: NetworkClaim,
+    /// The environment-variable KEYS the app declares it reads. Absent →
+    /// derived from the granted `env` keys (back-compat). env is gated
+    /// manifest-side only (granted keys ⊆ declared keys); it carries data, not
+    /// reach, so it has no import-level predicate (plan §2.1).
+    #[serde(default)]
+    pub env_keys: Option<Vec<String>>,
+}
+
+/// The declared outbound-network shape (plan §2.4, §2.6). Additive and
+/// grain-agnostic: `Hosts` is today's host-level grain; `Calls` is the
+/// fine-grained-egress call grain (DESIGNED-FOR, gated on that feature — see
+/// [`crate::verify::CallSpec`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum NetworkClaim {
+    /// No outbound network at all — the component must import no `http-fetch`.
+    None,
+    /// A set of exact outbound host names (the existing `allow_hosts` grain).
+    Hosts { hosts: Vec<String> },
+    /// Fine-grained call-level claims (fine-grained-egress §4). Gated on that
+    /// feature; present so the schema and the verifier's containment relation
+    /// are designed for it (plan §2.6, CP6).
+    Calls { calls: Vec<crate::verify::CallSpec> },
+}
+
+impl Default for NetworkClaim {
+    /// A declaration with no explicit `network` defaults to "no network",
+    /// which the chain then RELAXES to the granted hosts when the whole
+    /// `declared` manifest is absent (see [`AppSpec::declared_capabilities`]).
+    /// When a manifest IS present but omits `network`, "none" is the safe
+    /// reading (declare nothing ⇒ claim nothing).
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// One app's spec: which component to run, what UI to serve, and what the
 /// component is granted (data dir, outbound hosts, environment).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -155,6 +212,14 @@ pub struct AppSpec {
     /// exposure — see ADR-0005 scope note).
     #[serde(default)]
     pub inject: BTreeMap<String, InjectRule>,
+    /// What the app DECLARES it needs (the middle link of the verification
+    /// chain, plan §2.4). Optional and additive: absent → the declaration is
+    /// derived from the granted fields above (an honest spec verifies
+    /// trivially). When present, the host enforces `granted ⊆ declared` (a
+    /// hard converge fail when violated). `[apps.<app>.declared]` in a file
+    /// spec, or the marketplace manifest passed through on install.
+    #[serde(default)]
+    pub declared: Option<DeclaredManifest>,
     /// Optional sync base of a peer to replicate with (the host dials out,
     /// exactly like a native app's TANGRAM_REMOTE).
     #[serde(default)]
@@ -332,6 +397,42 @@ impl AppSpec {
                 }
             })
             .collect()
+    }
+
+    /// The EFFECTIVE declared capabilities for the verification chain (plan
+    /// §2.3 step 4). When the spec carries an explicit `declared` manifest it
+    /// is used verbatim; otherwise the declaration is DERIVED from the granted
+    /// fields — `Hosts(allow_hosts)` (or `None` when empty) plus the granted
+    /// env keys — so an honest, un-annotated spec verifies trivially
+    /// (`granted == declared`). This is the back-compat default plan §2.4
+    /// names: never widen past the operator grant, and an app that says
+    /// nothing is taken to declare exactly what it was granted.
+    pub fn declared_capabilities(&self) -> crate::verify::DeclaredCapabilities {
+        use crate::verify::DeclaredCapabilities;
+        match &self.declared {
+            Some(manifest) => DeclaredCapabilities::from_manifest(manifest, &self.allow_hosts),
+            None => DeclaredCapabilities::derived_from_grant(
+                &self.allow_hosts,
+                self.env.keys().cloned(),
+            ),
+        }
+    }
+
+    /// The EFFECTIVE granted capabilities for the verification chain — the
+    /// POST-CEILING values already on this spec (plan §3.1: the tenant ceiling
+    /// intersection has already been applied to `allow_hosts` by
+    /// `tenant::effective_spec`, so verifying the spec here verifies the
+    /// effective grant, never the raw pre-ceiling request).
+    pub fn granted_capabilities(&self) -> crate::verify::GrantedCapabilities {
+        crate::verify::GrantedCapabilities {
+            allow_hosts: self
+                .allow_hosts
+                .iter()
+                .map(|h| h.to_ascii_lowercase())
+                .collect(),
+            inject_hosts: self.inject.keys().map(|h| h.to_ascii_lowercase()).collect(),
+            env_keys: self.env.keys().cloned().collect(),
+        }
     }
 
     /// Whether this app has at least one injection rule whose secret resolves
@@ -534,6 +635,67 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_declared_manifest_and_defaults_to_derived() {
+        use crate::verify::DeclaredNetwork;
+        // No `declared` block → declaration derived from the grant.
+        let config = HostConfig::parse(
+            r#"
+            [apps.notes]
+            component = "notes.wasm"
+            ui = "ui"
+            allow_hosts = ["api.example.com"]
+            [apps.notes.env]
+            K = "v"
+            "#,
+        )
+        .unwrap();
+        let derived = config.apps["notes"].declared_capabilities();
+        assert_eq!(
+            derived.network,
+            DeclaredNetwork::Hosts(["api.example.com".into()].into_iter().collect())
+        );
+        assert!(derived.env_keys.contains("K"));
+
+        // An explicit `declared` block is used verbatim.
+        let config = HostConfig::parse(
+            r#"
+            [apps.app]
+            component = "a.wasm"
+            ui = "ui"
+            allow_hosts = ["api.calorieninjas.com"]
+            [apps.app.declared.network]
+            kind = "hosts"
+            hosts = ["api.calorieninjas.com"]
+            [apps.app.declared]
+            env_keys = ["NUTRITION_STRATEGY"]
+            "#,
+        )
+        .unwrap();
+        let declared = config.apps["app"].declared_capabilities();
+        assert_eq!(
+            declared.network,
+            DeclaredNetwork::Hosts(["api.calorieninjas.com".into()].into_iter().collect())
+        );
+        assert!(declared.env_keys.contains("NUTRITION_STRATEGY"));
+
+        // `network = none` declares no outbound network.
+        let config = HostConfig::parse(
+            r#"
+            [apps.app]
+            component = "a.wasm"
+            ui = "ui"
+            [apps.app.declared.network]
+            kind = "none"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.apps["app"].declared_capabilities().network,
+            DeclaredNetwork::None
+        );
+    }
 
     #[test]
     fn parses_registry_and_auth_flags() {

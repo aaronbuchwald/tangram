@@ -199,6 +199,7 @@ mod tests {
             .into_iter()
             .collect(),
             inject: std::collections::BTreeMap::new(),
+            declared: None,
             remote: None,
             remote_token: None,
             registry: false,
