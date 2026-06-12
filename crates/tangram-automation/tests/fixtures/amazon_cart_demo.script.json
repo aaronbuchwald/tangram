@@ -1,0 +1,107 @@
+{
+  "template_id": "amazon-grocery-cart",
+  "version": 1,
+  "domains": [
+    "www.amazon.com"
+  ],
+  "steps": [
+    {
+      "step": "navigate",
+      "url": "https://www.amazon.com/ap/signin",
+      "expect": {
+        "url_host": "www.amazon.com"
+      }
+    },
+    {
+      "step": "inject_credential",
+      "secret_ref": "op://Shopper/Amazon/username",
+      "target": {
+        "role": "textbox",
+        "name": "Email or mobile number"
+      }
+    },
+    {
+      "step": "click",
+      "target": {
+        "role": "button",
+        "name": "Continue"
+      },
+      "expect": {}
+    },
+    {
+      "step": "inject_credential",
+      "secret_ref": "op://Shopper/Amazon/password",
+      "target": {
+        "role": "textbox",
+        "name": "Password"
+      }
+    },
+    {
+      "step": "click",
+      "target": {
+        "role": "button",
+        "name": "Sign in"
+      },
+      "expect": {}
+    },
+    {
+      "step": "navigate",
+      "url": "https://www.amazon.com/s?k=milk",
+      "expect": {
+        "url_host": "www.amazon.com"
+      }
+    },
+    {
+      "step": "type",
+      "target": {
+        "role": "searchbox",
+        "name": "Search Amazon"
+      },
+      "text": "milk",
+      "expect": {}
+    },
+    {
+      "step": "navigate",
+      "url": "https://www.amazon.com/s?k=eggs",
+      "expect": {
+        "url_host": "www.amazon.com"
+      }
+    },
+    {
+      "step": "type",
+      "target": {
+        "role": "searchbox",
+        "name": "Search Amazon"
+      },
+      "text": "eggs",
+      "expect": {}
+    },
+    {
+      "step": "navigate",
+      "url": "https://www.amazon.com/s?k=bananas",
+      "expect": {
+        "url_host": "www.amazon.com"
+      }
+    },
+    {
+      "step": "type",
+      "target": {
+        "role": "searchbox",
+        "name": "Search Amazon"
+      },
+      "text": "bananas",
+      "expect": {}
+    },
+    {
+      "step": "navigate",
+      "url": "https://www.amazon.com/gp/cart/view.html",
+      "expect": {
+        "url_host": "www.amazon.com"
+      }
+    },
+    {
+      "step": "stop_gate",
+      "reason": "cart built — placing the order requires explicit owner approval"
+    }
+  ]
+}
