@@ -5,6 +5,7 @@ members = [
     "crates/tangram-core",
     "crates/tangram-host",
     "crates/tangram-macros",
+    "apps/auto-todo",
     "apps/marketplace",
     "apps/notes",
     "apps/nutrition",
