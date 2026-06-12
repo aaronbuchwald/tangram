@@ -26,6 +26,15 @@ symlink to `.agents/skills`.
   multi-tenancy — isolated, bearer-gated app sets under `/t/<tenant>/`
   (`src/tenant.rs` + the `Principal` seam in `src/auth.rs`, `[tenants]` in
   apps.toml; README "Multi-tenancy", RUNTIME_PLAN Phase 5)
+- `crates/tangram-automation` — host-side browser + credential automation
+  substrate (native-only, NOT wasm-clean; ADR-0010,
+  `docs/design/task-automation-browser.md`): supervised browser-driver runner
+  (`runner.rs`, reuses the `gateway.rs` Backoff/shutdown pattern), the browser
+  egress gate (`egress.rs`, parsed-component canonicalization), the `op://`
+  credential broker (`broker.rs`; resolver in `tangram-host/src/secrets.rs`),
+  the record→replay→validated-LLM-fallback engine (`script.rs`), and the
+  request-not-grant `AutomationRequest` + operator-policy intersection
+  (`request.rs`). Wired via `[automation]` in apps.toml
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in

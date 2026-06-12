@@ -2542,6 +2542,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-automation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "tangram-core"
 version = "0.1.0"
 dependencies = [
