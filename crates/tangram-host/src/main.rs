@@ -34,6 +34,7 @@ mod routes;
 mod runtime;
 mod secrets;
 mod tenant;
+mod verify;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::IntoFuture;
