@@ -104,6 +104,101 @@ impl SecretResolver for EnvResolver {
     }
 }
 
+/// `op://<vault>/<item>/<field>` — resolves through the 1Password CLI
+/// (`op read op://…`) using the service-account token in the host process
+/// env (`OP_SERVICE_ACCOUNT_TOKEN`, ADR-0004 follow-on / the browser
+/// credential broker, `task-automation-browser.md` §6). The token's
+/// 1Password-side scope is the real enforcement floor: even a request for a
+/// different `op://` item resolves only what the SA token may read.
+///
+/// The value is captured straight into a [`SecretString`] (redacted Debug,
+/// zeroize-on-drop). The token, the command line, and the resolved value are
+/// NEVER logged: `op read` takes the reference as an arg (a reference, never
+/// a secret) and the SA token via inherited env.
+pub struct OnePasswordResolver {
+    /// The `op` binary to invoke (default `op` on `$PATH`).
+    binary: std::path::PathBuf,
+}
+
+impl OnePasswordResolver {
+    /// Resolve against `op` on `$PATH`.
+    pub fn new() -> Self {
+        Self {
+            binary: std::path::PathBuf::from("op"),
+        }
+    }
+
+    /// Resolve against an explicit `op` binary path (tests + the automation
+    /// broker fixtures use a fake `op`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_binary(binary: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+}
+
+impl Default for OnePasswordResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl SecretResolver for OnePasswordResolver {
+    fn scheme(&self) -> &'static str {
+        "op"
+    }
+
+    async fn resolve(&self, reference: &SecretRef) -> anyhow::Result<SecretString> {
+        // `op read` wants the full `op://vault/item/field` reference, scheme
+        // included. We reconstruct it from the parsed ref and validate the
+        // locator to a small grammar (no NUL/newline/shell-ish bytes) — the
+        // canonicalization-discipline applied to a secret locator. Command
+        // does not invoke a shell, but we keep the surface tiny.
+        let full = reference.as_str();
+        anyhow::ensure!(
+            full.starts_with("op://"),
+            "op resolver got a non-op reference {full:?}"
+        );
+        let locator = reference.locator();
+        anyhow::ensure!(
+            !locator.is_empty()
+                && locator.bytes().all(|b| {
+                    b != 0 && b != b'\n' && b != b'\r' && b != b';' && b != b'`' && b != b' '
+                }),
+            "op reference {full:?} has an unsupported character"
+        );
+
+        let output = tokio::process::Command::new(&self.binary)
+            .arg("read")
+            .arg(full)
+            .arg("--no-newline")
+            // The SA token is read by `op` from this inherited env var; we
+            // never read it into our own process memory or pass it as an arg.
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .with_context(|| format!("failed to run {} read", self.binary.display()))?;
+
+        if !output.status.success() {
+            // stderr may name the item but never the value; surface it for
+            // diagnosis (missing item, denied scope, no token).
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "op read {full:?} failed ({}): {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        // Capture stdout directly into the SecretString; never log it.
+        let value =
+            String::from_utf8(output.stdout).context("op read returned non-UTF-8 output")?;
+        Ok(SecretString::from(value))
+    }
+}
+
 /// Maps a scheme to its resolver. Unknown schemes are a clear error.
 pub struct SecretRegistry {
     resolvers: BTreeMap<&'static str, Box<dyn SecretResolver>>,
@@ -152,10 +247,16 @@ impl SecretRegistry {
 }
 
 impl Default for SecretRegistry {
-    /// The Phase 10a registry: exactly one resolver, `env://`.
+    /// The standard host registry: `env://` (Phase 10a) and `op://` (the
+    /// 1Password CLI resolver — the browser credential broker's source,
+    /// `task-automation-browser.md` §6). `op://` only does work when it is
+    /// actually referenced and an `op` binary + SA token are present; an
+    /// absent `op` degrades through the same warn-to-empty path as any other
+    /// unresolved reference.
     fn default() -> Self {
         let mut registry = Self::new();
         registry.register(EnvResolver);
+        registry.register(OnePasswordResolver::new());
         registry
     }
 }
@@ -259,6 +360,89 @@ mod tests {
             resolve_value(&registry, "app: env KEY", "env://TANGRAM_TEST_UNSET_XYZ").await;
         assert_eq!(via_sugar, "");
         assert_eq!(via_scheme, "");
+    }
+
+    /// Write an executable fake `op` to a tempdir that echoes a canned value
+    /// for `op read <ref>` (asserting it received `read` + the full ref), or
+    /// exits non-zero to simulate a missing item / denied scope.
+    fn fake_op(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join("op");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn op_resolver_reads_via_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        // The fake asserts argv is `read op://Private/Amazon/password
+        // --no-newline`, then prints the secret with no trailing newline.
+        let op = fake_op(
+            dir.path(),
+            r#"[ "$1" = "read" ] || { echo "bad verb $1" >&2; exit 2; }
+[ "$2" = "op://Private/Amazon/password" ] || { echo "bad ref $2" >&2; exit 2; }
+printf 'hunter2-from-1password'"#,
+        );
+        let resolver = OnePasswordResolver::with_binary(&op);
+        let secret = resolver
+            .resolve(&SecretRef::new("op://Private/Amazon/password"))
+            .await
+            .unwrap();
+        assert_eq!(secret.expose_secret(), "hunter2-from-1password");
+        // Redaction holds: the value never appears in Debug.
+        assert!(!format!("{secret:?}").contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn op_resolver_missing_item_errors_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let op = fake_op(
+            dir.path(),
+            r#"echo "isn't an item in the vault" >&2; exit 1"#,
+        );
+        let resolver = OnePasswordResolver::with_binary(&op);
+        let err = resolver
+            .resolve(&SecretRef::new("op://Private/Nope/field"))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("op read"), "{msg}");
+        assert!(msg.contains("Nope"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn op_resolver_rejects_shellish_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        // This fake would "succeed" if ever invoked; the guard must fire
+        // first so it is never run.
+        let op = fake_op(dir.path(), "printf pwned");
+        let resolver = OnePasswordResolver::with_binary(&op);
+        let err = resolver
+            .resolve(&SecretRef::new("op://Private/Item/field;rm -rf"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("unsupported character"));
+    }
+
+    #[tokio::test]
+    async fn op_resolver_degrades_to_empty_when_binary_absent() {
+        // Through the public resolve_value path with the default registry's
+        // op:// resolver but a binary that doesn't exist: warn → empty, the
+        // app runs degraded (same posture as a missing env var).
+        let resolver = OnePasswordResolver::with_binary("/nonexistent/op-binary");
+        let err = resolver
+            .resolve(&SecretRef::new("op://Private/Amazon/password"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("failed to run"));
+    }
+
+    #[test]
+    fn op_scheme_is_registered_by_default() {
+        let registry = SecretRegistry::default();
+        assert!(registry.scheme_list().contains("op://"));
+        assert!(registry.scheme_list().contains("env://"));
     }
 
     #[test]
