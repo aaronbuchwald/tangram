@@ -30,6 +30,20 @@ const ENV_PATH = '/home/ubuntu/tangram/.env';
 const GROCERY_LIST = ['milk', 'eggs', 'bananas'];
 const OUT_DIR = process.cwd();
 
+// Durable session reuse (substrate extension #1/#4). The persisted session is
+// an AUTH BEARER → it lives OUTSIDE the repo, owner-only, and is reused so
+// login + CAPTCHA are a one-time cost.
+//   * userDataDir   — full profile (stable fingerprint, fewer re-challenges)
+//   * storageState  — portable cookies+localStorage JSON (the handoff format
+//                     from an interactive solve done on the owner's machine)
+import os from 'node:os';
+import path from 'node:path';
+const SITE = 'www.amazon.com';
+const PROFILE_ROOT = path.join(os.homedir(), '.tangram-automation', 'profiles', SITE);
+const USER_DATA_DIR = path.join(PROFILE_ROOT, 'user-data');
+const STORAGE_STATE = path.join(PROFILE_ROOT, 'storage-state.json');
+fs.mkdirSync(PROFILE_ROOT, { recursive: true, mode: 0o700 });
+
 // ── load only OP_SERVICE_ACCOUNT_TOKEN from .env into this process env ──
 const env = { ...process.env };
 for (const line of fs.readFileSync(ENV_PATH, 'utf8').split('\n')) {
@@ -61,8 +75,22 @@ const log = (...a) => console.log('[demo]', ...a);
 // Hard guard: a list of phrases we must NEVER click (irreversible checkout).
 const FORBIDDEN_CLICK = /place your order|place order|buy now|proceed to checkout|complete (your )?purchase|submit order/i;
 
+// Detect "signed in" off the live nav chrome (the preflight indicator).
+async function isSignedIn(page) {
+  return (await page.locator('#nav-link-accountList, #nav-cart').count().catch(() => 0)) > 0;
+}
+
+// Persist the authenticated session (storageState) with owner-only perms. The
+// userDataDir is persisted implicitly by launchPersistentContext.
+async function persistSession(ctx) {
+  await ctx.storageState({ path: STORAGE_STATE });
+  try { fs.chmodSync(STORAGE_STATE, 0o600); } catch {}
+  console.log('[demo] persisted session →', STORAGE_STATE);
+}
+
 async function main() {
-  const ctx = await chromium.launchPersistentContext('/tmp/amazon-demo-profile', {
+  // Persistent profile under the OUTSIDE-the-repo, owner-only session dir.
+  const ctx = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless: true,
     viewport: { width: 1280, height: 1000 },
     userAgent:
@@ -71,9 +99,24 @@ async function main() {
   const page = ctx.pages()[0] || (await ctx.newPage());
   page.setDefaultTimeout(30000);
 
-  const result = { signedIn: false, added: [], stoppedBeforeCheckout: true, blocked: null };
+  const result = { signedIn: false, added: [], stoppedBeforeCheckout: true, blocked: null, preflight: null };
 
   try {
+    // 0. PREFLIGHT — are we already signed in? (cheap, runs FIRST, every time)
+    //    The persistent profile / a restored storageState may already carry the
+    //    session → skip login + CAPTCHA + credential fetch entirely.
+    await page.goto('https://www.amazon.com/gp/css/homepage.html', { waitUntil: 'domcontentloaded' }).catch(() => {});
+    if (await isSignedIn(page)) {
+      result.preflight = 'signed-in';
+      result.signedIn = true;
+      log('PREFLIGHT: already signed in — skipping login/CAPTCHA/credentials.');
+      await buildCart(page, result);
+      await persistSession(ctx);
+      return;
+    }
+    result.preflight = 'not-signed-in';
+    log('PREFLIGHT: not signed in — proceeding to the sign-in flow (decision point).');
+
     // 1. sign-in page
     await page.goto(
       'https://www.amazon.com/ap/signin?openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.mode=checkid_setup&openid.assoc_handle=usflex&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select',
@@ -129,6 +172,28 @@ async function main() {
     // signed-in heuristic: account list / cart present on amazon.com
     result.signedIn = (await page.locator('#nav-link-accountList, #nav-cart').count().catch(() => 0)) > 0 || !!alreadyIn;
 
+    // Both sign-in paths converge here: a verified session is persisted so the
+    // NEXT run's preflight skips login entirely (one-time CAPTCHA cost).
+    if (result.signedIn) await persistSession(ctx);
+
+    await buildCart(page, result);
+  } catch (e) {
+    log('ERROR:', e.message);
+    await page.screenshot({ path: `${OUT_DIR}/error-state.png` }).catch(() => {});
+    if (!result.blocked) result.blocked = e.message;
+  } finally {
+    fs.writeFileSync(`${OUT_DIR}/amazon_cart_demo.script.json`, JSON.stringify(script, null, 2));
+    // assert no secret value leaked into the recorded artifact
+    const json = fs.readFileSync(`${OUT_DIR}/amazon_cart_demo.script.json`, 'utf8');
+    result.scriptHasSecret = /op:\/\//.test(json) ? 'only-references' : 'no-refs';
+    console.log('RESULT', JSON.stringify(result));
+    await ctx.close();
+  }
+}
+
+// Build the cart from the grocery list, then HARD STOP before checkout.
+// Shared by the preflight (already-signed-in) path and the post-login path.
+async function buildCart(page, result) {
     // 5. for each grocery item: search → add first reasonable result to cart
     for (const item of GROCERY_LIST) {
       try {
@@ -181,18 +246,6 @@ async function main() {
     await page.screenshot({ path: `${OUT_DIR}/cart-built.png`, fullPage: true });
     rec({ step: 'stop_gate', reason: 'cart built — placing the order requires explicit owner approval' });
     log('STOP-GATE: cart built; not proceeding to checkout.');
-  } catch (e) {
-    log('ERROR:', e.message);
-    await page.screenshot({ path: `${OUT_DIR}/error-state.png` }).catch(() => {});
-    if (!result.blocked) result.blocked = e.message;
-  } finally {
-    fs.writeFileSync(`${OUT_DIR}/amazon_cart_demo.script.json`, JSON.stringify(script, null, 2));
-    // assert no secret value leaked into the recorded artifact
-    const json = fs.readFileSync(`${OUT_DIR}/amazon_cart_demo.script.json`, 'utf8');
-    result.scriptHasSecret = /op:\/\//.test(json) ? 'only-references' : 'no-refs';
-    console.log('RESULT', JSON.stringify(result));
-    await ctx.close();
-  }
 }
 
 main();

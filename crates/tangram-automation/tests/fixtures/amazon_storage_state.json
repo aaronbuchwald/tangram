@@ -1,0 +1,35 @@
+{
+  "site": "www.amazon.com",
+  "captured_at": 1749600000,
+  "cookies": [
+    {
+      "name": "session-id",
+      "value": "FIXTURE-session-id-bearer-not-a-real-token",
+      "domain": ".amazon.com",
+      "path": "/",
+      "expires": 4102444800
+    },
+    {
+      "name": "at-main",
+      "value": "FIXTURE-at-main-bearer-not-a-real-token",
+      "domain": ".amazon.com",
+      "path": "/",
+      "expires": 4102444800
+    },
+    {
+      "name": "sess-at-main",
+      "value": "FIXTURE-sess-bearer",
+      "domain": ".amazon.com",
+      "path": "/",
+      "expires": -1
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://www.amazon.com",
+      "localStorage": [
+        { "name": "csm-hit", "value": "tb:FIXTURE|123" }
+      ]
+    }
+  ]
+}

@@ -91,6 +91,105 @@ ceilings.
   reviewed. Building the cart and stopping before checkout is the entire
   deliverable; placing an order is never autonomous.
 
+## Session reuse: make login + CAPTCHA a one-time cost
+
+The first AC8 run paused at Amazon's CAPTCHA — the expected, designed behavior
+(we never bypass a human-verification challenge). To stop paying that cost on
+*every* run, the substrate adds an **upfront preflight → decision → persist**
+flow. The crux: an authenticated session is persisted and reused, so after the
+first solve the common path skips login entirely.
+
+### The flow (run first, every time)
+
+1. **Preflight — "are we already signed in?"** (`preflight.rs`). Before any
+   login attempt, the runner loads the *persisted session* into the browser
+   context, navigates to an auth-gated page (Amazon account/cart), and
+   classifies one a11y snapshot: a **signed-in indicator** (the account menu /
+   "Hello,") vs a **sign-in form** (the password field). This is cheap and
+   deterministic. Outcomes: `SignedIn` (→ straight to the task, NO login, NO
+   CAPTCHA, NO credential fetch), `NoSession` (first run), `Expired` (had a
+   session, cookies lapsed), `NotSignedIn` (session present but the server
+   rejected it — soft invalidation). The live page is authoritative: a
+   signed-in indicator wins regardless of the cookie clock.
+
+2. **Decision point** (`decision.rs`) — only when NOT signed in. The runner
+   does not silently start a login; it surfaces a structured `AssistanceRequest`
+   through the same request/approval channel as the rest of the project
+   (`request.rs`), stating the two paths, the credential references the headed
+   path would use (references, never values), and the LLM-path token budget:
+
+   - **(a) Interactive headed solve** (one-time, human-assisted). A *headed*
+     browser with the persistent profile; credentials filled from `op`
+     in-process (the existing broker discipline — never in LLM context); then
+     PAUSE for the human to solve the CAPTCHA / 2FA; detect auth success;
+     persist the session. **Headless-box reality:** this box has no display, so
+     the interactive solve realistically runs on the **owner's machine** (or via
+     a VNC bridge) and the resulting `storageState` JSON is carried back here —
+     see the handoff below.
+   - **(b) LLM-assisted CAPTCHA solve** (bounded). The multimodal Anthropic
+     model (the `CLAUDE_CODE_OAUTH_TOKEN` bearer) reads the challenge and
+     proposes a solution under a **hard `LlmCaptchaBudget`** (`max_attempts` +
+     `max_tokens`, both parameters). The loop refuses an attempt that would
+     overshoot the token ceiling *before* spending it, and on exhaustion **falls
+     back to path (a)** — fail safe. This can burn significant tokens and often
+     fails (Amazon image puzzles are hard); the UX says so.
+
+3. **Both paths converge** on a verified authenticated session, which is
+   persisted (#4 below). The CART-ONLY / hard-stop-before-checkout gate is
+   unchanged and still holds.
+
+### Durable session reuse (the persisted session IS a credential)
+
+Two shapes, both implemented (`session.rs`):
+
+- **Persistent `userDataDir`** (`launchPersistentContext`) — the full profile
+  including a stable device fingerprint, which **reduces Amazon re-challenges**.
+  Site-local, not portable across machines.
+- **`storageState` export** (`context.storageState({path})`) — portable cookies
+  + localStorage JSON. This is the **handoff format** from an interactive solve
+  done elsewhere.
+
+**Recommendation:** use the **persistent `userDataDir`** on the box that runs
+replays (fewer re-challenges from the stable fingerprint), and use
+**`storageState`** as the portable handoff to seed it from an interactive solve
+done on the owner's machine. They compose: solve interactively → export
+`storageState` → carry it back → import into the persistent profile here.
+
+A persisted session is an **auth bearer**, so it is handled like a credential:
+stored OUTSIDE the repo (default `~/.tangram-automation/profiles/<site>/`),
+gitignored by location, `0o600` files / `0o700` dirs, never logged (only a
+redacted `summary()` of counts + earliest expiry), never embedded in a recorded
+script. `PersistedSession::assert_outside_repo` refuses any root under a git
+working tree. The session may optionally be **sealed into 1Password** via an
+`op://` reference (`SealedSessionRef`) and restored on demand through the broker
+— the crate carries only the reference, never the blob.
+
+**Expiry / invalidation** is detected in the preflight: `StorageState::is_expired`
+treats an artifact as expired when every persistent cookie has lapsed (and a
+session-cookie-only artifact as already expired, since those don't survive a
+reload). Amazon cookies *do* expire (weeks, not forever), so re-auth recurs —
+just rarely. An expired/rejected session falls back to the decision point and
+the stale artifact is invalidated before re-auth.
+
+### Headless-box → owner-machine handoff (interactive solve)
+
+Because this box is headless, the interactive (human-assisted) solve runs where
+a human and a display are: the **owner's machine**, or a **VNC bridge** to a
+headed browser here. The portable artifact makes this clean:
+
+1. On the owner's machine, launch a headed browser, sign in to Amazon, solve the
+   CAPTCHA/2FA by hand.
+2. Export the session: `context.storageState({ path: 'amazon-storage-state.json' })`.
+3. Copy that JSON to this box at
+   `~/.tangram-automation/profiles/www.amazon.com/storage-state.json` (perms are
+   re-restricted to `0o600` on save) — treat it like any credential in transit.
+4. The next preflight here loads it, sees the signed-in page, and proceeds to
+   the task with no login. (Cookies eventually expire → repeat, rarely.)
+
+The same artifact can be sealed into 1Password (`op item create`/`edit`) and
+pulled with `op read` on the box, so the bearer lives in the vault rather than
+only on disk.
+
 ## Alternatives considered
 
 - **A `browser` WIT import for components.** Rejected: it would put
