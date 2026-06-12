@@ -265,3 +265,82 @@ kind = "none"
         "reason names the http-fetch discrepancy: {reasons:?}"
     );
 }
+
+/// CP5 — `verified` is a first-class fleet field, sourced from the host's own
+/// audit, and true for honest first-party apps (notes/registry/nutrition).
+#[tokio::test]
+async fn verified_is_a_first_class_fleet_field() {
+    if !have_components(
+        &["notes", "nutrition", "registry"],
+        "verified_is_a_first_class_fleet_field",
+    ) {
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    // First-party apps with honest specs: notes (no network, no grant),
+    // nutrition (grants + declares api.calorieninjas.com), registry (no
+    // network). None carries a `declared` block except nutrition, so the
+    // others exercise the derived-from-grant default. All must verify true.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+
+[apps.notes]
+component = "{notes}"
+ui = "{root}/apps/notes/ui"
+
+[apps.nutrition]
+component = "{nutrition}"
+ui = "{root}/apps/nutrition/ui"
+allow_hosts = ["api.calorieninjas.com"]
+
+[apps.nutrition.declared.network]
+kind = "hosts"
+hosts = ["api.calorieninjas.com"]
+"#,
+            registry = component("registry").display(),
+            notes = component("notes").display(),
+            nutrition = component("nutrition").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    for app in ["registry", "notes", "nutrition"] {
+        wait_for(
+            &format!("{app} healthy"),
+            Duration::from_secs(120),
+            || async {
+                status_of(&client, &format!("{base}/{app}/healthz")).await
+                    == Some(reqwest::StatusCode::OK)
+            },
+        )
+        .await;
+    }
+
+    for app in ["registry", "notes", "nutrition"] {
+        let entry = fleet_entry(&client, &base, app)
+            .await
+            .unwrap_or_else(|| panic!("{app} in fleet"));
+        assert!(
+            entry.get("verified").is_some(),
+            "{app}: verified is a first-class field: {entry}"
+        );
+        assert_eq!(entry["verified"], true, "{app} (first-party) verifies true");
+        assert_eq!(entry["running"], true, "{app} running");
+    }
+}
