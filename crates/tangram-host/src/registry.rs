@@ -236,6 +236,12 @@ pub fn parse_state(
                 // and defaults to the migration enforcement mode (EC7).
                 calls: Vec::new(),
                 enforcement: None,
+                // The OPT-IN policy engine (§9.2) is NOT carried by registry-
+                // installed specs in this variant: a replicated policy would be
+                // custom egress glue granted from the document plane, which the
+                // §9.2/§6 posture keeps operator-authoritative. A policy stays in
+                // the operator's apps.toml.
+                policy: None,
                 remote,
                 remote_token,
                 registry: false,
@@ -339,6 +345,7 @@ mod tests {
             inject: BTreeMap::new(),
             calls: Vec::new(),
             enforcement: None,
+            policy: None,
             remote: None,
             remote_token: None,
             registry,

@@ -293,6 +293,185 @@ impl CallSpecToml {
     }
 }
 
+/// One rule of the OPT-IN egress policy engine in TOML (§9.2; ADR-0009 — the
+/// deliberately-marked escape hatch, NOT the default). A rule fires when ALL of
+/// its conditions hold (logical AND — the only combinator; no nesting), and its
+/// `effect` (`allow` / `deny`) decides. Each field below lowers to one bounded
+/// [`crate::policy::Condition`] over the SHARED canonicalization seam — there is
+/// no second parser, no regex, no value-matching on arbitrary fields. An empty
+/// rule (`{ effect = "deny" }`) is a catch-all default.
+///
+/// ```toml
+/// [apps.mcpproxy.policy]
+/// default = "deny"
+/// rules = [
+///   { effect = "allow", method = ["POST"], host = "api.vendor.com",
+///     path_prefix = ["v1", "rpc"], json_method = ["tools/list", "tools/call"] },
+///   { effect = "deny" },
+/// ]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRuleToml {
+    /// `allow` or `deny` — what a matching rule decides.
+    pub effect: PolicyEffectToml,
+    /// The canonical (upper-cased) method must be one of these. Empty/omitted →
+    /// no method condition.
+    #[serde(default)]
+    pub method: Vec<String>,
+    /// The canonical host must equal this. Omitted → no host condition. When
+    /// set, the host must ALSO be in `allow_hosts` (the fence composes).
+    #[serde(default)]
+    pub host: Option<String>,
+    /// The canonical path must equal this exact (canonicalized) path. Omitted →
+    /// no exact-path condition. Mutually exclusive with `path_prefix`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The canonical path SEGMENTS must start with these (a parsed-segment
+    /// prefix — never a string suffix/`endsWith`). Omitted → no prefix
+    /// condition. Mutually exclusive with `path`.
+    #[serde(default)]
+    pub path_prefix: Vec<String>,
+    /// These query parameter NAMES must each be present (never values).
+    #[serde(default)]
+    pub query_present: Vec<String>,
+    /// These header NAMES (lowercased) must each be present (never values).
+    #[serde(default)]
+    pub header_present: Vec<String>,
+    /// The JSON-RPC-method body rung: `$<pointer>` must be in this literal set.
+    /// Reuses the SAME [`crate::egress::BodyMatch`] seam the declarative engine
+    /// uses; the body is parsed only when this is set, bounded by the matched
+    /// call's `max_body_bytes`.
+    #[serde(default)]
+    pub json_method: Vec<String>,
+    /// The JSON pointer the `json_method` rung selects; defaults to `/method`.
+    #[serde(default = "default_json_pointer")]
+    pub pointer: String,
+}
+
+/// `allow` / `deny` in the policy TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyEffectToml {
+    Allow,
+    Deny,
+}
+
+impl PolicyEffectToml {
+    fn to_effect(self) -> crate::policy::Effect {
+        match self {
+            Self::Allow => crate::policy::Effect::Allow,
+            Self::Deny => crate::policy::Effect::Deny,
+        }
+    }
+}
+
+impl PolicyRuleToml {
+    /// Lower this TOML rule into a bounded [`crate::policy::Rule`]: each set
+    /// field becomes one condition over the canonical request. Canonicalizes
+    /// the host/path the SAME way the seam does so the policy can never disagree
+    /// with the declarative matcher. Errors carry the offending field.
+    fn to_rule(&self) -> anyhow::Result<crate::policy::Rule> {
+        use crate::policy::Condition;
+
+        anyhow::ensure!(
+            self.path.is_none() || self.path_prefix.is_empty(),
+            "policy rule: set at most one of path / path_prefix"
+        );
+        let mut conditions = Vec::new();
+        if !self.method.is_empty() {
+            conditions.push(Condition::MethodIn(
+                self.method.iter().map(|m| m.to_ascii_uppercase()).collect(),
+            ));
+        }
+        if let Some(host) = &self.host {
+            let host = crate::egress::canonical_host(host).map_err(|e| anyhow::anyhow!(e))?;
+            conditions.push(Condition::HostEq(host));
+        }
+        if let Some(path) = &self.path {
+            conditions.push(Condition::PathEq(crate::egress::canonical_path(path)));
+        }
+        if !self.path_prefix.is_empty() {
+            // Canonicalize the declared prefix through the SAME path seam (so a
+            // declared `%2e`/case/`.` cannot make the policy disagree), then
+            // take its segments.
+            let joined = format!("/{}", self.path_prefix.join("/"));
+            let canon = crate::egress::canonical_path(&joined);
+            let segs: Vec<String> = canon
+                .split('/')
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            conditions.push(Condition::PathPrefix(segs));
+        }
+        for name in &self.query_present {
+            conditions.push(Condition::QueryNamePresent(name.clone()));
+        }
+        for name in &self.header_present {
+            conditions.push(Condition::HeaderNamePresent(name.to_ascii_lowercase()));
+        }
+        if !self.json_method.is_empty() {
+            anyhow::ensure!(
+                self.pointer.starts_with('/'),
+                "policy rule: pointer {:?} must be a JSON pointer (start with '/')",
+                self.pointer
+            );
+            conditions.push(Condition::BodyJsonMethodIn(crate::egress::BodyMatch {
+                pointer: self.pointer.clone(),
+                allowed: self.json_method.clone(),
+            }));
+        }
+        Ok(crate::policy::Rule {
+            effect: self.effect.to_effect(),
+            conditions,
+        })
+    }
+
+    /// The host this rule names (canonicalized), if any — used to validate the
+    /// rule's host composes with `allow_hosts` (the fence is never bypassed).
+    fn canonical_host(&self) -> Option<String> {
+        self.host
+            .as_ref()
+            .and_then(|h| crate::egress::canonical_host(h).ok())
+    }
+}
+
+/// The OPT-IN egress policy in TOML (`[apps.<app>.policy]`, §9.2; ADR-0009): an
+/// ordered rule list evaluated first-match-wins plus a `default` effect. This
+/// is the explicit escape hatch — an app that attaches it is clearly marked as
+/// "uses custom policy" (never silent). It runs AFTER the declarative call
+/// match and can only NARROW (turn an allow into a deny), never widen.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyToml {
+    /// The ordered rules (first match wins). Bounded by
+    /// [`crate::policy::MAX_RULES`]/[`MAX_CONDITIONS`] — over-budget is a parse
+    /// error (the policy engine is deliberately bounded; fail closed at parse).
+    pub rules: Vec<PolicyRuleToml>,
+    /// The effect applied when no rule fires. Defaults to `deny` (fail closed —
+    /// the conservative §9.2 choice: a policy that forgets a case denies).
+    #[serde(default = "default_policy_deny")]
+    pub default: PolicyEffectToml,
+}
+
+fn default_policy_deny() -> PolicyEffectToml {
+    PolicyEffectToml::Deny
+}
+
+impl PolicyToml {
+    /// Lower into the runtime [`crate::policy::Policy`], enforcing the latency
+    /// budget at construction (the rule/condition caps). Returns a config error
+    /// on a malformed rule or an over-budget policy.
+    pub fn resolve(&self) -> anyhow::Result<crate::policy::Policy> {
+        let rules = self
+            .rules
+            .iter()
+            .map(PolicyRuleToml::to_rule)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        crate::policy::Policy::new(rules, self.default.to_effect()).map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
 /// One app's spec: which component to run, what UI to serve, and what the
 /// component is granted (data dir, outbound hosts, environment).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -359,6 +538,17 @@ pub struct AppSpec {
     /// apps with no `calls`, `enforce` for apps declaring ≥1 call (EC7).
     #[serde(default)]
     pub enforcement: Option<EnforcementMode>,
+    /// OPT-IN egress policy engine (`[apps.<app>.policy]`, §9.2; ADR-0009 — the
+    /// deliberately-marked ESCAPE HATCH, NOT the default). When present, a
+    /// bounded, auditable rule list runs at the egress boundary AFTER the
+    /// declarative call match as an ADDITIONAL gate, for cases the declarative
+    /// `[[calls]]` grammar can't express. It can only NARROW (deny a request the
+    /// declarative engine allowed), never widen, and never changes which
+    /// credential is injected. An app with no `policy` is behavior-identical
+    /// (the section-1 guarantee). "This app uses custom policy" is surfaced, not
+    /// silent.
+    #[serde(default)]
+    pub policy: Option<PolicyToml>,
     /// Optional sync base of a peer to replicate with (the host dials out,
     /// exactly like a native app's TANGRAM_REMOTE).
     #[serde(default)]
@@ -618,6 +808,56 @@ impl AppSpec {
         })
     }
 
+    /// Validate the OPT-IN egress policy (§9.2; ADR-0009), if any: it must lower
+    /// without error (well-formed rules) and stay within the latency budget (the
+    /// rule/condition caps — over-budget fails closed AT PARSE), and any host a
+    /// rule names must be in `allow_hosts` (the host fence composes, never
+    /// bypassed — the policy can only narrow, so a rule cannot name a host the
+    /// allowlist withheld). Called by the file/registry loaders alongside
+    /// [`Self::validate_calls`] so a bad policy is a clear config error.
+    pub fn validate_policy(&self) -> anyhow::Result<()> {
+        let Some(policy) = &self.policy else {
+            return Ok(());
+        };
+        // Budget + rule well-formedness (fail closed at parse).
+        policy.resolve().context("egress policy")?;
+        // Each rule's host (if any) must compose with allow_hosts.
+        for (i, rule) in policy.rules.iter().enumerate() {
+            if let Some(host) = rule.canonical_host() {
+                anyhow::ensure!(
+                    self.allow_hosts
+                        .iter()
+                        .any(|allowed| allowed.eq_ignore_ascii_case(&host)),
+                    "egress policy rule #{} names host {host:?} which is not in allow_hosts \
+                     (the policy composes with the allowlist — add {host:?} to allow_hosts)",
+                    i + 1
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The resolved OPT-IN egress policy (§9.2; ADR-0009), if any — the bounded
+    /// runtime [`crate::policy::Policy`] the egress gate evaluates AFTER the
+    /// declarative call match. `None` for the overwhelming majority of apps
+    /// (the declarative grammar is the default); `validate_policy` already
+    /// rejected a malformed/over-budget policy at load, so a lowering error here
+    /// is logged and treated as "no policy gate" only as a runtime safety net —
+    /// but the caller (`AppRuntime::build`) FAILS the app build on a policy that
+    /// won't resolve, so a surfaced policy is never silently dropped.
+    pub fn resolved_policy(&self) -> anyhow::Result<Option<crate::policy::Policy>> {
+        match &self.policy {
+            Some(p) => Ok(Some(p.resolve()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether this app attaches the OPT-IN egress policy engine — the surfaced
+    /// "uses custom policy" marker (never silent, §9.2).
+    pub fn uses_policy(&self) -> bool {
+        self.policy.is_some()
+    }
+
     /// Whether this app declares ANY egress injection — host-keyed
     /// `[apps.X.inject]` OR a call-level `inject` on a `[[calls]]` entry. The
     /// capabilities-probe gate uses this to decide whether to derive the
@@ -789,6 +1029,8 @@ impl HostConfig {
                 .with_context(|| format!("app {name:?}"))?;
             spec.validate_calls()
                 .with_context(|| format!("app {name:?}"))?;
+            spec.validate_policy()
+                .with_context(|| format!("app {name:?}"))?;
         }
         for (tenant, spec) in &config.tenants.tenants {
             validate_name(tenant).with_context(|| format!("tenant name {tenant:?}"))?;
@@ -808,6 +1050,9 @@ impl HostConfig {
                     .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 app_spec
                     .validate_calls()
+                    .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
+                app_spec
+                    .validate_policy()
                     .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 if let Some(dir) = &app_spec.data_dir {
                     crate::tenant::validate_tenant_data_dir(dir).with_context(|| {
@@ -1625,6 +1870,231 @@ mod tests {
                 let req = rpc_req();
                 assert!(call.matches(&req, br#"{"jsonrpc":"v2","method":"x"}"#));
                 assert!(!call.matches(&req, br#"{"jsonrpc":"v1","method":"x"}"#));
+            }
+        }
+
+        // ── §9.2 / ADR-0009: the OPT-IN egress policy engine config. The test
+        //    module name carries `policy_config` so the filter
+        //    `cargo test -p tangram-host policy_config` selects exactly this. ──
+        mod policy_config {
+            use super::*;
+            use crate::egress::CanonicalRequest;
+            use crate::policy::{Condition, PolicyVerdict};
+
+            fn req(method: &str, url: &str) -> CanonicalRequest {
+                let parsed = reqwest::Url::parse(url).unwrap();
+                CanonicalRequest::from_request(method, &parsed, std::iter::empty()).unwrap()
+            }
+
+            #[test]
+            fn parses_and_lowers_a_policy_block() {
+                let config = HostConfig::parse(
+                    r#"
+                    [apps.mcpproxy]
+                    component = "m.wasm"
+                    ui = "ui"
+                    allow_hosts = ["api.vendor.com"]
+
+                    [apps.mcpproxy.policy]
+                    default = "deny"
+                    rules = [
+                      { effect = "allow", method = ["POST"], host = "api.vendor.com", path_prefix = ["rpc"], json_method = ["tools/list", "tools/call"] },
+                      { effect = "deny" },
+                    ]
+                    "#,
+                )
+                .unwrap();
+                let spec = &config.apps["mcpproxy"];
+                assert!(spec.uses_policy(), "the policy marker is surfaced");
+                let policy = spec.resolved_policy().unwrap().expect("a policy");
+                assert_eq!(policy.rule_count(), 2);
+
+                // The lowered policy allows the declared JSON-RPC methods on the
+                // rpc subtree and denies everything else (default deny).
+                let r = req("POST", "https://api.vendor.com/rpc");
+                assert_eq!(
+                    policy.evaluate(&r, br#"{"method":"tools/list"}"#),
+                    PolicyVerdict::Allow
+                );
+                assert!(matches!(
+                    policy.evaluate(&r, br#"{"method":"resources/read"}"#),
+                    PolicyVerdict::Deny(_)
+                ));
+                // A GET (not POST) misses the allow rule → default deny.
+                assert!(matches!(
+                    policy.evaluate(&req("GET", "https://api.vendor.com/rpc"), b""),
+                    PolicyVerdict::Deny(_)
+                ));
+            }
+
+            #[test]
+            fn default_effect_defaults_to_deny() {
+                // Omitting `default` fails CLOSED (deny) — the conservative §9.2
+                // choice.
+                let config = HostConfig::parse(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["h.com"]
+                    [apps.a.policy]
+                    rules = [ { effect = "allow", host = "h.com", path = "/ok" } ]
+                    "#,
+                )
+                .unwrap();
+                let policy = config.apps["a"].resolved_policy().unwrap().unwrap();
+                // Declared path allowed; anything else default-denied.
+                assert_eq!(
+                    policy.evaluate(&req("GET", "https://h.com/ok"), b""),
+                    PolicyVerdict::Allow
+                );
+                assert!(matches!(
+                    policy.evaluate(&req("GET", "https://h.com/elsewhere"), b""),
+                    PolicyVerdict::Deny(_)
+                ));
+            }
+
+            #[test]
+            fn path_and_path_prefix_are_mutually_exclusive() {
+                let err = HostConfig::parse(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["h.com"]
+                    [apps.a.policy]
+                    rules = [ { effect = "allow", path = "/x", path_prefix = ["x"] } ]
+                    "#,
+                )
+                .unwrap_err();
+                assert!(format!("{err:#}").contains("at most one"), "{err:#}");
+            }
+
+            #[test]
+            fn policy_rule_host_must_be_in_allow_hosts() {
+                // The fence composes: a rule naming a host outside allow_hosts is
+                // a parse error (the policy can only narrow, never grant reach).
+                let err = HostConfig::parse(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["api.allowed.com"]
+                    [apps.a.policy]
+                    rules = [ { effect = "allow", host = "api.evil.com" } ]
+                    "#,
+                )
+                .unwrap_err();
+                assert!(format!("{err:#}").contains("not in allow_hosts"), "{err:#}");
+            }
+
+            #[test]
+            fn over_budget_policy_fails_closed_at_parse() {
+                // More than MAX_RULES rules is a parse error (the latency budget
+                // is enforced at parse — fail closed).
+                let rules: String = (0..crate::policy::MAX_RULES + 1)
+                    .map(|_| r#"{ effect = "deny" },"#.to_string())
+                    .collect();
+                let err = HostConfig::parse(&format!(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["h.com"]
+                    [apps.a.policy]
+                    rules = [ {rules} ]
+                    "#
+                ))
+                .unwrap_err();
+                assert!(format!("{err:#}").contains("over the budget"), "{err:#}");
+            }
+
+            #[test]
+            fn empty_rules_is_rejected() {
+                let err = HostConfig::parse(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["h.com"]
+                    [apps.a.policy]
+                    rules = []
+                    "#,
+                )
+                .unwrap_err();
+                assert!(format!("{err:#}").contains("no rules"), "{err:#}");
+            }
+
+            #[test]
+            fn no_policy_is_the_default_and_behavior_identical() {
+                // The section-1 guarantee: an app with no [policy] block has no
+                // policy gate at all (None) and is unaffected.
+                let config = HostConfig::parse(
+                    "[apps.a]\ncomponent = \"a.wasm\"\nui = \"ui\"\nallow_hosts = [\"h.com\"]",
+                )
+                .unwrap();
+                assert!(!config.apps["a"].uses_policy());
+                assert!(config.apps["a"].resolved_policy().unwrap().is_none());
+            }
+
+            #[test]
+            fn declared_prefix_is_canonicalized_through_the_same_seam() {
+                // A declared prefix carrying `.`/`%2e` lowers through the SAME
+                // path seam, so the policy can't disagree with the matcher.
+                let config = HostConfig::parse(
+                    r#"
+                    [apps.a]
+                    component = "a.wasm"
+                    ui = "ui"
+                    allow_hosts = ["h.com"]
+                    [apps.a.policy]
+                    rules = [ { effect = "deny", path_prefix = ["v1", ".", "accounts"] }, { effect = "allow" } ]
+                    "#,
+                )
+                .unwrap();
+                let policy = config.apps["a"].resolved_policy().unwrap().unwrap();
+                // The `.` segment was normalized away → prefix is ["v1","accounts"].
+                assert!(matches!(
+                    policy.evaluate(&req("GET", "https://h.com/v1/accounts/9"), b""),
+                    PolicyVerdict::Deny(_)
+                ));
+                assert_eq!(
+                    policy.evaluate(&req("GET", "https://h.com/v1/me"), b""),
+                    PolicyVerdict::Allow
+                );
+            }
+
+            #[test]
+            fn rule_fields_lower_to_the_expected_conditions() {
+                // A direct check that each TOML field becomes the right Condition
+                // (so a future field rename can't silently drop a constraint).
+                let rule = PolicyRuleToml {
+                    effect: PolicyEffectToml::Allow,
+                    method: vec!["get".into()],
+                    host: Some("H.com".into()),
+                    path: None,
+                    path_prefix: vec!["v1".into()],
+                    query_present: vec!["q".into()],
+                    header_present: vec!["X-Trace".into()],
+                    json_method: vec!["tools/list".into()],
+                    pointer: "/method".into(),
+                }
+                .to_rule()
+                .unwrap();
+                assert!(
+                    rule.conditions
+                        .contains(&Condition::MethodIn(vec!["GET".into()])),
+                    "method upper-cased"
+                );
+                assert!(
+                    rule.conditions.contains(&Condition::HostEq("h.com".into())),
+                    "host canonicalized"
+                );
+                assert!(
+                    rule.conditions
+                        .contains(&Condition::HeaderNamePresent("x-trace".into())),
+                    "header name lowercased"
+                );
             }
         }
 

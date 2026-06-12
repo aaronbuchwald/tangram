@@ -261,6 +261,23 @@ impl AppRuntime {
         // disposition of an undeclared call.
         let operator_calls = spec.resolved_calls();
         let enforcement = spec.effective_enforcement();
+        // The OPT-IN egress policy engine (§9.2 / ADR-0009 — the escape hatch,
+        // None for almost all apps). validate_policy already rejected a
+        // malformed/over-budget policy at config load; resolving here FAILS the
+        // app build on a policy that won't lower, so a surfaced policy is never
+        // silently dropped. When present it is surfaced loudly ("uses custom
+        // policy") and runs as an additional narrowing gate in `http_fetch`.
+        let policy = spec
+            .resolved_policy()
+            .with_context(|| format!("resolving app {name:?}'s egress policy"))?;
+        if let Some(p) = &policy {
+            tracing::info!(
+                app = %name,
+                "egress: app uses a CUSTOM POLICY (§9.2 escape hatch) with {} rule(s) — \
+                 the declarative call grammar remains the first gate; the policy can only narrow",
+                p.rule_count()
+            );
+        }
         let component = ComponentHandle::instantiate(
             engine,
             component_path,
@@ -269,6 +286,7 @@ impl AppRuntime {
             &env,
             operator_calls.clone(),
             enforcement,
+            policy,
             secrets.clone(),
         )
         .await

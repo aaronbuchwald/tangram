@@ -61,6 +61,13 @@ pub struct HostState {
     /// disposition of an UNDECLARED call: log a candidate (observe), allow +
     /// warn (warn), or deny with a precise error (enforce).
     enforcement: EnforcementMode,
+    /// The OPT-IN egress policy engine (§9.2; ADR-0009 — the deliberately-marked
+    /// escape hatch, `None` for the overwhelming majority of apps). When
+    /// present, it runs as an ADDITIONAL gate AFTER the declarative call match
+    /// and can only NARROW (deny a request the declarative engine allowed),
+    /// never widen and never change which credential is injected. A policy that
+    /// blows its bounded latency budget at evaluation FAILS CLOSED (deny).
+    policy: Option<crate::policy::Policy>,
     /// The secret-resolution seam, used host-side at request time to turn an
     /// inject rule's `scheme://locator` reference into a `SecretString`.
     secrets: Arc<SecretRegistry>,
@@ -170,6 +177,12 @@ impl host::Host for HostState {
                         canon.method, canon.host, canon.path,
                         Self::candidate_call_toml(&canon)
                     );
+                    // The OPT-IN policy gate still applies to an undeclared call
+                    // allowed by warn mode (it can only NARROW): a policy Deny
+                    // here blocks even what warn would let through.
+                    if let Some(denial) = self.policy_denial(&canon, &body_bytes) {
+                        return Err(denial);
+                    }
                     // Send un-credentialed (no matched call ⇒ no inject).
                     return send_and_strip(
                         &self.client,
@@ -190,6 +203,11 @@ impl host::Host for HostState {
                         canon.method, canon.host, canon.path,
                         Self::candidate_call_toml(&canon)
                     );
+                    // Observe mode never denies — but if a policy is attached,
+                    // log what it WOULD have done so the operator sees the
+                    // policy's effect before flipping to enforce (the §5.4
+                    // observe contract extended to the policy gate).
+                    self.log_policy_observation(&canon, &body_bytes);
                     return send_and_strip(
                         &self.client,
                         &canon,
@@ -203,6 +221,19 @@ impl host::Host for HostState {
                 }
             },
         };
+
+        // ── Step 3b (OPT-IN, §9.2 / ADR-0009): the policy gate on the MATCHED
+        //    declarative call. The declarative engine has allowed this request
+        //    and bound the credential to `matched`; the policy is the ADDITIONAL
+        //    narrowing gate. In observe mode it only LOGS (the observe contract);
+        //    in warn/enforce a policy Deny (or fail-closed budget) blocks the
+        //    request BEFORE the secret is resolved or injected. A policy can
+        //    never widen — it only turns this allow into a deny. ──────────────
+        if self.enforcement == EnforcementMode::Observe {
+            self.log_policy_observation(&canon, &body_bytes);
+        } else if let Some(denial) = self.policy_denial(&canon, &body_bytes) {
+            return Err(denial);
+        }
 
         // ── Step 4: inject on the matched call ONLY (ADR-0005): resolve its
         //    secret host-side and attach it. A matched call with no inject goes
@@ -281,6 +312,63 @@ impl HostState {
             shown.sort();
             shown.dedup();
             shown.join(", ")
+        }
+    }
+
+    /// The OPT-IN policy gate (§9.2 / ADR-0009), evaluated against the SHARED
+    /// canonical request + body. Returns `Some(error)` when the policy DENIES
+    /// (or fails closed on its bounded budget) — the request is blocked before
+    /// it leaves the host; `None` when there is no policy, or the policy allows.
+    /// The policy can only NARROW: this is consulted only on requests the
+    /// declarative engine already allowed, and a `Some` here turns that allow
+    /// into a deny. It never resolves or names a secret.
+    fn policy_denial(&self, canon: &CanonicalRequest, body: &[u8]) -> Option<String> {
+        use crate::policy::PolicyVerdict;
+        let policy = self.policy.as_ref()?;
+        match policy.evaluate(canon, body) {
+            PolicyVerdict::Allow => None,
+            PolicyVerdict::Deny(reason) => {
+                tracing::warn!(
+                    app = %self.app, method = %canon.method, host = %canon.host,
+                    path = %canon.path, "denied outbound request (egress policy): {reason}"
+                );
+                Some(format!(
+                    "outbound {} {}{} denied by app {:?}'s egress policy: {reason} \
+                     (this app uses a custom egress policy — §9.2)",
+                    canon.method, canon.host, canon.path, self.app
+                ))
+            }
+            PolicyVerdict::FailClosed(reason) => {
+                tracing::warn!(
+                    app = %self.app, method = %canon.method, host = %canon.host,
+                    path = %canon.path, "denied outbound request (egress policy fail-closed): {reason}"
+                );
+                Some(format!(
+                    "outbound {} {}{} denied by app {:?}'s egress policy: {reason}",
+                    canon.method, canon.host, canon.path, self.app
+                ))
+            }
+        }
+    }
+
+    /// Observe-mode logging for the policy gate: log what the policy WOULD have
+    /// decided without denying (the §5.4 observe contract extended to the
+    /// policy engine), so an operator can see the policy's effect before
+    /// flipping to enforce. A no-op when there is no policy.
+    fn log_policy_observation(&self, canon: &CanonicalRequest, body: &[u8]) {
+        use crate::policy::PolicyVerdict;
+        let Some(policy) = self.policy.as_ref() else {
+            return;
+        };
+        match policy.evaluate(canon, body) {
+            PolicyVerdict::Allow => {}
+            PolicyVerdict::Deny(reason) | PolicyVerdict::FailClosed(reason) => {
+                tracing::info!(
+                    app = %self.app,
+                    "observe: egress policy WOULD deny {} {}{} — {reason}",
+                    canon.method, canon.host, canon.path
+                );
+            }
         }
     }
 
@@ -413,9 +501,11 @@ impl ComponentHandle {
     /// `calls` carries the effective call-level egress capabilities
     /// (fine-grained-egress; for a no-`[[calls]]` app this is the compat shim,
     /// so behavior is byte-identical), `enforcement` the posture for undeclared
-    /// calls, and `secrets` the resolver seam used to turn a matched call's
-    /// inject reference into a value host-side at request time — none of these
-    /// is ever exposed to the component.
+    /// calls, `policy` the OPT-IN egress policy engine (§9.2 / ADR-0009; `None`
+    /// for almost all apps — an additional NARROWING gate that never widens),
+    /// and `secrets` the resolver seam used to turn a matched call's inject
+    /// reference into a value host-side at request time — none of these is ever
+    /// exposed to the component.
     #[allow(clippy::too_many_arguments)]
     pub async fn instantiate(
         engine: &Engine,
@@ -425,6 +515,7 @@ impl ComponentHandle {
         env: &[(String, String)],
         calls: Vec<CallSpec>,
         enforcement: EnforcementMode,
+        policy: Option<crate::policy::Policy>,
         secrets: Arc<SecretRegistry>,
     ) -> anyhow::Result<Self> {
         let component = Component::from_file(engine, path)?;
@@ -447,6 +538,7 @@ impl ComponentHandle {
             allow_hosts: allow_hosts.to_vec(),
             calls,
             enforcement,
+            policy,
             secrets,
             client: reqwest::Client::new(),
         };

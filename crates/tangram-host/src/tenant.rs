@@ -218,6 +218,7 @@ mod tests {
             inject: std::collections::BTreeMap::new(),
             calls: Vec::new(),
             enforcement: None,
+            policy: None,
             remote: None,
             remote_token: None,
             registry: false,

@@ -45,12 +45,6 @@
 //! apps.toml, a `policy` flag in the app's surfaced egress posture, and a
 //! startup log line. "This app uses custom policy" is never silent.
 
-// The AST + evaluator land in this commit ahead of their consumers: the config
-// parser ([`crate::config`]) and the `http_fetch` gate ([`crate::runtime`])
-// wire these in over the following commits. Until then a couple of accessors
-// read as dead from this module's view; the allow is removed as wiring lands.
-#![allow(dead_code)]
-
 use crate::egress::{BodyMatch, BodyVerdict, CanonicalRequest};
 
 /// The hard cap on the number of rules in a single policy, checked at parse
@@ -290,7 +284,10 @@ impl Policy {
 }
 
 #[cfg(test)]
-mod policy {
+// Named `policy_engine` (not `policy`) to avoid `clippy::module_inception`, and
+// so the build plan's filter `cargo test -p tangram-host policy_engine` selects
+// exactly this suite.
+mod policy_engine {
     use super::*;
     use crate::egress::CanonicalRequest;
 
