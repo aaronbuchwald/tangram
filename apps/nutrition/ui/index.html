@@ -728,9 +728,10 @@
     // ── log-meal dialog ───────────────────────────────────────────────────
     const dialog = el("logDialog");
 
-    // Capabilities gate the description path: with the offline strategy the
-    // server cannot resolve free text, so the dialog stays components-only.
-    let caps = { strategy: "offline", description_input: false };
+    // Capabilities gate the description path: until get_capabilities resolves
+    // we assume the server cannot resolve free text, so the dialog starts
+    // components-only and the description box appears once caps confirm it.
+    let caps = { strategy: "calorieninjas", description_input: false };
     let descMode = false; // which input the dialog currently shows
 
     fetch("api/actions/get_capabilities", { method: "POST" })

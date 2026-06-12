@@ -666,23 +666,23 @@ next request. Setup steps:
 | `TANGRAM_UI_DIR` | builder value | Static UI directory; overrides the app's compiled-in path (set in container images, where that path doesn't exist) |
 | `FRAME_ANCESTORS` | `*` | CSP `frame-ancestors` for iframe embedding |
 | `RUST_LOG` | `info` | Log filter |
-| `NUTRITION_STRATEGY` | auto | Nutrition app: how novel components resolve (`offline` \| `calorieninjas` \| `llm`); unset → `calorieninjas` if `CALORIENINJAS_API_KEY` is set, else `offline` |
-| `CALORIENINJAS_API_KEY` | — | Required for `calorieninjas`; its presence auto-enables that strategy when `NUTRITION_STRATEGY` is unset |
+| `NUTRITION_STRATEGY` | `calorieninjas` | Nutrition app: how novel components resolve (`calorieninjas` \| `llm`); unset (or unknown) → `calorieninjas` |
+| `CALORIENINJAS_API_KEY` | — | Required for `calorieninjas` (the default strategy); a missing key surfaces as a clear error when a lookup is attempted, not a panic |
 | `ANTHROPIC_API_KEY` | — | Required for `NUTRITION_STRATEGY=llm` (or `ANTHROPIC_AUTH_TOKEN`) |
 
 ## Nutrition strategies
 
 The nutrition app has a pluggable nutrition-resolution seam: a
 *strategy* decides how a novel meal component gets its per-100g nutrient
-values. An explicit `NUTRITION_STRATEGY` wins; when unset, the presence of
-`CALORIENINJAS_API_KEY` auto-enables `calorieninjas` (online resolution is
-the default expectation), otherwise `offline`:
+values. An explicit `NUTRITION_STRATEGY` wins; when it is unset (or set to an
+unknown value) the default is `calorieninjas`. Both strategies resolve over
+the network and need a credential — selection does not check for it, so a
+missing key surfaces as a clear error the first time a lookup is attempted
+(never a panic). The deterministic reference dataset ships in the replicated
+genesis document regardless of strategy; what the strategy varies is how NEW
+components get resolved.
 
-- **`offline`** (keyless default) — deterministic and keyless. The reference dataset
-  ships in the replicated genesis document; meals must be logged with
-  explicit gram-quantified components, and unknown components contribute
-  nothing until registered (`add_component_nutrition` / `add_ingredient`).
-- **`calorieninjas`** — resolves free text via the CalorieNinjas API
+- **`calorieninjas`** (default) — resolves free text via the CalorieNinjas API
   (`CALORIENINJAS_API_KEY`), mapping every nutrient field the API returns
   (calories, fiber, sodium, …) to per-100g rows. Run as a WASM component
   under `tangram-host`, the component issues the *bare* request and the host

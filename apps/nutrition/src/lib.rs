@@ -90,10 +90,9 @@ impl Nutrition {
     /// (which always win) OR a plain-language `description` with quantities
     /// included (e.g. "1 cup brown rice and 200g grilled chicken") — the
     /// active nutrition strategy resolves the description over the network
-    /// and caches the result as replicated reference data. The offline
-    /// strategy cannot resolve descriptions; it needs explicit components.
-    /// Unknown explicit components are back-filled in the background when an
-    /// online strategy is active, and can always be registered later via
+    /// and caches the result as replicated reference data. Unknown explicit
+    /// components are back-filled in the background by the active strategy,
+    /// and can always be registered later via
     /// `add_component_nutrition` (past meals resolve retroactively). Returns
     /// the meal id.
     pub async fn log_meal(
@@ -133,18 +132,10 @@ impl Nutrition {
         let components = if has_explicit {
             explicit
         } else if !description.is_empty() {
-            // Description path: nutrition has to come from a dynamic lookup,
-            // so the offline strategy can't serve it — tell the caller plainly.
-            if !strategy.can_resolve() {
-                return Err(
-                    "the offline nutrition strategy cannot resolve a description; provide \
-                     explicit components, or configure an online strategy (set \
-                     CALORIENINJAS_API_KEY, or NUTRITION_STRATEGY=calorieninjas|llm)"
-                        .into(),
-                );
-            }
-            // The whole description is one 100g component: CalorieNinjas-style
-            // natural-language queries handle the quantities inside it.
+            // Description path: nutrition comes from a dynamic lookup by the
+            // active strategy. The whole description is one 100g component:
+            // CalorieNinjas-style natural-language queries handle the
+            // quantities inside it.
             vec![MealComponent {
                 component: description,
                 qty_g: 100.0,
@@ -632,19 +623,26 @@ mod tests {
     #[test]
     fn get_capabilities_reports_strategy_and_description_input() {
         // Pin the environment so the assertion is deterministic regardless
-        // of ambient config (NUTRITION_STRATEGY wins; clear the key fallback).
+        // of ambient config (NUTRITION_STRATEGY wins).
         // SAFETY: single-threaded test; no other thread reads the env here.
         unsafe {
-            std::env::set_var("NUTRITION_STRATEGY", "offline");
-            std::env::remove_var("CALORIENINJAS_API_KEY");
+            std::env::set_var("NUTRITION_STRATEGY", "calorieninjas");
         }
 
         let caps = Nutrition::default().get_capabilities();
 
         // Same shape the route returned: exactly these two keys.
         assert_eq!(caps, capabilities_json(Strategy::from_env()));
-        assert_eq!(caps["strategy"], "offline");
-        assert_eq!(caps["description_input"], false);
+        assert_eq!(caps["strategy"], "calorieninjas");
+        assert_eq!(caps["description_input"], true);
         assert!(caps["description_input"].is_boolean());
+
+        // With NUTRITION_STRATEGY unset, the default is CalorieNinjas (no
+        // keyless offline fallback any more).
+        // SAFETY: single-threaded test; no other thread reads the env here.
+        unsafe {
+            std::env::remove_var("NUTRITION_STRATEGY");
+        }
+        assert_eq!(Strategy::from_env(), Strategy::CalorieNinjas);
     }
 }

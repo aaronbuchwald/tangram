@@ -122,13 +122,12 @@ CI-green; the **shell** as described in the redesign is *planned*.
 
 The **strategy seam** (`apps/nutrition/src/strategy.rs` + `strategy/`) decides
 how a novel meal component gets its per-100g nutrients:
-- `offline` — deterministic, keyless; unknown components contribute nothing until
-  registered.
-- `calorieninjas` — resolves free text via the CalorieNinjas API.
+- `calorieninjas` (default) — resolves free text via the CalorieNinjas API.
 - `llm` — asks Anthropic's `claude-opus-4-8` for a nutrient panel.
 
-Selection: explicit `NUTRITION_STRATEGY` wins; unset, the presence of
-`CALORIENINJAS_API_KEY` auto-enables `calorieninjas`, else `offline`.
+Selection: explicit `NUTRITION_STRATEGY` wins; unset (or unknown) defaults to
+`calorieninjas`. Both need a credential; a missing key is a clear error at
+lookup time, not a panic.
 
 > **Try this.** `cargo run -p tangram-nutrition`, then log *"1 cup brown rice and
 > 200g grilled chicken"* from the description box (needs a key, see below).
