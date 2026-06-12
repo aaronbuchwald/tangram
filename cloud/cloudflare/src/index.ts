@@ -37,6 +37,22 @@ export { TangramAccounts };
 const OCTET_STREAM = { "Content-Type": "application/octet-stream" };
 const JSON_TYPE = { "Content-Type": "application/json" };
 
+/**
+ * Enqueue onto an SSE stream's controller, dropping it from `set` if the
+ * client has gone away (enqueue throws on a closed controller).
+ */
+function safeEnqueue<T>(
+  controller: ReadableStreamDefaultController<T>,
+  payload: T,
+  set: Set<ReadableStreamDefaultController<T>>,
+): void {
+  try {
+    controller.enqueue(payload);
+  } catch {
+    set.delete(controller);
+  }
+}
+
 /** A live app inside the DO: the component instance + its MCP endpoint. */
 interface AppHost {
   logic: AppLogic;
@@ -252,11 +268,7 @@ export class TangramDoc extends DurableObject<Env> {
     if (state === null) return;
     const event = stateEvent(state);
     for (const controller of this.stateStreams) {
-      try {
-        controller.enqueue(event);
-      } catch {
-        this.stateStreams.delete(controller);
-      }
+      safeEnqueue(controller, event, this.stateStreams);
     }
   }
 
@@ -335,11 +347,7 @@ export class TangramDoc extends DurableObject<Env> {
   /** Wake every connected sync peer; drop streams whose client went away. */
   poke(): void {
     for (const controller of this.pokes) {
-      try {
-        controller.enqueue(POKE);
-      } catch {
-        this.pokes.delete(controller);
-      }
+      safeEnqueue(controller, POKE, this.pokes);
     }
   }
 
