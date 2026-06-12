@@ -1,0 +1,35 @@
+# The browser + credential automation substrate (host-side; NOT wasm-clean).
+# Native-only: tokio + reqwest + a supervised browser driver. tangram-core and
+# every WASM component stay browser-unaware — only the native host links this.
+# See docs/design/task-automation-browser.md and ADR-0010.
+#
+# NOTE: deliberately NOT yet in the workspace `members` — workspace
+# registration (root Cargo.toml, apps.toml, AGENTS.md) lands in the single
+# final `auto-register:` commit. Until then build/test with:
+#   cargo test --manifest-path crates/tangram-automation/Cargo.toml
+# Standalone-workspace during development so per-checkpoint `cargo test
+# --manifest-path crates/tangram-automation/Cargo.toml` runs before this crate
+# joins the root workspace.members in the final `auto-register:` commit (which
+# removes this empty table).
+[workspace]
+
+[package]
+name = "tangram-automation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+toml = "0.8"
