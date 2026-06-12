@@ -48,44 +48,47 @@ export class TabStore {
     this.emit();
   }
 
+  // Tabs are single-instance per target: opening a target that already has a
+  // tab focuses the existing one instead of pushing a duplicate (issue #13 —
+  // clicking an app a second time must switch to its open tab, not stack a new
+  // one). `match` recognizes an existing tab for the requested target; `create`
+  // builds a fresh tab only when none is open. Either path leaves it active.
+  private openOrFocus<T extends Tab>(
+    match: (t: Tab) => boolean,
+    create: () => T,
+  ): void {
+    const existing = this.tabs.find(match);
+    if (existing) {
+      this.activate(existing.id);
+      return;
+    }
+    const tab = create();
+    this.tabs.push(tab);
+    this.activate(tab.id);
+  }
+
   /** Open (or focus, if already open) the home tab. */
   openHome() {
-    const existing = this.tabs.find((t) => t.kind === "home");
-    if (existing) {
-      this.activate(existing.id);
-      return;
-    }
-    const tab: HomeTab = { kind: "home", id: nextId() };
-    this.tabs.push(tab);
-    this.activate(tab.id);
+    this.openOrFocus(
+      (t) => t.kind === "home",
+      (): HomeTab => ({ kind: "home", id: nextId() }),
+    );
   }
 
-  /** Open (or focus) a note tab for a vault file id. */
+  /** Open (or focus) a note tab for a vault file id, keyed by that file id. */
   openNote(fileId: string) {
-    const existing = this.tabs.find(
-      (t): t is NoteTab => t.kind === "note" && t.fileId === fileId,
+    this.openOrFocus(
+      (t) => t.kind === "note" && t.fileId === fileId,
+      (): NoteTab => ({ kind: "note", id: nextId(), fileId }),
     );
-    if (existing) {
-      this.activate(existing.id);
-      return;
-    }
-    const tab: NoteTab = { kind: "note", id: nextId(), fileId };
-    this.tabs.push(tab);
-    this.activate(tab.id);
   }
 
-  /** Open (or focus) an app tab. */
+  /** Open (or focus) an app tab, keyed by the stable app name. */
   openApp(app: string) {
-    const existing = this.tabs.find(
-      (t): t is AppTab => t.kind === "app" && t.app === app,
+    this.openOrFocus(
+      (t) => t.kind === "app" && t.app === app,
+      (): AppTab => ({ kind: "app", id: nextId(), app }),
     );
-    if (existing) {
-      this.activate(existing.id);
-      return;
-    }
-    const tab: AppTab = { kind: "app", id: nextId(), app };
-    this.tabs.push(tab);
-    this.activate(tab.id);
   }
 
   close(id: string) {
