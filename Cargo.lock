@@ -2528,6 +2528,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-app-auto-todo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tangram",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-app-tangram"
 version = "0.1.0"
 dependencies = [

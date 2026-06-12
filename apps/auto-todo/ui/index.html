@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Auto-TODO (safe tier)</title>
+    <style>
+      body { font: 15px system-ui, sans-serif; margin: 0; background: #0f1115; color: #e7e9ee; }
+      header { padding: 16px 20px; border-bottom: 1px solid #232734; }
+      h1 { font-size: 18px; margin: 0; }
+      .sub { color: #8b93a7; font-size: 13px; margin-top: 4px; }
+      main { padding: 16px 20px; max-width: 760px; }
+      form.add { display: flex; gap: 8px; margin-bottom: 16px; }
+      input[type="text"] { flex: 1; padding: 9px 11px; border-radius: 7px; border: 1px solid #313647; background: #161a22; color: #e7e9ee; }
+      button { padding: 8px 12px; border-radius: 7px; border: 1px solid #313647; background: #1c2230; color: #e7e9ee; cursor: pointer; }
+      button:hover { background: #242c3d; }
+      .item { border: 1px solid #232734; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: #141821; }
+      .item h3 { margin: 0 0 6px; font-size: 15px; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .phase { font-size: 11px; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid #313647; }
+      .DRAFTED { color: #9aa3b8; }
+      .DISCOVERED { color: #6fb3ff; border-color: #2c4a73; }
+      .CLASSIFIED { color: #7fd6c2; border-color: #2c5a4f; }
+      .PLAN_PROPOSED { color: #ffd479; border-color: #6b5a23; }
+      .APPROVED { color: #8ce28c; border-color: #2f6b33; }
+      .REJECTED { color: #ff8a8a; border-color: #6b2f2f; }
+      .BLOCKED_HUMAN { color: #ff9f6f; border-color: #6b452f; }
+      .badge { font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid #313647; }
+      .TOOL { color: #8ce28c; }
+      .BROWSER { color: #ffd479; }
+      .NEEDS_HUMAN, .HUMAN { color: #ff9f6f; }
+      .meta { color: #8b93a7; font-size: 12px; margin: 6px 0; }
+      .actions { margin-top: 8px; }
+      .card { margin-top: 10px; padding: 10px; border: 1px dashed #3a4357; border-radius: 8px; background: #11151d; }
+      ul { margin: 6px 0; padding-left: 18px; }
+      li { margin: 2px 0; }
+      .err { color: #ff8a8a; font-size: 12px; margin-top: 6px; min-height: 14px; }
+      code { background: #1c2230; padding: 1px 4px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Auto-TODO <span style="color:#8b93a7;font-weight:400">· safe tier</span></h1>
+      <div class="sub">
+        Each item carries a gated lifecycle: discover → classify → plan →
+        approve. Discovery/classification is read-only reviewable data; nothing
+        is executed (credential/browser execution is a later, separately-reviewed tier).
+      </div>
+    </header>
+    <main>
+      <form class="add" id="add">
+        <input type="text" id="text" placeholder="Add a task, e.g. what's on my calendar Tuesday" />
+        <button type="submit">Add</button>
+      </form>
+      <div class="err" id="err"></div>
+      <div id="list"></div>
+    </main>
+
+    <script>
+      // Bearer token (optional): the host gates mutating actions when configured.
+      const token = localStorage.getItem("tangram_token") || "";
+      const headers = () => {
+        const h = { "content-type": "application/json" };
+        if (token) h["authorization"] = "Bearer " + token;
+        return h;
+      };
+
+      async function call(action, args) {
+        const r = await fetch("api/actions/" + action, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(args || {}),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok || (body && body.error)) {
+          throw new Error((body && (body.error || body.message)) || ("HTTP " + r.status));
+        }
+        return body.result;
+      }
+
+      function showErr(e) {
+        document.getElementById("err").textContent = e ? String(e.message || e) : "";
+      }
+
+      function badge(kind) {
+        return `<span class="badge ${kind}">${kind}</span>`;
+      }
+
+      function planCard(item) {
+        if (!item.plan) return "";
+        const p = item.plan;
+        const approved = item.phase === "APPROVED" || item.phase === "BLOCKED_HUMAN";
+        const confirmed = new Set((item.confirmed_steps || []).map(Number));
+        const steps = (p.steps || [])
+          .map((s, i) => {
+            let tail = "";
+            if (s.requires_confirm) {
+              // The per-step confirm checkpoint (§7.2): a real-time gate the
+              // human must clear before execute() will run an irreversible /
+              // credential-using step. Only actionable on an APPROVED item.
+              if (confirmed.has(i)) {
+                tail = ' <em style="color:#8ce28c">✓ confirmed</em>';
+              } else if (approved) {
+                tail = ` <button data-id="${item.id}" data-fn="confirm" data-step="${i}" style="padding:1px 7px">Confirm</button>`;
+              } else {
+                tail = ' <em style="color:#ff9f6f">(needs confirm)</em>';
+              }
+            }
+            return `<li>${badge(s.kind)} ${escapeHtml(s.summary)}${tail}</li>`;
+          })
+          .join("");
+        // On a PLAN_PROPOSED item the grants are strike-able checkboxes →
+        // approve with a NARROWED set (§7.2).
+        const proposing = item.phase === "PLAN_PROPOSED";
+        const grants = (p.requested_grants || [])
+          .map((g) =>
+            proposing
+              ? `<li><label><input type="checkbox" class="grant" data-id="${item.id}" value="${escapeHtml(
+                  g
+                )}" checked /> ${escapeHtml(g)}</label></li>`
+              : `<li>${escapeHtml(g)}</li>`
+          )
+          .join("");
+        const assist = (p.human_assist || []).map((g) => `<li>${escapeHtml(g)}</li>`).join("");
+        const granted = item.approval
+          ? `<div class="meta">approved by ${escapeHtml(item.approval.principal)} · granted: ${
+              (item.approval.granted || []).map(escapeHtml).join(", ") || "(none)"
+            }</div>`
+          : "";
+        return `<div class="card">
+          <div class="meta">Plan (hash <code>${p.plan_hash.slice(0, 12)}…</code>) · reversibility: ${p.reversibility}</div>
+          <strong>Here's my plan</strong><ul>${steps || "<li>(none)</li>"}</ul>
+          ${grants ? `<strong>Here's what I need access to</strong><ul>${grants}</ul>` : ""}
+          ${assist ? `<strong>Here's where I'll need you</strong><ul>${assist}</ul>` : ""}
+          ${granted}
+        </div>`;
+      }
+
+      function reqCard(item) {
+        if (!item.requirements) return "";
+        const r = item.requirements;
+        const li = (a) => (a || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+        const disp = (item.dispositions || [])
+          .map((d) => `<li>${badge(d.kind)} <strong>${escapeHtml(d.need)}</strong> — ${escapeHtml(d.rationale)}</li>`)
+          .join("");
+        return `<div class="card">
+          <div class="meta">Inferred (confidence ${r.confidence.toFixed(2)}, reversibility ${r.irreversibility})</div>
+          ${r.capabilities.length ? `<strong>Capabilities</strong><ul>${li(r.capabilities)}</ul>` : ""}
+          ${r.connections.length ? `<strong>Connections</strong><ul>${li(r.connections)}</ul>` : ""}
+          ${r.human_assistance.length ? `<strong>Human assistance</strong><ul>${li(r.human_assistance)}</ul>` : ""}
+          ${disp ? `<strong>Disposition</strong><ul>${disp}</ul>` : ""}
+        </div>`;
+      }
+
+      function actionsFor(item) {
+        const id = item.id;
+        const b = (label, fn) => `<button data-id="${id}" data-fn="${fn}">${label}</button>`;
+        let out = "";
+        switch (item.phase) {
+          case "DRAFTED":
+            out = b("Discover", "discover") + b("Discover (LLM assist)", "discover_assisted");
+            break;
+          case "DISCOVERED":
+            out = b("Classify", "classify");
+            break;
+          case "CLASSIFIED":
+            out = b("Plan", "plan");
+            break;
+          case "PLAN_PROPOSED":
+            out =
+              b("Approve", "approve") +
+              b("Approve (narrowed)", "approve_narrowed") +
+              b("Request changes", "request_changes") +
+              b("Reject", "reject");
+            break;
+          case "APPROVED":
+            // Per-step Confirm buttons live inline in the plan card; here are
+            // the item-level controls. execute() is the safe-tier no-op.
+            out = b("Execute (no-op)", "execute") + b("Block (2FA)", "block") + b("Reject", "reject");
+            break;
+          case "BLOCKED_HUMAN":
+            out = b("Resume", "resume") + b("Reject", "reject");
+            break;
+        }
+        return out + b("Delete", "delete_item");
+      }
+
+      const dispatch = {
+        discover: (id) => call("discover", { id }),
+        discover_assisted: (id) => call("discover_assisted", { id }),
+        classify: (id) => call("classify", { id }),
+        plan: (id) => call("plan", { id }),
+        approve: async (id) => {
+          const item = await call("get_item", { id });
+          const principal = prompt("Approve as (principal)?", "operator");
+          if (!principal) return;
+          // Bind to the EXACT plan hash shown; the host re-validates and the
+          // action refuses a stale hash.
+          return call("approve", { id, plan_hash: item.plan.plan_hash, principal });
+        },
+        approve_narrowed: async (id) => {
+          const item = await call("get_item", { id });
+          const principal = prompt("Approve as (principal)?", "operator");
+          if (!principal) return;
+          // Collect only the grants still checked → a NARROWED subset (§7.2).
+          const granted = Array.from(
+            document.querySelectorAll(`input.grant[data-id="${CSS.escape(id)}"]:checked`)
+          ).map((el) => el.value);
+          return call("approve", { id, plan_hash: item.plan.plan_hash, principal, granted });
+        },
+        request_changes: (id) => {
+          const note = prompt("What should change?", "") || "";
+          return call("request_changes", { id, note });
+        },
+        reject: (id) => call("reject", { id, reason: prompt("Reason?", "") || "" }),
+        confirm: (id, step) => call("confirm", { id, step_index: Number(step) }),
+        execute: (id) => call("execute", { id }),
+        block: (id) => call("block", { id, reason: "waiting on a human (2FA/CAPTCHA)" }),
+        resume: (id) => call("resume", { id }),
+        delete_item: (id) => call("delete_item", { id }),
+      };
+
+      function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      }
+
+      function render(items) {
+        const list = document.getElementById("list");
+        list.innerHTML = items
+          .map(
+            (item) => `<div class="item">
+              <div class="row">
+                <span class="phase ${item.phase}">${item.phase}</span>
+                <h3 style="flex:1">${escapeHtml(item.text)}</h3>
+              </div>
+              ${
+                item.phase === "BLOCKED_HUMAN"
+                  ? `<div class="meta" style="color:#ff9f6f;font-weight:600">⚠ needs you now: ${escapeHtml(
+                      item.note || "blocked awaiting a human"
+                    )}</div>`
+                  : item.note
+                  ? `<div class="meta">note: ${escapeHtml(item.note)}</div>`
+                  : ""
+              }
+              ${item.result ? `<div class="meta">result: ${escapeHtml(item.result)}</div>` : ""}
+              ${reqCard(item)}
+              ${planCard(item)}
+              <div class="actions">${actionsFor(item)}</div>
+            </div>`
+          )
+          .join("");
+        list.querySelectorAll("button[data-fn]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            showErr(null);
+            try {
+              await dispatch[btn.dataset.fn](btn.dataset.id, btn.dataset.step);
+              await refresh();
+            } catch (e) {
+              showErr(e);
+            }
+          });
+        });
+      }
+
+      async function refresh() {
+        const items = await call("list_items", {});
+        render(items);
+      }
+
+      document.getElementById("add").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        showErr(null);
+        const input = document.getElementById("text");
+        const text = input.value.trim();
+        if (!text) return;
+        try {
+          await call("add_item", { text });
+          input.value = "";
+          await refresh();
+        } catch (e) {
+          showErr(e);
+        }
+      });
+
+      // Live updates via the SSE stream the host serves for every app.
+      try {
+        const es = new EventSource("api/events");
+        es.onmessage = () => refresh();
+      } catch (e) {}
+
+      refresh().catch(showErr);
+    </script>
+  </body>
+</html>
