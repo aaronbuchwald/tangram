@@ -43,13 +43,10 @@ async fn main() -> anyhow::Result<()> {
         // the app's static-UI fallback (`Router::nest` would leave it
         // unroutable: a nested fallback only matches non-empty tails).
         .nest_service("/notes/", notes::app().build()?)
-        .nest_service("/nutrition/", {
-            // Nutrition layers its capabilities probe on top of the derived
-            // surface (all operations, including description-based logging,
-            // are registered actions).
-            let (router, ctx) = nutrition::app().build_parts()?;
-            nutrition::with_api(router, ctx)
-        });
+        // Nutrition's capability probe is the `get_capabilities` action, so it
+        // rides the derived surface (all operations, including
+        // description-based logging, are registered actions) — no custom route.
+        .nest_service("/nutrition/", nutrition::app().build()?);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

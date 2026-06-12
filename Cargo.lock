@@ -2629,7 +2629,6 @@ dependencies = [
  "anyhow",
  "automerge",
  "autosurgeon",
- "axum",
  "schemars",
  "serde",
  "serde_json",

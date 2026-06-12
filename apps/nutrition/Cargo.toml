@@ -14,11 +14,11 @@ serde_json.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
-# Native-only: the binary's runtime + the custom capabilities route. The
-# library also compiles to wasm32-wasip2 (the WASM component), which must
-# not pull the server stack; strategy HTTP goes through tangram::http.
+# Native-only: the binary's tokio runtime. The library also compiles to
+# wasm32-wasip2 (the WASM component), which must not pull the server stack;
+# strategy HTTP goes through tangram::http. The capability probe is the
+# `get_capabilities` action, so the derived router serves it — no axum here.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-axum.workspace = true
 tokio.workspace = true
 
 [lib]

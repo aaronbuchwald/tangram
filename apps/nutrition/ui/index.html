@@ -733,9 +733,9 @@
     let caps = { strategy: "offline", description_input: false };
     let descMode = false; // which input the dialog currently shows
 
-    fetch("api/capabilities")
+    fetch("api/actions/get_capabilities", { method: "POST" })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((c) => {
+      .then(({ result: c }) => {
         caps = c;
         descMode = !!c.description_input; // description-first when available
         el("strategyName").textContent = c.strategy;

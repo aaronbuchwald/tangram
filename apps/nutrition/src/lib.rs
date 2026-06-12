@@ -11,8 +11,6 @@
 
 use tangram::prelude::*;
 
-#[cfg(not(target_family = "wasm"))]
-mod api;
 pub mod strategy;
 
 pub use strategy::ResolvedNutrient;
@@ -244,6 +242,15 @@ impl Nutrition {
         let mut meals = self.meals.clone();
         meals.sort_by_key(|m| std::cmp::Reverse(m.eaten_at_ms));
         meals
+    }
+
+    /// Report the active nutrition strategy's capabilities: its `strategy`
+    /// name and whether `description_input` (plain-language meal resolution)
+    /// is available. A read-only probe — no mutation, no I/O — so the UI can
+    /// decide whether to offer the description field. Returns the same JSON
+    /// the WASM component publishes through `describe()`.
+    pub fn get_capabilities(&self) -> serde_json::Value {
+        capabilities_json(Strategy::from_env())
     }
 
     /// Nutrition totals (the gold view) for one meal: per nutrient, summed
@@ -560,10 +567,9 @@ fn now_ms() -> i64 {
     tangram::time::now_ms()
 }
 
-/// The capabilities object reported by `GET /api/capabilities` — ONE
-/// constructor for both the native route (`api.rs`) and the WASM
-/// component's `describe()` manifest, so the two surfaces are identical by
-/// construction.
+/// The capabilities object reported by the `get_capabilities` action — ONE
+/// constructor for both the native action and the WASM component's
+/// `describe()` manifest, so the two surfaces are identical by construction.
 pub(crate) fn capabilities_json(strategy: Strategy) -> serde_json::Value {
     serde_json::json!({
         "strategy": strategy.name(),
@@ -576,31 +582,22 @@ pub(crate) fn capabilities_json(strategy: Strategy) -> serde_json::Value {
 const INSTRUCTIONS: &str = "A replicated nutrition tracker. Log meals via log_meal: either \
      explicit gram-quantified components, or a plain-language \
      description (quantities included) that the active nutrition \
-     strategy resolves over the network — GET /api/capabilities \
+     strategy resolves over the network — get_capabilities \
      reports whether descriptions can be resolved. Read totals with \
      meal_nutrition. If a component is unknown, register per-100g \
      data with add_component_nutrition (full panel) or \
      add_ingredient (core five) and past meals resolve too. Humans \
      see every change live in the web UI on all synced devices.";
 
-/// The nutrition app, fully configured. Serve it with
-/// `app().serve_with(with_api)` (standalone) or mount
-/// `with_api(...app().build_parts()?)` in a multi-app host — `with_api` adds
-/// the `GET /api/capabilities` probe on top of the derived surface.
+/// The nutrition app, fully configured. Serve it with `app().serve()`
+/// (standalone) or mount `app().build_parts()?` in a multi-app host. The
+/// capability probe is the `get_capabilities` action, so it rides the derived
+/// surface (HTTP + MCP) with no custom route to merge.
 #[cfg(not(target_family = "wasm"))]
 pub fn app() -> App<Nutrition> {
     App::<Nutrition>::new("nutrition")
         .instructions(INSTRUCTIONS)
         .ui_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/ui"))
-}
-
-/// Merge the nutrition app's capabilities probe into the derived router
-/// (every user-facing *operation* is a registered action; the probe just
-/// reports what the active strategy can do). Shaped to pass straight to
-/// [`App::serve_with`].
-#[cfg(not(target_family = "wasm"))]
-pub fn with_api(router: axum::Router, _ctx: Ctx<Nutrition>) -> axum::Router {
-    router.merge(api::routes())
 }
 
 // Compiled for wasm32-wasip2, the same model + actions become a Tangram
@@ -623,3 +620,31 @@ tangram::export_component!(Nutrition {
         Some(capabilities_json(strategy))
     },
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `get_capabilities` action returns the same JSON the old
+    /// `/api/capabilities` route served: a `strategy` name plus a
+    /// `description_input` boolean, byte-equivalent to `capabilities_json`
+    /// for the active strategy.
+    #[test]
+    fn get_capabilities_reports_strategy_and_description_input() {
+        // Pin the environment so the assertion is deterministic regardless
+        // of ambient config (NUTRITION_STRATEGY wins; clear the key fallback).
+        // SAFETY: single-threaded test; no other thread reads the env here.
+        unsafe {
+            std::env::set_var("NUTRITION_STRATEGY", "offline");
+            std::env::remove_var("CALORIENINJAS_API_KEY");
+        }
+
+        let caps = Nutrition::default().get_capabilities();
+
+        // Same shape the route returned: exactly these two keys.
+        assert_eq!(caps, capabilities_json(Strategy::from_env()));
+        assert_eq!(caps["strategy"], "offline");
+        assert_eq!(caps["description_input"], false);
+        assert!(caps["description_input"].is_boolean());
+    }
+}
