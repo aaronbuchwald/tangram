@@ -105,6 +105,194 @@ impl InjectRule {
     }
 }
 
+/// The egress enforcement posture for an app's call list
+/// (docs/design/fine-grained-egress.md §5.4). A single host-level toggle:
+///
+/// - `observe` — never deny; log every undeclared/over-broad call as a
+///   candidate `[[calls]]` to add (the dev default; vibe-code freely).
+/// - `warn` — inject on declared calls, allow undeclared calls but loudly
+///   warn (the migration aid / legacy default).
+/// - `enforce` — deny undeclared calls; inject only on matched calls (the §2
+///   Anthropic deterministic-boundary posture; the prod default for apps that
+///   declare ≥1 call).
+///
+/// Absent (`None`) defers to the migration default (§7.2), computed at
+/// converge from whether the app declares any `[[calls]]` (EC7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnforcementMode {
+    Observe,
+    Warn,
+    Enforce,
+}
+
+impl EnforcementMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Observe => "observe",
+            Self::Warn => "warn",
+            Self::Enforce => "enforce",
+        }
+    }
+}
+
+/// The constrained body matcher in TOML (§9.1, the JSON-RPC-method rung): a
+/// fixed JSON-pointer selector plus the literal set the selected value must be
+/// a member of. The common case `body = { json_method = ["tools/list"] }`
+/// defaults the pointer to `/method`; an explicit `pointer` overrides it. The
+/// grammar is CLOSED — no operators, no regex, no value-matching on arbitrary
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BodyMatchToml {
+    /// The literal set `$<pointer>` must be a member of (string equality).
+    pub json_method: Vec<String>,
+    /// The JSON pointer to select; defaults to `/method` (the JSON-RPC rung).
+    #[serde(default = "default_json_pointer")]
+    pub pointer: String,
+}
+
+fn default_json_pointer() -> String {
+    "/method".to_string()
+}
+
+/// Name-level query/header constraint in TOML — parameter/header NAMES only
+/// (never values; values may carry data and matching on them invites the
+/// parser-differential class, §4.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NameConstraintToml {
+    #[serde(default)]
+    pub required: Vec<String>,
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+}
+
+/// One declared call in TOML (`[[apps.<app>.calls]]`, §4.1). The credential
+/// injection moves INSIDE the call: it is attached ONLY to this call, not to
+/// the host. A call with no `inject` goes out un-credentialed (still allowed).
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallSpecToml {
+    /// HTTP method — exact, case-insensitive (`GET`/`POST`/…); `"*"` allowed
+    /// but discouraged (the maximally-broad method, dev-mode warns).
+    #[serde(default = "default_method_any")]
+    pub method: String,
+    /// Exact host, same space as `allow_hosts` (must ALSO be allowlisted — the
+    /// host fence composes, never bypassed).
+    pub host: String,
+    /// Exact path, an RFC-6570-style template (`/v1/items/{id}`), or the
+    /// subtree wildcard `/**`. Defaults to the subtree (maximally broad).
+    #[serde(default = "default_path_subtree")]
+    pub path: String,
+    /// Optional name-level query constraint.
+    #[serde(default)]
+    pub query: NameConstraintToml,
+    /// Optional name-level header constraint.
+    #[serde(default)]
+    pub headers: NameConstraintToml,
+    /// Optional body-byte cap; `0` forbids a body entirely. Also bounds the
+    /// body parsed for the `body` matcher.
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
+    /// The constrained JSON-RPC-method body rung (§9.1); the body is parsed
+    /// ONLY when this is present.
+    #[serde(default)]
+    pub body: Option<BodyMatchToml>,
+    /// The credential injection scoped to THIS call (reuses the existing
+    /// host-keyed [`InjectRule`] shape; the `header`/`bearer`/`query` + `secret`
+    /// selection is validated by [`InjectRule::kind`]).
+    #[serde(default)]
+    pub inject: Option<InjectRule>,
+}
+
+fn default_method_any() -> String {
+    "*".to_string()
+}
+
+fn default_path_subtree() -> String {
+    "/**".to_string()
+}
+
+impl CallSpecToml {
+    /// Lower this TOML entry into the runtime [`crate::egress::CallSpec`]
+    /// (canonical host, parsed method/path, classified inject kind). Errors
+    /// carry the offending host/path so a bad entry is a clear config error.
+    pub fn resolve(&self) -> anyhow::Result<crate::egress::CallSpec> {
+        use crate::egress::{
+            BodyMatch, CallSpec, HeaderConstraint, MethodMatch, PathPattern, QueryConstraint,
+        };
+
+        let host = crate::egress::canonical_host(&self.host).map_err(|e| anyhow::anyhow!(e))?;
+        let method = match self.method.trim() {
+            "*" => MethodMatch::Any,
+            "" => anyhow::bail!("call for host {host:?}: method must be non-empty"),
+            m => MethodMatch::Exact(m.to_ascii_uppercase()),
+        };
+        let path = PathPattern::parse(&self.path).map_err(|e| anyhow::anyhow!(e))?;
+        // Header NAMES are matched lowercased (the canonical request lowercases
+        // them); lower the declared names too so the constraint composes.
+        let headers = HeaderConstraint {
+            required: self
+                .headers
+                .required
+                .iter()
+                .map(|h| h.to_ascii_lowercase())
+                .collect(),
+            forbidden: self
+                .headers
+                .forbidden
+                .iter()
+                .map(|h| h.to_ascii_lowercase())
+                .collect(),
+        };
+        let query = QueryConstraint {
+            required: self.query.required.clone(),
+            forbidden: self.query.forbidden.clone(),
+        };
+        let body = match &self.body {
+            Some(bm) => {
+                anyhow::ensure!(
+                    !bm.json_method.is_empty(),
+                    "call for host {host:?}: body.json_method must list at least one method \
+                     (an empty set never matches)"
+                );
+                anyhow::ensure!(
+                    bm.pointer.starts_with('/'),
+                    "call for host {host:?}: body.pointer {:?} must be a JSON pointer \
+                     (start with '/')",
+                    bm.pointer
+                );
+                Some(BodyMatch {
+                    pointer: bm.pointer.clone(),
+                    allowed: bm.json_method.clone(),
+                })
+            }
+            None => None,
+        };
+        let (inject, inject_kind) = match &self.inject {
+            Some(rule) => {
+                let kind = rule
+                    .kind()
+                    .with_context(|| format!("call inject rule for host {host:?}"))?;
+                (Some(rule.clone()), Some(kind))
+            }
+            None => (None, None),
+        };
+        Ok(CallSpec {
+            method,
+            host,
+            path,
+            query,
+            headers,
+            max_body_bytes: self.max_body_bytes,
+            body,
+            inject,
+            inject_kind,
+        })
+    }
+}
+
 /// One app's spec: which component to run, what UI to serve, and what the
 /// component is granted (data dir, outbound hosts, environment).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -155,6 +343,22 @@ pub struct AppSpec {
     /// exposure — see ADR-0005 scope note).
     #[serde(default)]
     pub inject: BTreeMap<String, InjectRule>,
+    /// Call-level egress capabilities (docs/design/fine-grained-egress.md §4):
+    /// an array of declared calls — method + host + path-pattern (+ optional
+    /// name-level query/header constraints, a constrained JSON-RPC-method body
+    /// rung, and the credential injection scoped to THAT call). When present,
+    /// these are the AUTHORITATIVE inner gate: an undeclared call on an
+    /// allowlisted host is denied (and un-credentialed) in `enforce` mode.
+    /// STRICTLY ADDITIVE: an app with no `calls` desugars to the maximally-broad
+    /// implicit call per host (`{ method = *, path = /** }`), carrying any
+    /// host-keyed `inject`, so existing configs behave byte-identically (§7).
+    #[serde(default)]
+    pub calls: Vec<CallSpecToml>,
+    /// The egress enforcement posture (`observe` / `warn` / `enforce`). Absent
+    /// → the migration default computed at converge (§7.2): `warn` for legacy
+    /// apps with no `calls`, `enforce` for apps declaring ≥1 call (EC7).
+    #[serde(default)]
+    pub enforcement: Option<EnforcementMode>,
     /// Optional sync base of a peer to replicate with (the host dials out,
     /// exactly like a native app's TANGRAM_REMOTE).
     #[serde(default)]
@@ -334,6 +538,72 @@ impl AppSpec {
             .collect()
     }
 
+    /// Validate every declared `[[calls]]` entry: each call's host must be in
+    /// `allow_hosts` (the host fence composes, never bypassed — §4.2 step 2),
+    /// its method/path-template/body parse, and its `inject` (if any) names
+    /// exactly one kind. Called by the file/registry loaders alongside
+    /// [`Self::validate_inject`] so a bad call is a clear config error.
+    pub fn validate_calls(&self) -> anyhow::Result<()> {
+        for (i, call) in self.calls.iter().enumerate() {
+            let resolved = call
+                .resolve()
+                .with_context(|| format!("[[calls]] #{} (host {:?})", i + 1, call.host))?;
+            anyhow::ensure!(
+                self.allow_hosts
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(&resolved.host)),
+                "[[calls]] #{} targets host {:?} which is not in allow_hosts \
+                 (the call grant composes with the allowlist — add {:?} to allow_hosts)",
+                i + 1,
+                resolved.host,
+                resolved.host
+            );
+        }
+        Ok(())
+    }
+
+    /// The effective call list for egress enforcement, as runtime
+    /// [`crate::egress::CallSpec`]s.
+    ///
+    /// - When the app declares `[[calls]]`, those are the authoritative inner
+    ///   gate (malformed entries are skipped with a warning — `validate_calls`
+    ///   already rejected them at load, this is the runtime safety net).
+    /// - When it declares NONE, the list is the COMPAT SHIM (§4.2 / §7.1): one
+    ///   maximally-broad implicit call per allowlisted host
+    ///   (`{ method = *, path = /** }`), carrying that host's host-keyed
+    ///   `inject` if any — so a bare `allow_hosts` / host-keyed
+    ///   `[apps.X.inject]` behaves BYTE-IDENTICALLY to before.
+    pub fn resolved_calls(&self) -> Vec<crate::egress::CallSpec> {
+        if !self.calls.is_empty() {
+            return self
+                .calls
+                .iter()
+                .filter_map(|call| match call.resolve() {
+                    Ok(spec) => Some(spec),
+                    Err(e) => {
+                        tracing::warn!("ignoring [[calls]] entry for host {:?}: {e:#}", call.host);
+                        None
+                    }
+                })
+                .collect();
+        }
+        // Compat shim: desugar each allowlisted host to the broad implicit
+        // call, moving its host-keyed inject onto it. The host-keyed inject map
+        // is lowercased here to match the canonical host.
+        let inject = self.resolved_inject();
+        self.allow_hosts
+            .iter()
+            .map(|host| {
+                let host_lc = host.to_ascii_lowercase();
+                let on_call = inject
+                    .iter()
+                    .find(|(h, _, _)| *h == host_lc)
+                    .map(|(_, kind, rule)| (kind.clone(), rule.clone()));
+                crate::egress::CallSpec::implicit_subtree(&host_lc, on_call)
+            })
+            .collect()
+    }
+
     /// Whether this app has at least one injection rule whose secret resolves
     /// — i.e. an egress credential is genuinely configured (ADR-0005). The
     /// capabilities probe derives "configured" from this (host-side) instead
@@ -491,6 +761,8 @@ impl HostConfig {
                 .with_context(|| format!("app {name:?}"))?;
             spec.validate_inject()
                 .with_context(|| format!("app {name:?}"))?;
+            spec.validate_calls()
+                .with_context(|| format!("app {name:?}"))?;
         }
         for (tenant, spec) in &config.tenants.tenants {
             validate_name(tenant).with_context(|| format!("tenant name {tenant:?}"))?;
@@ -507,6 +779,9 @@ impl HostConfig {
                     .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 app_spec
                     .validate_inject()
+                    .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
+                app_spec
+                    .validate_calls()
                     .with_context(|| format!("tenant {tenant:?} app {app:?}"))?;
                 if let Some(dir) = &app_spec.data_dir {
                     crate::tenant::validate_tenant_data_dir(dir).with_context(|| {
@@ -970,5 +1245,260 @@ mod tests {
         assert_eq!(resolved[0].0, "api.calorieninjas.com");
         assert_eq!(resolved[0].1, InjectKind::Header("X-Api-Key".into()));
         unsafe { std::env::remove_var("TANGRAM_TEST_INJECT_KEY") };
+    }
+
+    // ── EC2: [[calls]] config parse + validate_calls + the compat shim. ──────
+    // The test module name carries `calls_config` so the build plan's filter
+    // `cargo test -p tangram-host calls_config` selects exactly this suite.
+    mod calls_config {
+        use super::*;
+        use crate::egress::{MethodMatch, PathPattern};
+
+        #[test]
+        fn parses_a_calls_block_with_all_constraints() {
+            let config = HostConfig::parse(
+                r#"
+                [apps.mcpproxy]
+                component = "m.wasm"
+                ui = "ui"
+                allow_hosts = ["api.vendor.com"]
+                enforcement = "enforce"
+
+                [[apps.mcpproxy.calls]]
+                method = "GET"
+                host = "api.vendor.com"
+                path = "/v1/items/{id}"
+                query = { required = ["query"], forbidden = ["callback"] }
+                headers = { required = ["content-type"] }
+                max_body_bytes = 0
+
+                [[apps.mcpproxy.calls]]
+                method = "POST"
+                host = "api.vendor.com"
+                path = "/rpc"
+                body = { json_method = ["tools/list", "tools/call"] }
+                inject = { bearer = true, secret = "env://VENDOR_TOKEN" }
+                "#,
+            )
+            .unwrap();
+            let spec = &config.apps["mcpproxy"];
+            assert_eq!(spec.enforcement, Some(EnforcementMode::Enforce));
+            assert_eq!(spec.calls.len(), 2);
+
+            let calls = spec.resolved_calls();
+            assert_eq!(calls.len(), 2);
+            // First call: GET template, name-level constraints, no body, no
+            // inject; max_body_bytes = 0 forbids a body.
+            assert_eq!(calls[0].method, MethodMatch::Exact("GET".into()));
+            assert_eq!(calls[0].host, "api.vendor.com");
+            assert!(matches!(calls[0].path, PathPattern::Template(_)));
+            assert_eq!(calls[0].query.required, vec!["query".to_string()]);
+            assert_eq!(calls[0].query.forbidden, vec!["callback".to_string()]);
+            assert_eq!(calls[0].headers.required, vec!["content-type".to_string()]);
+            assert_eq!(calls[0].max_body_bytes, Some(0));
+            assert!(calls[0].inject.is_none());
+            // Second call: POST /rpc, JSON-RPC body rung (default pointer
+            // /method), bearer inject classified.
+            assert_eq!(calls[1].method, MethodMatch::Exact("POST".into()));
+            assert_eq!(calls[1].path, PathPattern::Exact("/rpc".into()));
+            let body = calls[1].body.as_ref().expect("body matcher");
+            assert_eq!(body.pointer, "/method");
+            assert_eq!(body.allowed, vec!["tools/list", "tools/call"]);
+            assert_eq!(calls[1].inject_kind, Some(InjectKind::Bearer));
+        }
+
+        #[test]
+        fn default_method_and_path_are_maximally_broad() {
+            // A call with only a host declared is the broad implicit call.
+            let config = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["h.com"]
+                [[apps.a.calls]]
+                host = "h.com"
+                "#,
+            )
+            .unwrap();
+            let calls = config.apps["a"].resolved_calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].method, MethodMatch::Any);
+            assert_eq!(calls[0].path, PathPattern::Subtree);
+        }
+
+        /// THE behavior-identical-by-default guarantee (§4.2 / §7.1): the live
+        /// nutrition host-keyed inject (NO `[[calls]]`) desugars to one
+        /// maximally-broad implicit call per allowlisted host, carrying that
+        /// host's inject. This is what makes the live fleet byte-identical.
+        #[test]
+        fn host_keyed_inject_desugars_to_the_broad_implicit_call() {
+            let config = HostConfig::parse(
+                r#"
+                [apps.nutrition]
+                component = "n.wasm"
+                ui = "ui"
+                allow_hosts = ["api.calorieninjas.com"]
+                [apps.nutrition.inject]
+                "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
+                "#,
+            )
+            .unwrap();
+            let calls = config.apps["nutrition"].resolved_calls();
+            assert_eq!(calls.len(), 1, "one implicit call per allowlisted host");
+            let call = &calls[0];
+            assert_eq!(call.method, MethodMatch::Any, "any method (broad)");
+            assert_eq!(call.path, PathPattern::Subtree, "any path (broad)");
+            assert_eq!(call.host, "api.calorieninjas.com");
+            // The host-keyed inject moved ONTO the implicit call.
+            assert_eq!(
+                call.inject_kind,
+                Some(InjectKind::Header("X-Api-Key".into())),
+                "the host-keyed credential is attached to the broad call"
+            );
+            assert_eq!(
+                call.inject.as_ref().map(|r| r.secret.as_str()),
+                Some("env://CALORIENINJAS_API_KEY")
+            );
+        }
+
+        /// A bare `allow_hosts` host with no inject and no calls desugars to a
+        /// broad, un-credentialed call (allowed, any path).
+        #[test]
+        fn bare_allow_host_desugars_to_uncredentialed_broad_call() {
+            let config = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["public.example.com", "API.Other.com"]
+                "#,
+            )
+            .unwrap();
+            let calls = config.apps["a"].resolved_calls();
+            assert_eq!(calls.len(), 2);
+            assert!(calls.iter().all(|c| c.inject.is_none()));
+            // Hosts are canonicalized (lowercased) on the implicit call.
+            let hosts: Vec<&str> = calls.iter().map(|c| c.host.as_str()).collect();
+            assert!(hosts.contains(&"public.example.com"));
+            assert!(hosts.contains(&"api.other.com"));
+        }
+
+        #[test]
+        fn call_host_must_be_in_allow_hosts() {
+            // The host fence composes — a call targeting a host outside
+            // allow_hosts is a parse error (never bypasses the allowlist).
+            let err = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["api.allowed.com"]
+                [[apps.a.calls]]
+                method = "GET"
+                host = "api.evil.com"
+                path = "/x"
+                "#,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("not in allow_hosts"), "{err:#}");
+        }
+
+        #[test]
+        fn call_inject_must_name_exactly_one_kind() {
+            let err = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["h.com"]
+                [[apps.a.calls]]
+                host = "h.com"
+                inject = { header = "X", bearer = true, secret = "env://K" }
+                "#,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("inject rule"), "{err:#}");
+        }
+
+        #[test]
+        fn empty_json_method_set_is_rejected() {
+            // A body matcher with an empty literal set never matches — reject
+            // it as a config error rather than silently denying everything.
+            let err = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["h.com"]
+                [[apps.a.calls]]
+                method = "POST"
+                host = "h.com"
+                path = "/rpc"
+                body = { json_method = [] }
+                "#,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("json_method"), "{err:#}");
+        }
+
+        #[test]
+        fn bad_path_template_is_rejected() {
+            let err = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["h.com"]
+                [[apps.a.calls]]
+                host = "h.com"
+                path = "/v1/**/x"
+                "#,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("**"), "{err:#}");
+        }
+
+        #[test]
+        fn tenant_ceiling_drops_out_of_ceiling_calls() {
+            use crate::registry::Source;
+            use std::path::Path;
+            let config = HostConfig::parse(
+                r#"
+                [apps.a]
+                component = "a.wasm"
+                ui = "ui"
+                allow_hosts = ["api.in.com", "api.out.com"]
+                [[apps.a.calls]]
+                method = "GET"
+                host = "api.in.com"
+                path = "/x"
+                [[apps.a.calls]]
+                method = "GET"
+                host = "api.out.com"
+                path = "/y"
+                "#,
+            )
+            .unwrap();
+            let spec = &config.apps["a"];
+            let ceiling = vec!["api.in.com".to_string()];
+            let eff = crate::tenant::effective_spec(
+                "t",
+                "a",
+                spec,
+                Source::File,
+                Path::new("/r"),
+                Some(&ceiling),
+            )
+            .unwrap();
+            // Both allow_hosts and calls are intersected with the ceiling.
+            assert_eq!(eff.allow_hosts, vec!["api.in.com".to_string()]);
+            assert_eq!(eff.calls.len(), 1);
+            assert_eq!(eff.calls[0].host, "api.in.com");
+            // And resolved_calls on the effective spec carries only the kept call.
+            let resolved = eff.resolved_calls();
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].host, "api.in.com");
+        }
     }
 }

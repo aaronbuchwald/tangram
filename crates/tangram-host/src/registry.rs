@@ -230,6 +230,12 @@ pub fn parse_state(
                 allow_hosts: entry.allow_hosts,
                 env: entry.env.into_iter().map(|e| (e.key, e.value)).collect(),
                 inject,
+                // The registry document does not yet carry call-level grants;
+                // a registry-installed app desugars to the host-keyed compat
+                // shim (its host-keyed inject becomes the broad implicit call),
+                // and defaults to the migration enforcement mode (EC7).
+                calls: Vec::new(),
+                enforcement: None,
                 remote,
                 remote_token,
                 registry: false,
@@ -238,8 +244,9 @@ pub fn parse_state(
             };
             // Same gate as the file loader: exactly one component source,
             // well-formed sha-256, valid injection rules (each names one kind
-            // and targets an allowlisted host) — one bad install must not take
-            // down the rest of the fleet, so invalid entries are skipped.
+            // and targets an allowlisted host), valid calls — one bad install
+            // must not take down the rest of the fleet, so invalid entries are
+            // skipped.
             if let Err(e) = spec.component_source() {
                 tracing::warn!("{registry}: skipping entry {:?}: {e:#}", entry.name);
                 return None;
@@ -330,6 +337,8 @@ mod tests {
             allow_hosts: Vec::new(),
             env: BTreeMap::new(),
             inject: BTreeMap::new(),
+            calls: Vec::new(),
+            enforcement: None,
             remote: None,
             remote_token: None,
             registry,
