@@ -176,43 +176,23 @@ body {
 .stat-label { margin-top: 2px; }
 .home .hint { color: var(--faint); font-size: 13px; }
 
-/* note tab: editor | preview */
+/* note tab: a single Obsidian-style live-preview editor (issue #11) — no
+   side-by-side rendered pane. The CodeMirror view fills the note area and
+   scrolls internally; the in-editor decorations (editor.ts / livePreview.ts)
+   do the inline rendering. */
 .note { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .note-bar {
   flex: none; display: flex; align-items: center; gap: 10px;
   padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
 .note-path { font-family: var(--mono); font-size: 12px; color: var(--dim); flex: 1; }
-.note-split { flex: 1; display: flex; min-height: 0; }
-/* CodeMirror 6 source pane (markdown). The editor sizes itself; the host is a
-   flex column so the .cm-editor fills the pane and scrolls internally. */
+/* The editor host fills the note area; the host is a flex column so the
+   .cm-editor fills it and scrolls internally. */
 .editor-host {
   flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
-  border-right: 1px solid var(--line); overflow: hidden;
+  overflow: hidden;
 }
 .editor-host .cm-editor { flex: 1; min-height: 0; }
-.preview { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 24px; }
-
-/* rendered markdown */
-.markdown { color: var(--text); }
-.markdown h1, .markdown h2, .markdown h3 { line-height: 1.25; margin: 1.2em 0 0.5em; }
-.markdown h1 { font-size: 1.6em; border-bottom: 1px solid var(--line); padding-bottom: 0.2em; }
-.markdown h2 { font-size: 1.3em; }
-.markdown a { color: var(--blue); }
-.markdown code {
-  font-family: var(--mono); font-size: 0.88em;
-  background: var(--panel-2); padding: 0.1em 0.35em; border-radius: 4px;
-}
-.markdown pre {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
-  padding: 12px 14px; overflow-x: auto;
-}
-.markdown pre code { background: transparent; padding: 0; }
-.markdown blockquote {
-  margin: 0.8em 0; padding-left: 1em; border-left: 3px solid var(--line);
-  color: var(--dim);
-}
-.markdown ul, .markdown ol { padding-left: 1.4em; }
-.markdown table { border-collapse: collapse; }
-.markdown th, .markdown td { border: 1px solid var(--line); padding: 4px 8px; }
-.markdown hr { border: 0; border-top: 1px solid var(--line); margin: 1.5em 0; }
+/* Center the writing column at a comfortable measure, Obsidian-style, while
+   letting the editor (and its scroller) span the full pane. */
+.editor-host .cm-content { max-width: 48rem; margin: 0 auto; width: 100%; }
