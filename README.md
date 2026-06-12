@@ -236,6 +236,27 @@ for one that declares any. An app can also declare its calls in its own
 `describe()` output; the host *intersects* that with the spec (a request that
 can only narrow, never a grant).
 
+**Egress policy engine (ADR-0009, the opt-in escape hatch — NOT the default).**
+For the rare case the declarative `[[calls]]` grammar can't express, an app can
+attach a small, bounded, auditable **policy** that runs at the egress boundary
+*after* the call match as an additional gate. It can only **narrow** (deny a
+request the declarative engine allowed) — never widen, never change the injected
+credential — and an app with no policy is behavior-identical. The grammar is
+deliberately bounded (a hard rule/condition budget, checked at load and failing
+*closed*) and reuses the *same* canonicalization seam as `[[calls]]`, so no
+regex and no second parser. An app that attaches one is surfaced loudly ("uses
+custom policy"); it is a deliberately-marked escape hatch, never the default.
+
+```toml
+[apps.mcpproxy.policy]           # opt-in; almost no app needs this
+default = "deny"                 # fail closed (default); rules are first-match-wins
+rules = [
+  { effect = "allow", method = ["POST"], host = "api.vendor.com",
+    path_prefix = ["rpc"], json_method = ["tools/list", "tools/call"] },
+  { effect = "deny" },           # explicit catch-all
+]
+```
+
 Every app serves its full surface under one port, exactly like the shell:
 `/<app>/` (UI), `/<app>/api/*` (state, actions, SSE), `/<app>/sync` (the
 HTTP sync protocol — interoperates bidirectionally with native instances and

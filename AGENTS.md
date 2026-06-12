@@ -29,7 +29,10 @@ symlink to `.agents/skills`.
   the egress grant is the declared call `(method, host, path, shape)` not just
   the host, credential bound to the matched call (`src/egress.rs` is the grammar
   + the single canonicalization seam, `[[apps.<app>.calls]]` + `enforcement` in
-  apps.toml; ADR-0008, README "Call-level egress", `docs/design/fine-grained-egress.md`)
+  apps.toml; ADR-0008, README "Call-level egress", `docs/design/fine-grained-egress.md`).
+  Opt-in escape hatch (NOT the default): a bounded, auditable egress POLICY that
+  narrows the declarative grant (`src/policy.rs`, `[apps.<app>.policy]`; reuses
+  the egress seam, latency-budgeted, fails closed; ADR-0009, fine-grained-egress §9.2)
 - `crates/tangram-macros` — `#[model]` / `#[actions]` proc macros
 - `apps/notes` — minimal example app (`apps/notes/ui` for its frontend)
 - `apps/nutrition` — fuller example; pluggable resolution in
