@@ -76,6 +76,7 @@ impl Notes {
 
     /// List all notes, most recently edited first (notes never edited sort
     /// by creation time).
+    #[must_use]
     pub fn list_notes(&self) -> Vec<Note> {
         let mut notes = self.notes.clone();
         notes.sort_by_key(|n| std::cmp::Reverse(n.edited_at_ms()));
@@ -95,6 +96,7 @@ const INSTRUCTIONS: &str = "A shared, replicated notes list. Notes you add are v
 /// The notes app, fully configured. Call `.serve()` to run it standalone or
 /// `.build()` to mount it in a multi-app host.
 #[cfg(not(target_family = "wasm"))]
+#[must_use]
 pub fn app() -> App<Notes> {
     App::<Notes>::new("notes")
         .instructions(INSTRUCTIONS)

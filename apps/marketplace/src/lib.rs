@@ -58,7 +58,7 @@ pub struct Listing {
     /// `wasm-tools component wit <artifact>` — the component's ENTIRE
     /// import surface, proving the closed world (no sockets, no
     /// filesystem, no wasi:http; outbound reach only via tangram:app/host
-    /// behind the host's allow_hosts gate).
+    /// behind the host's `allow_hosts` gate).
     import_audit: String,
 }
 
