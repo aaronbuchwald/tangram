@@ -255,21 +255,73 @@
     #stamp.unsaved { visibility: visible; color: var(--red); }
 
     .ed-body { flex: 1; min-height: 0; display: flex; }
-    textarea {
+
+    /* ── the writing surface: a highlighted textarea ──────────────────────────
+       A textarea can't style its own first line, so we stack two layers that
+       share identical box metrics and typography:
+         • #note-back — a backdrop <div> that mirrors the text and renders the
+           first line as a large H1 (the Obsidian/Apple-Notes title);
+         • #note-text — the real <textarea> on top, with transparent text but a
+           visible caret, so editing stays fully in place across title + body.
+       Both layers use the same padding/font/line-height, so the caret and
+       selection land exactly where the styled glyphs are drawn. The textarea
+       owns scrolling; we mirror its scrollTop onto the backdrop. The H1 line
+       keeps the body line-height (so vertical metrics never drift) and only
+       scales the glyphs via a larger font-size with a clamped line box. */
+    .surface {
+      position: relative;
       flex: 1;
       width: 100%;
       max-width: 680px;
       margin-inline: auto;
+      min-height: 0;
+      background: var(--bg);
+    }
+    /* shared metrics — every property that affects glyph position must match */
+    .surface > #note-text,
+    .surface > #note-back {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      margin: 0;
       padding: 26px 28px 40px;
       border: none;
-      resize: none;
-      background: var(--bg);
-      color: var(--text);
       font: 15px/1.7 var(--sans);
-      caret-color: var(--blue);
+      letter-spacing: normal;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+      tab-size: 4;
     }
-    textarea::placeholder { color: var(--faint); }
-    textarea:focus { outline: none; }
+    #note-text {
+      resize: none;
+      background: transparent;     /* the backdrop below paints the glyphs */
+      color: transparent;          /* glyphs are drawn by the backdrop */
+      caret-color: var(--blue);
+      overflow-y: auto;
+    }
+    #note-text::placeholder { color: var(--faint); }
+    #note-text:focus { outline: none; }
+    /* selection still needs to read against the backdrop glyphs */
+    #note-text::selection { background: color-mix(in srgb, var(--blue) 35%, transparent); }
+    #note-back {
+      background: transparent;
+      color: var(--text);
+      overflow: hidden;            /* scroll is driven from the textarea */
+      pointer-events: none;
+      user-select: none;
+    }
+    /* the title line: a prominent H1, distinct from body text. The glyphs are
+       enlarged while the line box stays at the body's line-height so the
+       backdrop and textarea wrap identically and the caret never drifts. */
+    #note-back .h1 {
+      font-size: 27px;
+      font-weight: 700;
+      letter-spacing: -.01em;
+      color: var(--text);
+      line-height: calc(1.7 * 15px / 27px);
+    }
 
     .ed-empty {
       flex: 1;
@@ -284,7 +336,7 @@
     }
     .ed-empty .micro { color: var(--faint); }
     .app.open .ed-empty { display: none; }
-    .app:not(.open) #note-text, .app:not(.open) #stamp { display: none; }
+    .app:not(.open) .surface, .app:not(.open) #stamp { display: none; }
 
     /* transient notice (e.g. the open note was deleted on another device) */
     .toast {
@@ -347,7 +399,10 @@
         <span class="live off" data-live><span class="dot"></span><span data-livetext>connecting…</span></span>
       </div>
       <div class="ed-body">
-        <textarea id="note-text" placeholder="Start writing…" spellcheck="true" aria-label="Note text"></textarea>
+        <div class="surface">
+          <div id="note-back" aria-hidden="true"></div>
+          <textarea id="note-text" placeholder="Start writing…" spellcheck="true" aria-label="Note text"></textarea>
+        </div>
         <div class="ed-empty">
           <span class="micro">No note open</span>
           <span>Select a note on the left, or press “+ New note”.</span>
@@ -363,7 +418,28 @@
     const app = $("app");
     const listEl = $("notes");
     const ta = $("note-text");
+    const back = $("note-back");
     const stamp = $("stamp");
+
+    // ── highlighted-textarea backdrop ─────────────────────────────────────
+    // Mirror the textarea contents into the backdrop, wrapping the first
+    // (title) line in an .h1 span so it renders as a large heading while the
+    // rest stays body text. Plain-text escaped — never trust note content as
+    // HTML. A trailing newline gets a space so the final line keeps height.
+    const esc = (s) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    function paintBackdrop() {
+      const text = ta.value;
+      const nl = text.indexOf("\n");
+      const head = nl < 0 ? text : text.slice(0, nl);
+      const rest = nl < 0 ? "" : text.slice(nl); // keeps the leading "\n"
+      let html = `<span class="h1">${esc(head) || "&#8203;"}</span>`;
+      html += esc(rest);
+      if (text.endsWith("\n") || text === "") html += " ";
+      back.innerHTML = html;
+      back.scrollTop = ta.scrollTop;
+    }
+    ta.addEventListener("scroll", () => { back.scrollTop = ta.scrollTop; });
 
     async function act(name, args) {
       const res = await fetch(`api/actions/${name}`, {
@@ -420,6 +496,7 @@
     }
 
     ta.addEventListener("input", () => {
+      paintBackdrop();
       if (!openId) return;
       dirty = true;
       setStamp("saving");
@@ -457,6 +534,7 @@
       openId = id;
       dirty = false;
       ta.value = note.text;
+      paintBackdrop();
       setStamp("saved");
       app.classList.add("open");
       renderList();
@@ -468,6 +546,7 @@
       openId = null;
       dirty = false;
       ta.value = "";
+      paintBackdrop();
       stamp.className = "micro";
       app.classList.remove("open");
       renderList();
@@ -480,6 +559,7 @@
         openId = id;
         dirty = false;
         ta.value = "";
+        paintBackdrop();
         setStamp("saved");
         app.classList.add("open");
         renderList();
@@ -558,7 +638,7 @@
         showToast("Note deleted on another device");
         return;
       }
-      if (!isEditing() && ta.value !== note.text) ta.value = note.text;
+      if (!isEditing() && ta.value !== note.text) { ta.value = note.text; paintBackdrop(); }
     }
 
     // ── controls ──────────────────────────────────────────────────────────
