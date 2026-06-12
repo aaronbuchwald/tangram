@@ -1,0 +1,38 @@
+[package]
+name = "tangram-guided-learning"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tangram.workspace = true
+anyhow.workspace = true
+automerge.workspace = true
+autosurgeon.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+# Native-only: the binary's runtime. The library also compiles to
+# wasm32-wasip2 (the WASM component), which must not pull the server stack;
+# the tutor's LLM call goes through tangram::http.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+tangram-core = { workspace = true }
+serde_json = { workspace = true }
+
+[lib]
+name = "guided_learning"
+# cdylib: `cargo build --lib --target wasm32-wasip2` emits the component.
+crate-type = ["lib", "cdylib"]
+
+# cargo-machete false positives: the #[model]/#[actions] proc-macros in
+# `tangram-macros` emit absolute `::serde`/`::schemars`/`::automerge`/
+# `::autosurgeon` paths, so the app genuinely needs these as direct deps
+# even though no source file contains an explicit `use` of them.
+[package.metadata.cargo-machete]
+ignored = ["automerge", "autosurgeon", "schemars"]
