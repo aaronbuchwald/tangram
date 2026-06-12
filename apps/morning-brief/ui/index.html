@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Morning Brief</title>
+  <style>
+    /* ── Dark performance-console language ─────────────────────────────────
+       Same system as the sibling notes/nutrition apps: near-black ground,
+       dark cards, thin dividers, white primary text, cool-gray secondary.
+       Morning Brief's signature is a warm amber — the "first light" accent;
+       red appears only on destructive affordances. Single-file, no build
+       (the app contract); all fetches relative so it mounts under /<app>/. */
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --panel: #15171b;
+      --panel-2: #1b1e23;
+      --line: #23262b;
+      --text: #f2f4f7;
+      --dim: #8d95a2;
+      --faint: #5d6470;
+      --amber: #f5a623;
+      --green: #2fce8f;
+      --red: #ff4554;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.55 var(--sans);
+    }
+    .micro {
+      font-size: 10px; font-weight: 600; letter-spacing: .18em;
+      text-transform: uppercase; color: var(--dim);
+    }
+
+    /* ── shell ───────────────────────────────────────────────────────────── */
+    header.top {
+      display: flex; align-items: center; gap: 16px;
+      padding: 16px 22px; border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; background: var(--bg); z-index: 5;
+    }
+    header.top h1 {
+      margin: 0; font-size: 13px; font-weight: 700;
+      letter-spacing: .3em; text-transform: uppercase;
+    }
+    .spacer { flex: 1; }
+    .live { display: inline-flex; align-items: center; gap: 7px; }
+    .live .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 6px color-mix(in srgb, var(--green) 70%, transparent);
+    }
+    .live.off .dot { background: var(--faint); box-shadow: none; }
+    @media (prefers-reduced-motion: no-preference) {
+      .live:not(.off) .dot { animation: pulse 2.4s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .35; } }
+    }
+
+    nav.tabs { display: flex; gap: 4px; }
+    nav.tabs button {
+      font: 600 11px/1 var(--sans); letter-spacing: .12em; text-transform: uppercase;
+      color: var(--dim); background: transparent; border: 1px solid transparent;
+      border-radius: 999px; padding: 8px 14px; cursor: pointer;
+    }
+    nav.tabs button:hover { color: var(--text); }
+    nav.tabs button.sel { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+
+    main { max-width: 880px; margin: 0 auto; padding: 22px; }
+    .pane { display: none; }
+    .pane.sel { display: block; }
+
+    /* ── buttons / inputs ──────────────────────────────────────────────────── */
+    button { font-family: var(--sans); cursor: pointer; }
+    .btn {
+      font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+      padding: 10px 18px; border: 1px solid var(--line); border-radius: 999px;
+      background: transparent; color: var(--dim); white-space: nowrap;
+    }
+    .btn:hover { color: var(--text); border-color: var(--faint); }
+    .btn.primary { background: var(--amber); border-color: var(--amber); color: #1a1205; }
+    .btn.primary:hover { background: color-mix(in srgb, var(--amber) 88%, #fff); }
+    .btn.ghost { padding: 7px 12px; }
+    .btn[disabled] { opacity: .5; cursor: not-allowed; }
+    :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+    label.field { display: block; margin: 14px 0; }
+    label.field > .micro { display: block; margin-bottom: 6px; }
+    textarea, input[type=text], input[type=number], select {
+      width: 100%; background: var(--panel); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+      font: 13px/1.5 var(--sans); resize: vertical;
+    }
+    textarea:focus, input:focus, select:focus { outline: none; border-color: var(--amber); }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 18px; margin-bottom: 16px;
+    }
+    .card h2 { margin: 0 0 4px; font-size: 16px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .right { margin-left: auto; }
+    .hint { color: var(--faint); font-size: 12px; }
+    .ok { color: var(--green); } .bad { color: var(--amber); }
+
+    /* ── brief rendering ─────────────────────────────────────────────────── */
+    .section { padding: 14px 0; border-top: 1px solid var(--line); }
+    .section:first-child { border-top: none; }
+    .section h3 {
+      margin: 0 0 8px; font-size: 11px; font-weight: 700;
+      letter-spacing: .14em; text-transform: uppercase; color: var(--amber);
+    }
+    .section .body { white-space: pre-wrap; }
+    .section ul { margin: 0; padding-left: 18px; }
+    .section li { margin: 3px 0; }
+    .check { list-style: none; padding-left: 0; }
+    .check li::before { content: "☐ "; color: var(--dim); }
+
+    .runmeta { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+    details { border: 1px solid var(--line); border-radius: 10px; padding: 0 14px; margin-bottom: 10px; background: var(--panel); }
+    details > summary { cursor: pointer; padding: 12px 0; list-style: none; display: flex; gap: 10px; align-items: center; }
+    details > summary::-webkit-details-marker { display: none; }
+    details[open] { background: var(--panel-2); }
+    .stars { color: var(--amber); letter-spacing: 2px; }
+    .empty { color: var(--dim); padding: 30px 10px; text-align: center; }
+
+    pre.prompt {
+      white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 12px; font: 11px/1.5 var(--mono);
+      color: var(--dim); max-height: 280px; overflow: auto;
+    }
+    .seclist .secrow { display: flex; gap: 10px; align-items: flex-start; padding: 12px 0; border-top: 1px solid var(--line); }
+    .seclist .secrow:first-child { border-top: none; }
+    .toast {
+      position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+      background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+      padding: 10px 18px; font-size: 12px; color: var(--text); z-index: 20;
+    }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header class="top">
+    <h1>Morning&nbsp;Brief</h1>
+    <nav class="tabs" id="tabs">
+      <button data-tab="brief" class="sel">Today</button>
+      <button data-tab="config">Configure</button>
+      <button data-tab="history">History</button>
+    </nav>
+    <span class="spacer"></span>
+    <span class="live off" id="live"><span class="dot"></span><span class="micro" id="liveText">connecting</span></span>
+  </header>
+
+  <main>
+    <!-- ── Today's brief ─────────────────────────────────────────────────── -->
+    <section class="pane sel" data-pane="brief">
+      <div class="row" style="margin-bottom:16px">
+        <button class="btn primary" id="dryRun">Dry-run on fixtures</button>
+        <button class="btn" id="liveRun" title="Enabled in a later PR once egress grants land">Run live</button>
+        <span class="right hint" id="capHint"></span>
+      </div>
+      <div id="briefView"></div>
+    </section>
+
+    <!-- ── Configure ─────────────────────────────────────────────────────── -->
+    <section class="pane" data-pane="config">
+      <div class="card">
+        <h2>Master prompt</h2>
+        <p class="hint">The axis you tune: what to merely surface vs. what needs action today.</p>
+        <label class="field">
+          <textarea id="systemPrompt" rows="5"></textarea>
+        </label>
+        <div class="row">
+          <label class="field" style="margin:0">
+            <span class="micro">Model tier</span>
+            <select id="modelTier">
+              <option value="default">default (routine)</option>
+              <option value="deep">deep (highest quality)</option>
+            </select>
+          </label>
+          <button class="btn right" id="saveConfig">Save config</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Output sections</h2>
+        <p class="hint">Data-driven — each section has its own sub-prompt and format.</p>
+        <div class="seclist" id="sectionList"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn ghost" id="addSection">+ Add section</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Sources</h2>
+        <p class="hint">Read-only. Disabled by default — no data is fetched until you opt in.</p>
+        <div id="sourceList"></div>
+      </div>
+    </section>
+
+    <!-- ── History & dreaming ────────────────────────────────────────────── -->
+    <section class="pane" data-pane="history">
+      <div id="historyView"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let state = null;
+    let caps = null;
+
+    async function act(name, args) {
+      const res = await fetch(`api/actions/${name}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args ?? {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data.result;
+    }
+    let toastTimer = null;
+    function toast(msg) {
+      const t = $("toast"); t.textContent = msg; t.hidden = false;
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 3500);
+    }
+    const esc = (s) => (s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+    // ── tabs ───────────────────────────────────────────────────────────────
+    $("tabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-tab]");
+      if (!b) return;
+      for (const x of document.querySelectorAll("nav.tabs button")) x.classList.toggle("sel", x === b);
+      for (const p of document.querySelectorAll(".pane")) p.classList.toggle("sel", p.dataset.pane === b.dataset.tab);
+    });
+
+    // ── brief rendering ──────────────────────────────────────────────────
+    function renderSectionBody(out, format) {
+      const text = out.content ?? "";
+      if (format === "bullets" || format === "checklist") {
+        const items = text.split("\n").map((l) => l.trim()).filter(Boolean);
+        const cls = format === "checklist" ? "check" : "";
+        return `<ul class="${cls}">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+      }
+      return `<div class="body">${esc(text)}</div>`;
+    }
+    function fmtById(id) {
+      return (state.sections.find((s) => s.id === id) || {}).format || "prose";
+    }
+    function latestRun() {
+      const runs = [...(state?.runs ?? [])].sort((a, b) => b.created_at_ms - a.created_at_ms);
+      return runs[0] || null;
+    }
+    function renderBrief() {
+      const view = $("briefView");
+      const run = latestRun();
+      if (!run) {
+        view.innerHTML = `<div class="empty">No brief yet. Press <b>Dry-run on fixtures</b> to generate one offline.</div>`;
+        return;
+      }
+      const when = new Date(run.created_at_ms).toLocaleString();
+      const sections = run.outputs.map((o) => `
+        <div class="section">
+          <h3>${esc(o.title)}</h3>
+          ${renderSectionBody(o, fmtById(o.section_id))}
+        </div>`).join("");
+      view.innerHTML = `
+        <div class="card">
+          <div class="row"><span class="micro">${run.input_mode} run</span><span class="right runmeta">${esc(when)}</span></div>
+          <div class="runmeta" style="margin:6px 0 4px">${esc(run.input_summary)}</div>
+          ${sections}
+        </div>`;
+    }
+
+    // ── configure rendering ────────────────────────────────────────────────
+    function renderConfig() {
+      if (!state) return;
+      if (document.activeElement !== $("systemPrompt")) $("systemPrompt").value = state.config.system_prompt;
+      $("modelTier").value = state.config.model_tier;
+
+      const sl = $("sectionList");
+      const sections = [...state.sections].sort((a, b) => a.position - b.position);
+      sl.innerHTML = sections.map((s) => `
+        <div class="secrow" data-sec="${esc(s.id)}">
+          <div style="flex:1">
+            <input type="text" class="sec-title" value="${esc(s.title)}" />
+            <label class="field"><span class="micro">Prompt</span>
+              <textarea class="sec-prompt" rows="2">${esc(s.prompt)}</textarea></label>
+            <div class="row">
+              <select class="sec-format">
+                ${["prose", "bullets", "checklist"].map((f) => `<option value="${f}"${f === s.format ? " selected" : ""}>${f}</option>`).join("")}
+              </select>
+              <button class="btn ghost sec-save">Save</button>
+              <label class="row hint" style="gap:6px"><input type="checkbox" class="sec-enabled"${s.enabled ? " checked" : ""}/> enabled</label>
+              <button class="btn ghost sec-del right" style="color:var(--red)">Delete</button>
+            </div>
+          </div>
+        </div>`).join("");
+
+      const src = $("sourceList");
+      src.innerHTML = state.sources.map((s) => `
+        <div class="secrow" data-src="${esc(s.kind)}">
+          <div style="flex:1">
+            <div class="row">
+              <b style="text-transform:capitalize">${esc(s.kind)}</b>
+              <label class="row hint" style="gap:6px"><input type="checkbox" class="src-enabled"${s.enabled ? " checked" : ""}/> enabled</label>
+              <button class="btn ghost src-save right">Save</button>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <label class="hint">back h <input type="number" class="src-back" value="${s.window_hours_back}" style="width:80px"/></label>
+              <label class="hint">fwd h <input type="number" class="src-fwd" value="${s.window_hours_fwd}" style="width:80px"/></label>
+              <label class="hint">max <input type="number" class="src-max" value="${s.max_items}" style="width:80px"/></label>
+              <label class="hint" style="flex:1">selector <input type="text" class="src-sel" value="${esc(s.selector)}"/></label>
+            </div>
+          </div>
+        </div>`).join("");
+    }
+
+    // configure event delegation
+    $("saveConfig").addEventListener("click", async () => {
+      try {
+        await act("set_system_prompt", { prompt: $("systemPrompt").value });
+        await act("set_model_tier", { tier: $("modelTier").value });
+        toast("Config saved");
+      } catch (e) { toast(e.message); }
+    });
+    $("addSection").addEventListener("click", async () => {
+      try { await act("add_section", { title: "New section", prompt: "Describe what this section should contain.", format: "prose" }); }
+      catch (e) { toast(e.message); }
+    });
+    $("sectionList").addEventListener("click", async (e) => {
+      const row = e.target.closest("[data-sec]"); if (!row) return;
+      const id = row.dataset.sec;
+      try {
+        if (e.target.classList.contains("sec-save")) {
+          await act("update_section", {
+            id, title: row.querySelector(".sec-title").value,
+            prompt: row.querySelector(".sec-prompt").value,
+            format: row.querySelector(".sec-format").value,
+          });
+          toast("Section saved");
+        } else if (e.target.classList.contains("sec-del")) {
+          await act("remove_section", { id });
+        }
+      } catch (err) { toast(err.message); }
+    });
+    $("sectionList").addEventListener("change", async (e) => {
+      const row = e.target.closest("[data-sec]"); if (!row) return;
+      if (e.target.classList.contains("sec-enabled")) {
+        try { await act("set_section_enabled", { id: row.dataset.sec, enabled: e.target.checked }); }
+        catch (err) { toast(err.message); }
+      }
+    });
+    $("sourceList").addEventListener("click", async (e) => {
+      const row = e.target.closest("[data-src]"); if (!row || !e.target.classList.contains("src-save")) return;
+      try {
+        await act("set_source", {
+          kind: row.dataset.src,
+          enabled: row.querySelector(".src-enabled").checked,
+          window_hours_back: +row.querySelector(".src-back").value,
+          window_hours_fwd: +row.querySelector(".src-fwd").value,
+          max_items: +row.querySelector(".src-max").value,
+          selector: row.querySelector(".src-sel").value,
+        });
+        toast("Source saved");
+      } catch (err) { toast(err.message); }
+    });
+
+    // ── run buttons ────────────────────────────────────────────────────────
+    $("dryRun").addEventListener("click", async () => {
+      $("dryRun").disabled = true;
+      try { await act("run_brief", { input_mode: "fixture" }); toast("Brief generated"); }
+      catch (e) { toast(e.message); }
+      finally { $("dryRun").disabled = false; }
+    });
+    $("liveRun").addEventListener("click", async () => {
+      try { await act("run_brief", { input_mode: "live" }); }
+      catch (e) { toast(e.message); } // expected: live lands in a later PR
+    });
+
+    // ── history & dreaming ─────────────────────────────────────────────────
+    function stars(n) { return "★".repeat(n) + "☆".repeat(5 - n); }
+    function renderHistory() {
+      const view = $("historyView");
+      const runs = [...(state?.runs ?? [])].sort((a, b) => b.created_at_ms - a.created_at_ms);
+      if (!runs.length) { view.innerHTML = `<div class="empty">No runs yet.</div>`; return; }
+      view.innerHTML = runs.map((r) => {
+        const fb = r.feedback;
+        const when = new Date(r.created_at_ms).toLocaleString();
+        const rating = fb && fb.rating ? `<span class="stars">${stars(fb.rating)}</span>` : `<span class="hint">unrated</span>`;
+        const outs = r.outputs.map((o) => `<div class="section"><h3>${esc(o.title)}</h3>${renderSectionBody(o, fmtById(o.section_id))}</div>`).join("");
+        const corrFields = r.outputs.map((o) => {
+          const cur = fb && (fb.corrections || []).find((c) => c.section_id === o.section_id);
+          return `<label class="field"><span class="micro">Correct: ${esc(o.title)}</span>
+            <textarea rows="2" class="corr" data-sec="${esc(o.section_id)}">${esc(cur ? cur.corrected : "")}</textarea></label>`;
+        }).join("");
+        return `
+          <details data-run="${esc(r.id)}">
+            <summary>${rating}<span class="runmeta">${esc(when)} · ${r.input_mode}</span>
+              <span class="right hint">${r.outputs.length} sections</span></summary>
+            ${outs}
+            <div class="card" style="background:var(--bg);margin-top:12px">
+              <span class="micro">Feedback</span>
+              <div class="row" style="margin:8px 0">
+                <label class="hint">rating
+                  <select class="fb-rating">${[0,1,2,3,4,5].map((n)=>`<option value="${n}"${fb&&fb.rating===n?" selected":""}>${n||"–"}</option>`).join("")}</select></label>
+                <input type="text" class="fb-note" placeholder="note…" value="${esc(fb ? fb.note : "")}" style="flex:1" />
+                <button class="btn ghost fb-save">Save feedback</button>
+              </div>
+              ${corrFields}
+              <div class="row" style="margin-top:8px">
+                <input type="number" class="promote-weight" value="10" style="width:80px" title="weight"/>
+                <button class="btn ghost promote">Promote to learned example</button>
+                <button class="btn ghost del-run right" style="color:var(--red)">Delete run</button>
+              </div>
+            </div>
+            <details style="margin-top:8px;background:var(--bg)"><summary class="micro">Effective prompt</summary>
+              <pre class="prompt">${esc(r.effective_prompt)}</pre></details>
+          </details>`;
+      }).join("");
+
+      if (state.learned && state.learned.length) {
+        view.innerHTML += `<div class="card"><h2>Learned preferences</h2>${
+          [...state.learned].sort((a,b)=>b.weight-a.weight).map((l)=>`
+            <div class="secrow" data-learn="${esc(l.id)}">
+              <div style="flex:1">${esc(l.note)}</div>
+              <span class="hint">w ${l.weight}</span>
+              <button class="btn ghost learn-del" style="color:var(--red)">Remove</button>
+            </div>`).join("")
+        }</div>`;
+      }
+    }
+    $("historyView").addEventListener("click", async (e) => {
+      const run = e.target.closest("[data-run]");
+      try {
+        if (e.target.classList.contains("fb-save") && run) {
+          const id = run.dataset.run;
+          await act("rate_run", { run_id: id, rating: +run.querySelector(".fb-rating").value, note: run.querySelector(".fb-note").value });
+          for (const ta of run.querySelectorAll(".corr")) {
+            if (ta.value.trim()) await act("correct_section", { run_id: id, section_id: ta.dataset.sec, corrected: ta.value });
+          }
+          toast("Feedback saved");
+        } else if (e.target.classList.contains("promote") && run) {
+          await act("promote_to_learned", { run_id: run.dataset.run, note: "", weight: +run.querySelector(".promote-weight").value });
+          toast("Promoted to a learned example");
+        } else if (e.target.classList.contains("del-run") && run) {
+          await act("delete_run", { run_id: run.dataset.run });
+        } else if (e.target.classList.contains("learn-del")) {
+          await act("remove_learned", { id: e.target.closest("[data-learn]").dataset.learn });
+        }
+      } catch (err) { toast(err.message); }
+    });
+
+    // ── capabilities indicator ──────────────────────────────────────────────
+    async function loadCaps() {
+      try {
+        const res = await fetch("api/capabilities");
+        caps = await res.json();
+        $("capHint").textContent = caps.fixture ? "Fixture mode ready — runs offline, no key needed." : "";
+      } catch { /* probe is best-effort */ }
+    }
+
+    // ── live state ───────────────────────────────────────────────────────
+    function setLive(on, text) {
+      const el = $("live"); el.classList.toggle("off", !on);
+      $("liveText").textContent = text;
+    }
+    function render() {
+      renderBrief(); renderConfig(); renderHistory();
+    }
+    const events = new EventSource("api/events");
+    events.addEventListener("state", (e) => {
+      state = JSON.parse(e.data);
+      setLive(true, "live");
+      render();
+    });
+    events.onerror = () => setLive(false, "reconnecting");
+    loadCaps();
+  </script>
+</body>
+</html>
