@@ -129,3 +129,77 @@ hosts = ["api.calorieninjas.com"]
         "the unverified app's routes are absent"
     );
 }
+
+/// CP3 — a component that imports no http-fetch cannot be granted any host
+/// (notes), and notes with no grant verifies trivially.
+#[tokio::test]
+async fn vacuous_grant_fails() {
+    if !have_components(&["notes"], "vacuous_grant_fails") {
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    // `badnotes` grants notes (no http-fetch) an outbound host AND declares it,
+    // so the over-grant gate passes but the vacuous-grant gate hard-fails.
+    // `goodnotes` grants nothing → trivially verified, runs.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[apps.badnotes]
+component = "{notes}"
+ui = "{root}/apps/notes/ui"
+allow_hosts = ["api.example.com"]
+
+[apps.badnotes.declared.network]
+kind = "hosts"
+hosts = ["api.example.com"]
+
+[apps.goodnotes]
+component = "{notes}"
+ui = "{root}/apps/notes/ui"
+"#,
+            notes = component("notes").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    // goodnotes (no grant) comes up healthy.
+    wait_for("goodnotes healthy", Duration::from_secs(120), || async {
+        status_of(&client, &format!("{base}/goodnotes/healthz")).await
+            == Some(reqwest::StatusCode::OK)
+    })
+    .await;
+
+    // badnotes hard-fails with the vacuous-grant message and does not run.
+    wait_for(
+        "badnotes vacuous-grant error",
+        Duration::from_secs(30),
+        || async {
+            match fleet_entry(&client, &base, "badnotes").await {
+                Some(entry) => entry["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("no http-fetch")),
+                None => false,
+            }
+        },
+    )
+    .await;
+    let bad = fleet_entry(&client, &base, "badnotes")
+        .await
+        .expect("badnotes in fleet");
+    assert_eq!(bad["running"], false, "vacuous-grant app must not run");
+    assert_eq!(
+        status_of(&client, &format!("{base}/badnotes/healthz")).await,
+        Some(reqwest::StatusCode::NOT_FOUND),
+    );
+}
