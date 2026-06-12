@@ -1,0 +1,40 @@
+[package]
+name = "tangram-morning-brief"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tangram.workspace = true
+anyhow.workspace = true
+automerge.workspace = true
+autosurgeon.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+# Native-only: the binary's runtime + the custom capabilities route. The
+# library also compiles to wasm32-wasip2 (the WASM component), which must
+# not pull the server stack; source/LLM HTTP goes through tangram::http.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+axum.workspace = true
+tokio.workspace = true
+
+# Tests drive the async `run_brief` through tangram-core's Store/dispatch
+# (the same path the host uses), which the `tangram` facade does not re-export.
+[dev-dependencies]
+tangram-core.workspace = true
+tokio.workspace = true
+
+[lib]
+name = "morning_brief"
+# cdylib: `cargo build --lib --target wasm32-wasip2` emits the component.
+crate-type = ["lib", "cdylib"]
+
+# cargo-machete false positives: the #[model]/#[actions] proc-macros in
+# `tangram-macros` emit absolute `::serde`/`::schemars`/`::automerge`/
+# `::autosurgeon` paths, so the app genuinely needs these as direct deps
+# even though no source file contains an explicit `use` of them.
+[package.metadata.cargo-machete]
+ignored = ["automerge", "autosurgeon", "schemars"]
