@@ -35,19 +35,15 @@ fn normalize(mut msg: Value) -> Value {
     msg
 }
 
-#[test]
-fn rmcp_golden_flows_replay_semantically() {
-    let fixture = fixture();
-    let exchanges = fixture["exchanges"].as_array().expect("exchanges");
-
-    // The server under test exposes the same tools the captured server did:
-    // lift them straight out of the captured tools/list response.
+/// The server under test exposes the same tools the captured server did:
+/// lift them straight out of the captured `tools/list` response.
+fn tools_from_capture(exchanges: &[Value]) -> Vec<ToolDef> {
     let captured_tools = exchanges
         .iter()
         .find(|e| e["name"] == "tools/list")
         .and_then(|e| sse_json(e["response"]["body"].as_str().unwrap()))
         .expect("captured tools/list");
-    let tools: Vec<ToolDef> = captured_tools["result"]["tools"]
+    captured_tools["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
@@ -56,7 +52,15 @@ fn rmcp_golden_flows_replay_semantically() {
             description: t["description"].as_str().unwrap().to_string(),
             input_schema: t["inputSchema"].clone(),
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn rmcp_golden_flows_replay_semantically() {
+    let fixture = fixture();
+    let exchanges = fixture["exchanges"].as_array().expect("exchanges");
+
+    let tools = tools_from_capture(exchanges);
     assert!(!tools.is_empty());
 
     let server = McpServer::new(
@@ -159,7 +163,7 @@ fn rmcp_golden_flows_replay_semantically() {
                 // nothing — both are content-free SSE streams.
                 assert_eq!(expected["content_type"].as_str(), Some("text/event-stream"));
             }
-            (Body::Empty, None) | (Body::Text(_), None) => {
+            (Body::Empty | Body::Text(_), None) => {
                 // plain-text transport errors / 202s: status (asserted
                 // above) is the contract; wording is not.
                 assert_ne!(

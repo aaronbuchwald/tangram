@@ -47,32 +47,40 @@ pub struct Sessions {
     map: Mutex<HashMap<String, Session>>,
 }
 
-/// Handle one `POST /sync`: apply the client's message (if any), then return
-/// every message we owe that peer, framed as `[u32 big-endian length][bytes]`.
+/// Handle one `POST /sync`.
+///
+/// Apply the client's message (if any), then return every message we owe that
+/// peer, framed as `[u32 big-endian length][bytes]`.
 pub fn handle_post<D: SyncDoc + ?Sized>(
     store: &D,
     sessions: &Sessions,
     session_id: &str,
     body: &[u8],
 ) -> anyhow::Result<Vec<u8>> {
-    let mut map = sessions.map.lock().expect("sessions lock");
-    map.retain(|_, s| s.last_seen.elapsed() < SESSION_IDLE);
-    let session = map
-        .entry(session_id.to_string())
-        .or_insert_with(|| Session {
-            state: automerge::sync::State::new(),
-            last_seen: Instant::now(),
-        });
-    session.last_seen = Instant::now();
+    let (changed, response) = {
+        let mut map = sessions.map.lock().expect("sessions lock");
+        map.retain(|_, s| s.last_seen.elapsed() < SESSION_IDLE);
+        let session = map
+            .entry(session_id.to_string())
+            .or_insert_with(|| Session {
+                state: automerge::sync::State::new(),
+                last_seen: Instant::now(),
+            });
+        session.last_seen = Instant::now();
 
-    if !body.is_empty() && store.receive_sync(&mut session.state, body)? {
+        let changed = !body.is_empty() && store.receive_sync(&mut session.state, body)?;
+        let mut response = Vec::new();
+        while let Some(msg) = store.generate_sync(&mut session.state) {
+            response.extend_from_slice(&u32::try_from(msg.len())?.to_be_bytes());
+            response.extend_from_slice(&msg);
+        }
+        (changed, response)
+        // The sessions guard is dropped here, before `bump()` wakes peers.
+    };
+
+    if changed {
         // Document changed: wake SSE pokes, UIs, and other peers.
         store.bump();
-    }
-    let mut response = Vec::new();
-    while let Some(msg) = store.generate_sync(&mut session.state) {
-        response.extend_from_slice(&u32::try_from(msg.len())?.to_be_bytes());
-        response.extend_from_slice(&msg);
     }
     Ok(response)
 }
@@ -94,9 +102,10 @@ pub fn normalize_remote(url: &str) -> String {
 }
 
 /// Minimal SSE parse: drop complete blank-line-terminated blocks from `buf`
-/// and report whether any was a real event. The server only ever sends
-/// `event: poke`, so the event's contents don't matter; comment-only blocks
-/// (`: keep-alive`) are not pokes.
+/// and report whether any was a real event.
+///
+/// The server only ever sends `event: poke`, so the event's contents don't
+/// matter; comment-only blocks (`: keep-alive`) are not pokes.
 pub fn drain_pokes(buf: &mut String) -> bool {
     let mut poked = false;
     while let Some(end) = buf.find("\n\n") {

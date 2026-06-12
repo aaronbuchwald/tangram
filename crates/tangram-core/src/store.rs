@@ -19,10 +19,12 @@ use crate::action::{ActionDef, ActionError, ActionHandler, Actions};
 
 /// A cloneable context handle onto a running app's store, for async code
 /// (async actions, background resolvers, custom routes) that lives OUTSIDE
-/// the lock-held synchronous layer. The CRDT document is still only ever
-/// mutated under the lock via attributed commits: a `Ctx` can read hydrated
-/// snapshots and run synchronous mutation closures, but the lock is acquired
-/// and released inside each call — it is never held across an await.
+/// the lock-held synchronous layer.
+///
+/// The CRDT document is still only ever mutated under the lock via attributed
+/// commits: a `Ctx` can read hydrated snapshots and run synchronous mutation
+/// closures, but the lock is acquired and released inside each call — it is
+/// never held across an await.
 pub struct Ctx<M> {
     store: Arc<Store<M>>,
 }
@@ -82,10 +84,12 @@ impl<M: Model + Actions> Ctx<M> {
 const GENESIS_ACTOR: [u8; 16] = *b"tangram-genesis!";
 
 /// The deterministic genesis document for a model: the fixed genesis actor,
-/// a zero-timestamp commit, one reconcile of `M::default()`. Every Tangram
-/// instance of an app — native binary or WASM component — derives these
-/// identical bytes, which is what lets independently started instances merge
-/// into one document (and what the component's `genesis` export returns).
+/// a zero-timestamp commit, one reconcile of `M::default()`.
+///
+/// Every Tangram instance of an app — native binary or WASM component —
+/// derives these identical bytes, which is what lets independently started
+/// instances merge into one document (and what the component's `genesis`
+/// export returns).
 pub fn genesis_bytes<M: Model>() -> anyhow::Result<Vec<u8>> {
     let mut genesis = Automerge::new().with_actor(ActorId::from(&GENESIS_ACTOR[..]));
     let mut tx = genesis.transaction();

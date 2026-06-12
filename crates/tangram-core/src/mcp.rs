@@ -26,10 +26,11 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
-/// Protocol revisions this server knows, newest first. `initialize` echoes
-/// the client's requested version when supported and otherwise answers with
-/// the newest one (same negotiation rmcp 1.7 performs — for a tools-only
-/// server every listed revision is served identically).
+/// Protocol revisions this server knows, newest first.
+///
+/// `initialize` echoes the client's requested version when supported and
+/// otherwise answers with the newest one (same negotiation rmcp 1.7 performs
+/// — for a tools-only server every listed revision is served identically).
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -59,9 +60,11 @@ pub struct Request<'a> {
     pub body: &'a [u8],
 }
 
-/// An outgoing HTTP response. [`Response::headers`] yields every header the
-/// transport requires (content type, `Mcp-Session-Id`); the embedder only
-/// adds connection mechanics (e.g. chunked transfer for streams).
+/// An outgoing HTTP response.
+///
+/// [`Response::headers`] yields every header the transport requires (content
+/// type, `Mcp-Session-Id`); the embedder only adds connection mechanics (e.g.
+/// chunked transfer for streams).
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
@@ -71,7 +74,7 @@ pub struct Response {
 }
 
 /// Response payloads, pre-framed for the transport.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Body {
     /// No body (`202 Accepted` for notifications and session deletes).
     Empty,
