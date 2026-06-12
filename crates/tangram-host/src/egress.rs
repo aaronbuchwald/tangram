@@ -1,0 +1,740 @@
+//! Fine-grained egress: call-level capabilities (docs/design/fine-grained-egress.md).
+//!
+//! The unit of grant is a **declared call** — a method + host + path-pattern
+//! (+ optional name-level query/header constraints and a constrained body
+//! matcher) — with the egress credential injection attached *to that call*,
+//! not to the host. This module holds the grammar ([`CallSpec`]) and the
+//! single CANONICALIZATION SEAM ([`CanonicalRequest::from_request`]) that
+//! every match runs against.
+//!
+//! ## The seam (the §2 SOCKS5 parser-differential lesson)
+//!
+//! Canonicalize the request ONCE, before any matching:
+//!
+//! - method upper-cased;
+//! - URL parsed to `(host, path, query)`;
+//! - host lowercased + trailing-dot stripped, rejected if it carries a null
+//!   byte (the `attacker.com\0.good.com` class);
+//! - path percent-decoded then dot-segment (`.` / `..`) normalized;
+//! - query parameter NAMES collected (never values);
+//! - header NAMES lowercased (never values).
+//!
+//! Matching is on the parsed/normalized components only — NEVER string-suffix
+//! checks, NEVER regex, NEVER value-matching on query/header values. This is
+//! the same seam the manifest verifier's call-grain arm
+//! (manifest-verification-plan CP6) consumes, so the egress enforcer and the
+//! verifier can never disagree on what a host/path means.
+
+// The grammar and seam land in EC1 ahead of their consumers: the config
+// parser (EC2), the `http_fetch` enforcer (EC3), the body rung (EC4), and the
+// describe() channel (EC5) wire these in over the following checkpoints. Until
+// then some constructors/fields read as dead from any single checkpoint's
+// view; the allow is narrowed/removed as wiring lands.
+#![allow(dead_code)]
+
+use std::collections::BTreeSet;
+
+use percent_encoding::percent_decode_str;
+
+use crate::config::{InjectKind, InjectRule};
+
+/// A request canonicalized at the single seam, ready to match against any
+/// [`CallSpec`]. Built ONCE per `http-fetch` (the §2 parser-differential
+/// lesson) and shared by the host fence and the call match so the two layers
+/// can never disagree on what a host/path means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRequest {
+    /// Upper-cased HTTP method (`GET`, `POST`, …).
+    pub method: String,
+    /// Lowercased host, trailing dot stripped, guaranteed null-byte-free and
+    /// non-empty.
+    pub host: String,
+    /// Percent-decoded, dot-segment-normalized absolute path. Always starts
+    /// with `/`; a trailing slash (other than the root) is stripped so
+    /// `/v1/x` and `/v1/x/` canonicalize identically.
+    pub path: String,
+    /// Non-empty path segments (the split of [`Self::path`]), precomputed for
+    /// template matching.
+    pub segments: Vec<String>,
+    /// Query parameter NAMES present on the URL (never values).
+    pub query_names: BTreeSet<String>,
+    /// Header NAMES present on the request, lowercased (never values).
+    pub header_names: BTreeSet<String>,
+}
+
+impl CanonicalRequest {
+    /// Canonicalize a parsed request into the seam value. `method` is the raw
+    /// method string (defaulting `GET` upstream), `url` the already-parsed
+    /// [`reqwest::Url`] (which is `url::Url`), and `header_names` the raw
+    /// header names the component supplied. Returns an error string (the same
+    /// `Err(String)` channel `http_fetch` already uses) when the host is
+    /// unusable — empty or carrying a null byte.
+    pub fn from_request<'a>(
+        method: &str,
+        url: &reqwest::Url,
+        header_names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, String> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| format!("url {url:?} has no host"))?;
+        let host = canonical_host(host)?;
+        let path = canonical_path(url.path());
+        let segments: Vec<String> = path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        // `url::Url::query_pairs()` already percent-decodes each key, so a
+        // `%71` (=`q`) is seen as the decoded NAME and cannot smuggle past a
+        // name-level constraint.
+        let query_names: BTreeSet<String> =
+            url.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        let header_names: BTreeSet<String> = header_names
+            .into_iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        Ok(Self {
+            method: method.trim().to_ascii_uppercase(),
+            host,
+            path,
+            segments,
+            query_names,
+            header_names,
+        })
+    }
+}
+
+/// Canonicalize a host: lowercase, strip a single trailing dot (the
+/// fully-qualified `good.com.` form), and REJECT a host that is empty or
+/// carries an embedded null byte (`attacker.com\0.good.com` — the SOCKS5
+/// parser-differential class). The reject is deliberate: a host the
+/// canonicalizer cannot make unambiguous must never reach a suffix/segment
+/// comparison.
+pub fn canonical_host(host: &str) -> Result<String, String> {
+    if host.contains('\0') {
+        return Err(format!(
+            "outbound host {host:?} contains a null byte — refused (ambiguous host, \
+             the parser-differential class)"
+        ));
+    }
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("outbound request has an empty host".to_string());
+    }
+    Ok(host)
+}
+
+/// Canonicalize a path: percent-decode, normalize `.`/`..`/empty segments,
+/// re-join with a single leading `/`, and strip a trailing slash (except the
+/// root). `..` can never escape above `/` (extra `..` are dropped at the
+/// root). This is purely lexical — it does not consult the filesystem.
+pub fn canonical_path(raw: &str) -> String {
+    let decoded = percent_decode_str(raw).decode_utf8_lossy().into_owned();
+    let mut out: Vec<&str> = Vec::new();
+    for seg in decoded.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    if out.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", out.join("/"))
+    }
+}
+
+/// How a [`CallSpec`] constrains the method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MethodMatch {
+    /// Exactly this (upper-cased) method.
+    Exact(String),
+    /// Any method — the maximally-broad implicit grant (the legacy compat
+    /// shim; discouraged in authored specs).
+    Any,
+}
+
+impl MethodMatch {
+    fn matches(&self, method: &str) -> bool {
+        match self {
+            Self::Exact(m) => m == method,
+            Self::Any => true,
+        }
+    }
+}
+
+/// One segment of a path template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seg {
+    /// A literal segment that must match exactly.
+    Literal(String),
+    /// A named placeholder (`{id}`) matching exactly one non-`/` segment.
+    Param,
+}
+
+/// How a [`CallSpec`] constrains the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathPattern {
+    /// An exact (canonical) path.
+    Exact(String),
+    /// An RFC-6570-style template: literal + `{name}` segments, each matching
+    /// exactly one path segment, and the segment count must match.
+    Template(Vec<Seg>),
+    /// `**` subtree match — any path (the maximally-broad implicit grant).
+    Subtree,
+}
+
+impl PathPattern {
+    /// Parse a path-pattern string. `**` (or `/**`) → [`Self::Subtree`]; a
+    /// path containing `{name}` segments → [`Self::Template`]; otherwise an
+    /// exact (canonicalized) path. An explicit trailing `/**` also yields a
+    /// subtree (a templated prefix subtree is NOT supported in v1 — kept
+    /// small, the §3(b) lesson).
+    pub fn parse(pattern: &str) -> Result<Self, String> {
+        let trimmed = pattern.trim();
+        if trimmed == "**" || trimmed == "/**" {
+            return Ok(Self::Subtree);
+        }
+        if trimmed.contains("**") {
+            return Err(format!(
+                "path pattern {pattern:?}: `**` is only allowed as the whole pattern \
+                 (`/**`, the subtree wildcard); embedded `**` is not supported"
+            ));
+        }
+        let canon = canonical_path(trimmed);
+        if !canon.contains('{') && !canon.contains('}') {
+            return Ok(Self::Exact(canon));
+        }
+        let mut segs = Vec::new();
+        for seg in canon.split('/').filter(|s| !s.is_empty()) {
+            if let Some(inner) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+                if inner.is_empty() || inner.contains('{') || inner.contains('}') {
+                    return Err(format!(
+                        "path template {pattern:?}: a `{{name}}` segment must name a \
+                         non-empty placeholder"
+                    ));
+                }
+                segs.push(Seg::Param);
+            } else if seg.contains('{') || seg.contains('}') {
+                return Err(format!(
+                    "path template {pattern:?}: a `{{` / `}}` must delimit a WHOLE \
+                     segment (`/items/{{id}}`), not part of one"
+                ));
+            } else {
+                segs.push(Seg::Literal(seg.to_string()));
+            }
+        }
+        Ok(Self::Template(segs))
+    }
+
+    fn matches(&self, req: &CanonicalRequest) -> bool {
+        match self {
+            Self::Subtree => true,
+            Self::Exact(p) => *p == req.path,
+            Self::Template(segs) => {
+                segs.len() == req.segments.len()
+                    && segs.iter().zip(&req.segments).all(|(seg, got)| match seg {
+                        Seg::Literal(lit) => lit == got,
+                        Seg::Param => true,
+                    })
+            }
+        }
+    }
+}
+
+/// Name-level query constraint (never matches on values — values may carry
+/// data and matching on them invites the parser-differential class).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryConstraint {
+    /// These parameter names MUST be present.
+    pub required: Vec<String>,
+    /// These parameter names MUST be absent.
+    pub forbidden: Vec<String>,
+}
+
+impl QueryConstraint {
+    fn matches(&self, req: &CanonicalRequest) -> bool {
+        self.required.iter().all(|r| req.query_names.contains(r))
+            && self.forbidden.iter().all(|f| !req.query_names.contains(f))
+    }
+}
+
+/// Name-level header constraint. Required is a list of header names that must
+/// be present (NAMES only — v1 deliberately does not match on header VALUES,
+/// per the §4.1 grammar: values may carry data). Forbidden names must be
+/// absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeaderConstraint {
+    /// These header names (lowercased) MUST be present.
+    pub required: Vec<String>,
+    /// These header names (lowercased) MUST be absent.
+    pub forbidden: Vec<String>,
+}
+
+impl HeaderConstraint {
+    fn matches(&self, req: &CanonicalRequest) -> bool {
+        self.required.iter().all(|r| req.header_names.contains(r))
+            && self.forbidden.iter().all(|f| !req.header_names.contains(f))
+    }
+}
+
+/// The constrained JSON-RPC-method body rung (§9.1): a FIXED JSON-pointer
+/// selector plus equality/membership against a literal set. Nothing more — no
+/// operators, no regex, no value-matching on arbitrary fields. The body is
+/// parsed ONLY when a call declares this matcher (and only up to
+/// `max_body_bytes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodyMatch {
+    /// The JSON pointer to select (e.g. `/method`).
+    pub pointer: String,
+    /// The literal set the selected value must be a member of (string
+    /// equality). Empty set never matches (a no-op declaration is rejected at
+    /// validation).
+    pub allowed: Vec<String>,
+}
+
+/// Why a body match failed — distinguishes "the body is malformed/oversized"
+/// (which is a deny regardless of the value) from "the value is not allowed".
+#[derive(Debug, PartialEq, Eq)]
+pub enum BodyVerdict {
+    /// The selected value is in the allowed set.
+    Match,
+    /// The selected value is present but not allowed.
+    NotAllowed,
+    /// The body was missing, oversized, non-JSON, or the pointer is absent.
+    Unusable(&'static str),
+}
+
+impl BodyMatch {
+    /// Evaluate the matcher against the raw request body bytes. `max_body`, if
+    /// set, caps the bytes parsed: an oversized body is `Unusable` BEFORE any
+    /// parse (the adversarial requirement). The value at the pointer must be a
+    /// JSON string in the allowed set.
+    pub fn evaluate(&self, body: &[u8], max_body: Option<usize>) -> BodyVerdict {
+        if let Some(max) = max_body
+            && body.len() > max
+        {
+            return BodyVerdict::Unusable("body exceeds max_body_bytes (rejected before parse)");
+        }
+        let value: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => return BodyVerdict::Unusable("body is not valid JSON"),
+        };
+        let selected = match value.pointer(&self.pointer) {
+            Some(v) => v,
+            None => return BodyVerdict::Unusable("body has no value at the declared json pointer"),
+        };
+        match selected.as_str() {
+            Some(s) if self.allowed.iter().any(|a| a == s) => BodyVerdict::Match,
+            _ => BodyVerdict::NotAllowed,
+        }
+    }
+}
+
+/// A declared call: the call-level capability. The host picks the FIRST
+/// matching call (declaration order is precedence, like a firewall rule list)
+/// and injects ONLY that call's credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSpec {
+    pub method: MethodMatch,
+    /// Lowercased host; MUST also be in the app's `allow_hosts`.
+    pub host: String,
+    pub path: PathPattern,
+    pub query: QueryConstraint,
+    pub headers: HeaderConstraint,
+    /// Optional body-byte cap. `Some(0)` forbids a body entirely. Also bounds
+    /// the body parsed for [`BodyMatch`].
+    pub max_body_bytes: Option<usize>,
+    /// The constrained JSON-RPC-method body rung (§9.1); body is parsed only
+    /// when this is `Some`.
+    pub body: Option<BodyMatch>,
+    /// The credential injection scoped to THIS call (not the host). A call
+    /// with no inject goes out un-credentialed (still allowed).
+    pub inject: Option<InjectRule>,
+    /// The resolved injection kind, classified once at construction (mirrors
+    /// `resolved_inject`'s lift of `InjectRule::kind`). `None` ⇔ `inject`
+    /// is `None`.
+    pub inject_kind: Option<InjectKind>,
+}
+
+impl CallSpec {
+    /// Whether this call matches the canonicalized request, given the request
+    /// body length (for the `max_body_bytes` / `Some(0)` checks) and the raw
+    /// body bytes (for the optional [`BodyMatch`]). Host equality is the
+    /// caller's responsibility for the cheap pre-filter, but is re-checked
+    /// here so a single call list can mix hosts safely.
+    ///
+    /// Returns `true` iff every declared constraint matches. The body matcher,
+    /// when present, must return [`BodyVerdict::Match`]; an
+    /// oversized/malformed/missing-pointer body is NOT a match (deny).
+    pub fn matches(&self, req: &CanonicalRequest, body: &[u8]) -> bool {
+        if self.host != req.host {
+            return false;
+        }
+        if !self.method.matches(&req.method) {
+            return false;
+        }
+        if !self.path.matches(req) {
+            return false;
+        }
+        if !self.query.matches(req) {
+            return false;
+        }
+        if !self.headers.matches(req) {
+            return false;
+        }
+        // max_body_bytes caps the body length (Some(0) forbids a body). This
+        // gate runs BEFORE the body matcher's parse.
+        if let Some(max) = self.max_body_bytes
+            && body.len() > max
+        {
+            return false;
+        }
+        if let Some(body_match) = &self.body {
+            return body_match.evaluate(body, self.max_body_bytes) == BodyVerdict::Match;
+        }
+        true
+    }
+
+    /// The maximally-broad implicit call for the legacy compat shim (§4.2/§7):
+    /// `{ method = Any, host, path = Subtree }`, optionally carrying the
+    /// host-keyed inject rule moved onto it. This is what a bare `allow_hosts`
+    /// host (or a host-keyed `[apps.X.inject]`) desugars to, so existing
+    /// configs behave byte-identically.
+    pub fn implicit_subtree(host: &str, inject: Option<(InjectKind, InjectRule)>) -> Self {
+        let (inject_kind, inject) = match inject {
+            Some((k, r)) => (Some(k), Some(r)),
+            None => (None, None),
+        };
+        Self {
+            method: MethodMatch::Any,
+            host: host.to_ascii_lowercase(),
+            path: PathPattern::Subtree,
+            query: QueryConstraint::default(),
+            headers: HeaderConstraint::default(),
+            max_body_bytes: None,
+            body: None,
+            inject,
+            inject_kind,
+        }
+    }
+}
+
+// The test module is named `callspec` so the build plan's documented filter
+// `cargo test -p tangram-host callspec` selects exactly the EC1 suite.
+#[cfg(test)]
+mod callspec {
+    use super::*;
+
+    fn req(method: &str, url: &str) -> CanonicalRequest {
+        let parsed = reqwest::Url::parse(url).expect("parse url");
+        CanonicalRequest::from_request(method, &parsed, std::iter::empty()).expect("canonicalize")
+    }
+
+    fn req_headers(method: &str, url: &str, headers: &[&str]) -> CanonicalRequest {
+        let parsed = reqwest::Url::parse(url).expect("parse url");
+        CanonicalRequest::from_request(method, &parsed, headers.iter().copied())
+            .expect("canonicalize")
+    }
+
+    // ── The single canonicalization seam: adversarial coverage (the §2 SOCKS5
+    //    parser-differential lesson; the make-or-break checkpoint). ──────────
+
+    #[test]
+    fn host_is_lowercased() {
+        assert_eq!(
+            req("GET", "https://API.Vendor.COM/x").host,
+            "api.vendor.com"
+        );
+    }
+
+    #[test]
+    fn host_trailing_dot_is_stripped() {
+        // The fully-qualified `good.com.` form must canonicalize identically
+        // to `good.com` so it cannot dodge an exact host match.
+        assert_eq!(req("GET", "https://good.com./x").host, "good.com");
+        // And combined with case.
+        assert_eq!(req("GET", "https://Good.Com./x").host, "good.com");
+    }
+
+    #[test]
+    fn null_byte_host_is_refused() {
+        // `attacker.com\0.good.com` — the SOCKS5 null-byte differential. The
+        // canonicalizer REFUSES rather than letting an ambiguous host reach a
+        // comparison. url::Url percent-encodes a literal NUL in the authority,
+        // so feed canonical_host directly (the seam's host gate).
+        let err = canonical_host("attacker.com\0.good.com").unwrap_err();
+        assert!(err.contains("null byte"), "{err}");
+        // Also via a percent-encoded NUL that decodes in a host position is
+        // not representable through url::Url's authority, so the direct gate
+        // is the authoritative check and is exercised here.
+    }
+
+    #[test]
+    fn empty_host_is_refused() {
+        assert!(canonical_host("  ").is_err());
+        assert!(canonical_host(".").is_err());
+    }
+
+    #[test]
+    fn method_is_uppercased() {
+        assert_eq!(req("get", "https://h.com/x").method, "GET");
+        assert_eq!(req("Post", "https://h.com/x").method, "POST");
+    }
+
+    #[test]
+    fn percent_encoded_dot_path_is_decoded_then_normalized() {
+        // `%2e` is `.`; `%2e%2e` is `..`. Both must decode BEFORE dot-segment
+        // normalization, so an encoded traversal cannot dodge a path match.
+        assert_eq!(canonical_path("/v1/%2e/nutrition"), "/v1/nutrition");
+        assert_eq!(canonical_path("/v1/a/%2e%2e/nutrition"), "/v1/nutrition");
+        // Mixed case percent-encoding.
+        assert_eq!(canonical_path("/v1/%2E/x"), "/v1/x");
+    }
+
+    #[test]
+    fn dot_segments_are_normalized() {
+        assert_eq!(canonical_path("/v1/./x"), "/v1/x");
+        assert_eq!(canonical_path("/v1/a/../x"), "/v1/x");
+        // `..` can never escape above root.
+        assert_eq!(canonical_path("/../../x"), "/x");
+        assert_eq!(canonical_path("/.."), "/");
+        // empty segments collapse; trailing slash stripped.
+        assert_eq!(canonical_path("/v1//x/"), "/v1/x");
+        assert_eq!(canonical_path("/"), "/");
+        assert_eq!(canonical_path(""), "/");
+    }
+
+    #[test]
+    fn encoded_path_traversal_through_a_real_url_is_normalized() {
+        // Through the FULL seam (url::Url then canonical_path): an attacker
+        // encoding `..` as `%2e%2e` to reach `/v1/accounts/9/import` from a
+        // declared `/v1/me/contacts` host must not slip past.
+        let r = req(
+            "GET",
+            "https://api.vendor.com/v1/me/%2e%2e/accounts/9/import",
+        );
+        assert_eq!(r.path, "/v1/accounts/9/import");
+        assert_eq!(r.segments, ["v1", "accounts", "9", "import"]);
+    }
+
+    #[test]
+    fn duplicate_query_keys_collapse_to_one_name() {
+        // Duplicate keys must not let a forbidden/required NAME check be
+        // fooled — we match on the SET of names, never values or counts.
+        let r = req("GET", "https://h.com/x?q=a&q=b&callback=evil");
+        assert!(r.query_names.contains("q"));
+        assert!(r.query_names.contains("callback"));
+        assert_eq!(r.query_names.len(), 2);
+    }
+
+    #[test]
+    fn percent_encoded_query_name_is_decoded() {
+        // `%71` is `q` — a name-level constraint must see the decoded name so
+        // an encoded key cannot smuggle past a `forbidden` list.
+        let r = req("GET", "https://h.com/x?%71=v");
+        assert!(r.query_names.contains("q"), "{:?}", r.query_names);
+    }
+
+    #[test]
+    fn header_names_are_lowercased_values_ignored() {
+        let r = req_headers(
+            "POST",
+            "https://h.com/x",
+            &["Content-Type", "X-Custom", "  "],
+        );
+        assert!(r.header_names.contains("content-type"));
+        assert!(r.header_names.contains("x-custom"));
+        assert_eq!(r.header_names.len(), 2, "blank header dropped");
+    }
+
+    // ── Matching on the canonicalized components. ────────────────────────────
+
+    fn call(method: MethodMatch, host: &str, path: PathPattern) -> CallSpec {
+        CallSpec {
+            method,
+            host: host.to_string(),
+            path,
+            query: QueryConstraint::default(),
+            headers: HeaderConstraint::default(),
+            max_body_bytes: None,
+            body: None,
+            inject: None,
+            inject_kind: None,
+        }
+    }
+
+    #[test]
+    fn exact_method_host_path_matches() {
+        let c = call(
+            MethodMatch::Exact("GET".into()),
+            "api.vendor.com",
+            PathPattern::Exact("/v1/me/contacts".into()),
+        );
+        assert!(c.matches(&req("GET", "https://api.vendor.com/v1/me/contacts"), b""));
+        // mixed-case host + trailing dot still matches (canonicalized).
+        assert!(c.matches(&req("get", "https://API.Vendor.com./v1/me/contacts"), b""));
+        // wrong method, wrong path, wrong host all miss.
+        assert!(!c.matches(&req("POST", "https://api.vendor.com/v1/me/contacts"), b""));
+        assert!(!c.matches(&req("GET", "https://api.vendor.com/v1/me/other"), b""));
+        assert!(!c.matches(&req("GET", "https://evil.com/v1/me/contacts"), b""));
+    }
+
+    #[test]
+    fn template_matches_one_segment_each() {
+        let c = call(
+            MethodMatch::Exact("GET".into()),
+            "h.com",
+            PathPattern::parse("/v1/items/{id}").unwrap(),
+        );
+        assert!(c.matches(&req("GET", "https://h.com/v1/items/42"), b""));
+        assert!(c.matches(&req("GET", "https://h.com/v1/items/abc-uuid"), b""));
+        // too few / too many segments miss (a template segment is exactly one)
+        assert!(!c.matches(&req("GET", "https://h.com/v1/items"), b""));
+        assert!(!c.matches(&req("GET", "https://h.com/v1/items/42/extra"), b""));
+    }
+
+    #[test]
+    fn subtree_matches_any_path() {
+        let c = call(MethodMatch::Any, "h.com", PathPattern::Subtree);
+        assert!(c.matches(&req("DELETE", "https://h.com/anything/at/all"), b""));
+        assert!(c.matches(&req("GET", "https://h.com/"), b""));
+        assert!(!c.matches(&req("GET", "https://other.com/x"), b""));
+    }
+
+    #[test]
+    fn path_pattern_parse_rejects_embedded_wildcard_and_partial_braces() {
+        assert!(PathPattern::parse("/v1/**/x").is_err());
+        assert!(PathPattern::parse("/v1/item{id}").is_err());
+        assert!(PathPattern::parse("/v1/{}").is_err());
+        assert_eq!(PathPattern::parse("/**").unwrap(), PathPattern::Subtree);
+        assert_eq!(PathPattern::parse("**").unwrap(), PathPattern::Subtree);
+    }
+
+    #[test]
+    fn query_required_and_forbidden_names() {
+        let mut c = call(
+            MethodMatch::Exact("GET".into()),
+            "h.com",
+            PathPattern::Exact("/x".into()),
+        );
+        c.query = QueryConstraint {
+            required: vec!["query".into()],
+            forbidden: vec!["callback".into()],
+        };
+        assert!(c.matches(&req("GET", "https://h.com/x?query=chicken"), b""));
+        // missing required name
+        assert!(!c.matches(&req("GET", "https://h.com/x?other=1"), b""));
+        // forbidden name present
+        assert!(!c.matches(&req("GET", "https://h.com/x?query=a&callback=evil"), b""));
+    }
+
+    #[test]
+    fn header_required_and_forbidden_names() {
+        let mut c = call(
+            MethodMatch::Exact("POST".into()),
+            "h.com",
+            PathPattern::Exact("/x".into()),
+        );
+        c.headers = HeaderConstraint {
+            required: vec!["content-type".into()],
+            forbidden: vec!["x-evil".into()],
+        };
+        assert!(c.matches(
+            &req_headers("POST", "https://h.com/x", &["Content-Type"]),
+            b""
+        ));
+        assert!(!c.matches(&req_headers("POST", "https://h.com/x", &[]), b""));
+        assert!(!c.matches(
+            &req_headers("POST", "https://h.com/x", &["Content-Type", "X-Evil"]),
+            b""
+        ));
+    }
+
+    #[test]
+    fn max_body_bytes_zero_forbids_a_body() {
+        let mut c = call(
+            MethodMatch::Exact("GET".into()),
+            "h.com",
+            PathPattern::Exact("/x".into()),
+        );
+        c.max_body_bytes = Some(0);
+        assert!(c.matches(&req("GET", "https://h.com/x"), b""));
+        assert!(!c.matches(&req("GET", "https://h.com/x"), b"some body"));
+    }
+
+    // ── The JSON-RPC-method body rung (§9.1). ────────────────────────────────
+
+    #[test]
+    fn body_match_json_method_membership() {
+        let bm = BodyMatch {
+            pointer: "/method".into(),
+            allowed: vec!["tools/list".into(), "tools/call".into()],
+        };
+        assert_eq!(
+            bm.evaluate(br#"{"method":"tools/list"}"#, None),
+            BodyVerdict::Match
+        );
+        assert_eq!(
+            bm.evaluate(br#"{"method":"resources/read"}"#, None),
+            BodyVerdict::NotAllowed
+        );
+    }
+
+    #[test]
+    fn body_match_rejects_non_json_missing_pointer_and_oversize() {
+        let bm = BodyMatch {
+            pointer: "/method".into(),
+            allowed: vec!["tools/list".into()],
+        };
+        // non-JSON
+        assert_eq!(
+            bm.evaluate(b"not json at all", None),
+            BodyVerdict::Unusable("body is not valid JSON")
+        );
+        // missing pointer
+        assert_eq!(
+            bm.evaluate(br#"{"other":"x"}"#, None),
+            BodyVerdict::Unusable("body has no value at the declared json pointer")
+        );
+        // oversized — rejected BEFORE parse (even though it IS valid json).
+        assert_eq!(
+            bm.evaluate(br#"{"method":"tools/list"}"#, Some(4)),
+            BodyVerdict::Unusable("body exceeds max_body_bytes (rejected before parse)")
+        );
+    }
+
+    #[test]
+    fn body_match_through_callspec_allows_only_declared_methods() {
+        let mut c = call(
+            MethodMatch::Exact("POST".into()),
+            "api.vendor.com",
+            PathPattern::Exact("/rpc".into()),
+        );
+        c.body = Some(BodyMatch {
+            pointer: "/method".into(),
+            allowed: vec!["tools/list".into(), "tools/call".into()],
+        });
+        c.max_body_bytes = Some(64 * 1024);
+        let r = req("POST", "https://api.vendor.com/rpc");
+        assert!(c.matches(&r, br#"{"method":"tools/call","params":{}}"#));
+        assert!(!c.matches(&r, br#"{"method":"resources/read"}"#));
+        // non-JSON body → deny (no match), never a parse panic.
+        assert!(!c.matches(&r, b"garbage"));
+    }
+
+    #[test]
+    fn implicit_subtree_is_the_broad_compat_call() {
+        let c = CallSpec::implicit_subtree("API.Vendor.com", None);
+        assert_eq!(c.method, MethodMatch::Any);
+        assert_eq!(c.path, PathPattern::Subtree);
+        assert_eq!(c.host, "api.vendor.com");
+        assert!(c.inject.is_none());
+        // matches literally anything on that host.
+        assert!(c.matches(&req("PATCH", "https://api.vendor.com/a/b/c?z=1"), b"body"));
+    }
+}

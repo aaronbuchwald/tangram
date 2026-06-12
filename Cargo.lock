@@ -2567,6 +2567,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "notify",
+ "percent-encoding",
  "reqwest",
  "rmcp",
  "secrecy",

@@ -26,6 +26,7 @@ mod app;
 mod auth;
 mod config;
 mod doc;
+mod egress;
 mod fetch;
 mod gateway;
 mod mcp;
