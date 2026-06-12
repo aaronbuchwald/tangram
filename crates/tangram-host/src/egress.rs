@@ -148,6 +148,29 @@ pub fn canonical_path(raw: &str) -> String {
     }
 }
 
+/// Whether every element of `sub` appears in `sup` (set containment over the
+/// small constraint-name lists). Used by [`CallSpec::covers`].
+fn is_subset(sub: &[String], sup: &[String]) -> bool {
+    sub.iter().all(|x| sup.contains(x))
+}
+
+/// Intersect the operator's effective calls with the component's `describe()`-
+/// DECLARED calls (fine-grained-egress §6). The declaration is a REQUEST, never
+/// authority: the result keeps only operator calls that some declared call
+/// COVERS, so a component declaring MORE than its spec is narrowed to the spec,
+/// and declaring FEWER narrows the spec. An empty `declared` list (component
+/// declares nothing) leaves the operator spec UNCHANGED — declaring nothing is
+/// not "declare zero calls", it is "no declaration to intersect with".
+pub fn intersect_with_declared(operator: Vec<CallSpec>, declared: &[CallSpec]) -> Vec<CallSpec> {
+    if declared.is_empty() {
+        return operator;
+    }
+    operator
+        .into_iter()
+        .filter(|op| declared.iter().any(|dec| dec.covers(op)))
+        .collect()
+}
+
 /// Generalize a canonical path's segments into a template string for the
 /// observe-mode generator (fine-grained-egress §5.2 / EC6): a segment that
 /// looks like an opaque identifier — all-numeric, or a UUID — becomes `{id}`
@@ -460,6 +483,51 @@ impl CallSpec {
             return body_match.evaluate(body, self.max_body_bytes) == BodyVerdict::Match;
         }
         true
+    }
+
+    /// Whether `self` (a component-DECLARED upper bound) COVERS `operator` (a
+    /// call from the operator spec) — fine-grained-egress §6: the component's
+    /// declared calls are a request that can only NARROW the operator grant,
+    /// never widen it. `self` covers `operator` when it permits at least every
+    /// request `operator` does:
+    ///
+    /// - same canonical host;
+    /// - method: `self` is `Any`, or both name the same exact method;
+    /// - path: `self` is `Subtree`, or the patterns are structurally equal;
+    /// - constraints: `self` imposes no MORE than `operator` (a declared call
+    ///   that adds its own required/forbidden names or a body matcher is
+    ///   narrower, so it does not cover a less-constrained operator call).
+    ///
+    /// This is the same regex-free structural containment manifest CP6 will
+    /// consume; kept deliberately small (the §3(b) lesson).
+    pub fn covers(&self, operator: &CallSpec) -> bool {
+        if self.host != operator.host {
+            return false;
+        }
+        let method_ok = match (&self.method, &operator.method) {
+            (MethodMatch::Any, _) => true,
+            (MethodMatch::Exact(a), MethodMatch::Exact(b)) => a == b,
+            (MethodMatch::Exact(_), MethodMatch::Any) => false,
+        };
+        if !method_ok {
+            return false;
+        }
+        let path_ok = match (&self.path, &operator.path) {
+            (PathPattern::Subtree, _) => true,
+            (a, b) => a == b,
+        };
+        if !path_ok {
+            return false;
+        }
+        // `self` must not impose constraints `operator` lacks (that would make
+        // `self` narrower than `operator`, so it cannot cover it). Subset on
+        // the constraint NAME sets, plus: a declared body matcher only covers
+        // an operator call that declares the same matcher.
+        is_subset(&self.query.required, &operator.query.required)
+            && is_subset(&self.query.forbidden, &operator.query.forbidden)
+            && is_subset(&self.headers.required, &operator.headers.required)
+            && is_subset(&self.headers.forbidden, &operator.headers.forbidden)
+            && self.body == operator.body
     }
 
     /// The method rendered for diagnostics (`*` for `Any`).

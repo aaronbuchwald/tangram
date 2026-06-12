@@ -463,6 +463,17 @@ impl ComponentHandle {
         Ok(bindings.tangram_app_guest().call_describe(store).await?)
     }
 
+    /// Replace the enforced call list on the live `HostState` (EC5): the
+    /// component is instantiated with the OPERATOR spec's calls, then —
+    /// after `describe()` is read — the host narrows them by intersecting with
+    /// the component's declared calls (a request that can only narrow). Called
+    /// exactly once at build, before any dispatch; the component cannot widen
+    /// its grant (the intersection only removes calls).
+    pub async fn set_calls(&self, calls: Vec<CallSpec>) {
+        let mut inner = self.inner.lock().await;
+        inner.store.data_mut().calls = calls;
+    }
+
     pub async fn genesis(&self) -> anyhow::Result<Vec<u8>> {
         let mut inner = self.inner.lock().await;
         let Inner { store, bindings } = &mut *inner;
