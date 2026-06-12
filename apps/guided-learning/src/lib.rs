@@ -737,14 +737,21 @@ const INSTRUCTIONS: &str = "A Make It Stick-driven tutor. Start a session over a
 
 /// Capabilities object reported by `describe()`/the capabilities probe — ONE
 /// constructor so the WASM `describe()` manifest and any native route agree.
-/// `tutor_available` reflects whether an Anthropic credential is resolvable
-/// (mirrors nutrition's `description_input`); the host ANDs in egress-injection
-/// resolution for the component path.
+///
+/// The "is the tutor usable" signal is published under the key
+/// **`description_input`** — the generic "this AI app is configured" flag the
+/// host gates host-side (ADR-0005): when the app declares egress injection the
+/// host ANDs this with whether the inject secret resolves, so an app whose
+/// Anthropic credential is missing reports `false` and degrades cleanly
+/// (identical to nutrition). The component therefore reports `true`
+/// intrinsically (it CAN call the tutor) and lets the host decide; natively /
+/// in tests `available` is derived from a resolvable credential directly.
 #[must_use]
-pub fn capabilities_json(tutor_available: bool) -> serde_json::Value {
+pub fn capabilities_json(available: bool) -> serde_json::Value {
     serde_json::json!({
         "tutor": "anthropic/claude-opus-4-8",
-        "tutor_available": tutor_available,
+        // The host-gated "configured" flag (ADR-0005 ANDs in inject-resolution).
+        "description_input": available,
     })
 }
 
@@ -760,11 +767,14 @@ pub fn app() -> App<GuidedLearning> {
 // Compiled for wasm32-wasip2, the same model + actions become a Tangram
 // component (`tangram-host` owns the platform around it; the tutor's HTTP goes
 // through the host's allowlist-enforced `http-fetch` import, which injects the
-// Anthropic credential at the egress boundary — ADR-0005). The capabilities
-// object reports whether the tutor credential is resolvable.
+// Anthropic credential at the egress boundary — ADR-0005). The component
+// reports `description_input: true` intrinsically (it CAN call the tutor); the
+// host ANDs in whether the inject secret resolves, so a credential-less host
+// serves `description_input: false` and the tutor degrades cleanly. (The
+// component never sees the key, so it cannot decide this itself.)
 #[cfg(target_family = "wasm")]
 tangram::export_component!(GuidedLearning {
     name: "guided-learning",
     instructions: INSTRUCTIONS,
-    capabilities: || Some(capabilities_json(tutor::credential_present())),
+    capabilities: || Some(capabilities_json(true)),
 });

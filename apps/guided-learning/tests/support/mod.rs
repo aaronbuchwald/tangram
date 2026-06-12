@@ -80,6 +80,10 @@ pub fn anthropic_response(structured_json: serde_json::Value) -> String {
 /// lifetime of the returned guard.
 pub struct FixtureServer {
     pub url: String,
+    /// The request lines (e.g. "POST /v1/messages HTTP/1.1") the server saw,
+    /// so a containment test can assert the tutor only ever hits the one
+    /// declared call.
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
     _handle: tokio::task::JoinHandle<()>,
 }
 
@@ -87,6 +91,11 @@ impl FixtureServer {
     /// Serve a fixed response body for every request.
     pub async fn fixed(body: String) -> Self {
         Self::with_sequence(vec![body]).await
+    }
+
+    /// The first line of each request the server received.
+    pub fn request_lines(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
     }
 
     /// Serve a sequence of response bodies in order; the last one repeats once
@@ -98,17 +107,20 @@ impl FixtureServer {
             .expect("bind fixture listener");
         let addr = listener.local_addr().expect("local addr");
         let url = format!("http://{addr}/v1/messages");
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
         let handle = tokio::spawn(async move {
             let mut idx = 0usize;
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     break;
                 };
-                // Drain the request (we don't inspect it — the fixture is
-                // request-agnostic). Read until the headers end; the body is
-                // irrelevant to replay.
+                // Read the request head; capture its first line for assertions.
                 let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf).await;
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if let Some(line) = String::from_utf8_lossy(&buf[..n]).lines().next() {
+                    captured.lock().unwrap().push(line.to_string());
+                }
                 let body = bodies
                     .get(idx)
                     .or_else(|| bodies.last())
@@ -126,6 +138,7 @@ impl FixtureServer {
         });
         Self {
             url,
+            requests,
             _handle: handle,
         }
     }

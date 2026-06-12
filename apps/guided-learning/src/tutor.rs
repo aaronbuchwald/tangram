@@ -27,9 +27,10 @@ fn endpoint() -> String {
 /// (and in tests) this reads the env directly; inside the component the key is
 /// host-injected at egress and the host ANDs its inject-resolution into the
 /// reported capability, so the component's own view here is best-effort.
-// Used by the wasm `describe()` capabilities closure and by the native
-// degrade-without-key test; not called on the plain native build.
-#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+// Used natively by the degrade-without-key capabilities probe / test; the
+// component path reports `description_input` intrinsically and lets the host
+// gate it (ADR-0005), so this is not called on the plain library build.
+#[allow(dead_code)]
 #[must_use]
 pub fn credential_present() -> bool {
     // A test/fixture URL means "the tutor is reachable" even without a real

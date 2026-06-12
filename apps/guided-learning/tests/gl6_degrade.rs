@@ -34,7 +34,10 @@ async fn capabilities_report_tutor_unavailable_without_key() {
         "with no credential and no fixture URL, the tutor reports unavailable"
     );
     let caps = guided_learning::capabilities_json(guided_learning::tutor::credential_present());
-    assert_eq!(caps["tutor_available"], false);
+    assert_eq!(
+        caps["description_input"], false,
+        "the host-gated configured flag is false without a credential"
+    );
 }
 
 #[tokio::test]
