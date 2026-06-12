@@ -252,6 +252,13 @@ pub struct GrantedCapabilities {
     pub allow_hosts: BTreeSet<String>,
     pub inject_hosts: BTreeSet<String>,
     pub env_keys: BTreeSet<String>,
+    /// Call-grained grants (DESIGNED-FOR, gated on fine-grained-egress; plan
+    /// §2.6). EMPTY in the live converge path today — grants are host-grained.
+    /// When fine-grained-egress ships, the egress enforcer's effective
+    /// `CallSpec`s populate this and the chain's call-grain containment arm
+    /// (in [`verify`]) becomes load-bearing. Kept here so the seam is the
+    /// SAME canonicalization the enforcer uses (the SOCKS5 lesson).
+    pub calls: Vec<CallSpec>,
 }
 
 /// The verification verdict stamped on a running app and mirrored into the
@@ -323,6 +330,26 @@ pub fn verify(
                 "manifest verification failed: spec grants env key {key:?} which the manifest \
                  does not declare (granted ⊄ declared)"
             ));
+        }
+    }
+
+    // ── HARD link, call grain: every granted CallSpec must be matched by some
+    //    declared CallSpec (`granted ⊆ declared` at the (host, method, path)
+    //    grain — plan §2.6, CP6). DESIGNED-FOR but GATED: `granted.calls` is
+    //    EMPTY in the live converge path (grants are host-grained today), so
+    //    this loop is a no-op until fine-grained-egress populates it. The
+    //    `#[ignore]`d `call_grain_subset` test activates it. The audit link is
+    //    UNCHANGED by calls — the component still only imports `http-fetch`
+    //    (no WIT change); call grain lives entirely in granted ⊆ declared.
+    if let DeclaredNetwork::Calls(declared_calls) = &declared.network {
+        for call in &granted.calls {
+            if !declared_calls.iter().any(|d| d.contains(call)) {
+                return Err(format!(
+                    "manifest verification failed: spec grants call {} {}{} which no declared \
+                     call covers (granted ⊄ declared, call grain)",
+                    call.method, call.host, call.path
+                ));
+            }
         }
     }
 
@@ -414,8 +441,7 @@ mod tests {
     fn granted(hosts: &[&str]) -> GrantedCapabilities {
         GrantedCapabilities {
             allow_hosts: hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
-            inject_hosts: BTreeSet::new(),
-            env_keys: BTreeSet::new(),
+            ..Default::default()
         }
     }
 
@@ -528,23 +554,54 @@ mod tests {
     #[ignore = "gated on fine-grained-egress (not built); plan §2.6 / CP6 — \
                 activate when call-grain grants reach the converge path"]
     fn call_grain_subset() {
-        let declared = CallSpec {
+        let declared_call = CallSpec {
             host: "api.vendor.com".into(),
             method: "GET".into(),
             path: "/v1/me/contacts".into(),
         };
-        // Same call is contained.
-        assert!(declared.contains(&CallSpec {
+        // Direct containment relation: same call contained (mixed-case host,
+        // case-insensitive method — the shared canonicalization seam, plan
+        // §2.6); a broader method/path is not.
+        assert!(declared_call.contains(&CallSpec {
             host: "API.Vendor.com".into(),
             method: "get".into(),
             path: "/v1/me/contacts".into(),
         }));
-        // A different method/path is NOT contained (would HARD-FAIL).
-        assert!(!declared.contains(&CallSpec {
+        assert!(!declared_call.contains(&CallSpec {
             host: "api.vendor.com".into(),
             method: "POST".into(),
             path: "/v1/accounts/42/import".into(),
         }));
+
+        // Through the CHAIN: a declaration of `Calls([GET /v1/me/contacts])`.
+        let declared = DeclaredCapabilities {
+            network: DeclaredNetwork::Calls(vec![declared_call.clone()]),
+            env_keys: BTreeSet::new(),
+        };
+        // A granted GET /v1/me/contacts is covered → verifies.
+        let mut granted_ok = GrantedCapabilities {
+            allow_hosts: ["api.vendor.com".into()].into_iter().collect(),
+            ..Default::default()
+        };
+        granted_ok.calls = vec![CallSpec {
+            host: "api.vendor.com".into(),
+            method: "GET".into(),
+            path: "/v1/me/contacts".into(),
+        }];
+        assert!(
+            verify(&granted_ok, &declared, &audited_with_fetch())
+                .unwrap()
+                .is_verified()
+        );
+        // A granted POST .../import is covered by no declared call → HARD FAIL.
+        let mut granted_bad = granted_ok.clone();
+        granted_bad.calls = vec![CallSpec {
+            host: "api.vendor.com".into(),
+            method: "POST".into(),
+            path: "/v1/accounts/42/import".into(),
+        }];
+        let err = verify(&granted_bad, &declared, &audited_with_fetch()).unwrap_err();
+        assert!(err.contains("call grain"), "{err}");
     }
 
     /// CP1 — the host dumps a component's FUNCTION-LEVEL imports, and notes ≠

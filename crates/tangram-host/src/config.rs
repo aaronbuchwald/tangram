@@ -432,6 +432,9 @@ impl AppSpec {
                 .collect(),
             inject_hosts: self.inject.keys().map(|h| h.to_ascii_lowercase()).collect(),
             env_keys: self.env.keys().cloned().collect(),
+            // Host-grained today; call-grained grants arrive with
+            // fine-grained-egress (plan §2.6, CP6).
+            calls: Vec::new(),
         }
     }
 
