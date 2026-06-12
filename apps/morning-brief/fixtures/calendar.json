@@ -1,0 +1,32 @@
+{
+  "events": [
+    {
+      "id": "evt_standup",
+      "summary": "Team standup",
+      "start_ms": 1749720600000,
+      "location": "Zoom",
+      "attendees": ["you", "Priya", "Marcus", "Dana"]
+    },
+    {
+      "id": "evt_review",
+      "summary": "Design review: egress grants",
+      "start_ms": 1749729600000,
+      "location": "Room 4B",
+      "attendees": ["you", "Aaron", "Lena"]
+    },
+    {
+      "id": "evt_1on1",
+      "summary": "1:1 with Priya",
+      "start_ms": 1749740400000,
+      "location": "Zoom",
+      "attendees": ["you", "Priya"]
+    },
+    {
+      "id": "evt_dentist",
+      "summary": "Dentist appointment",
+      "start_ms": 1749752100000,
+      "location": "Downtown Dental, 200 Main St",
+      "attendees": ["you"]
+    }
+  ]
+}

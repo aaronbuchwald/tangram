@@ -8,6 +8,7 @@ members = [
     "crates/tangram-host",
     "crates/tangram-macros",
     "apps/marketplace",
+    "apps/morning-brief",
     "apps/notes",
     "apps/nutrition",
     "apps/registry",

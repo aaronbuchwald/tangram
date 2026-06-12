@@ -77,6 +77,18 @@ ui = "apps/tangram/ui/dist"
 component = "target/wasm32-wasip2/release/notes.wasm"
 ui = "apps/notes/ui"
 
+# Morning Brief — Tangram's first AI-enabled component (the offline core;
+# docs/design/morning-brief.md MB1-MB5). run_brief input_mode "fixture" runs
+# fully offline against bundled fixtures with a recorded LLM response — no key,
+# no allow_hosts, no egress. The live tier (real Google + Anthropic calls with
+# call-level [[calls]] egress grants + ANTHROPIC_API_KEY) is a separate later
+# PR; until it lands, "live" runs return a clear error. require_auth gates the
+# mutating routes since the brief is personal (design §6.3).
+[apps.morning-brief]
+component = "target/wasm32-wasip2/release/morning_brief.wasm"
+ui = "apps/morning-brief/ui"
+require_auth = true
+
 [apps.nutrition]
 component = "target/wasm32-wasip2/release/nutrition.wasm"
 ui = "apps/nutrition/ui"

@@ -1,0 +1,32 @@
+{
+  "messages": [
+    {
+      "id": "msg_invoice",
+      "from": "billing@acme-cloud.example",
+      "subject": "Invoice #4471 due tomorrow",
+      "received_ms": 1749700200000,
+      "snippet": "Your invoice of $1,204.00 is due 2026-06-13. Pay or it will be marked overdue."
+    },
+    {
+      "id": "msg_lena",
+      "from": "lena@company.example",
+      "subject": "Re: Design review prep — need your sign-off",
+      "received_ms": 1749703800000,
+      "snippet": "Can you confirm the two egress call examples before the 11am review? Blocking the agenda."
+    },
+    {
+      "id": "msg_newsletter",
+      "from": "digest@rustweekly.example",
+      "subject": "This Week in Rust #588",
+      "received_ms": 1749690000000,
+      "snippet": "Async closures stabilize, a new wasm component guide, and 14 crate releases."
+    },
+    {
+      "id": "msg_recruiter",
+      "from": "jordan@talenthunt.example",
+      "subject": "Exciting Staff Engineer opportunity",
+      "received_ms": 1749686400000,
+      "snippet": "I came across your profile and think you'd be a great fit for a role at a fast-growing startup."
+    }
+  ]
+}
