@@ -1,6 +1,7 @@
 //! Notes — the smallest possible Tangram app: a replicated list of notes.
 
 use tangram::prelude::*;
+use tangram::time::now_ms;
 
 #[model]
 #[derive(Default)]
@@ -82,10 +83,6 @@ impl Notes {
         notes.sort_by_key(|n| std::cmp::Reverse(n.edited_at_ms()));
         notes
     }
-}
-
-fn now_ms() -> i64 {
-    tangram::time::now_ms()
 }
 
 /// MCP instructions, shared between the native app builder and the WASM
