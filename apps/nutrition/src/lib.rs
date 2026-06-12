@@ -1,13 +1,13 @@
-//! Nutrition — a Tangram port of Chamber's nutrition tracker prototype.
+//! Nutrition — a nutrition tracker built on Tangram.
 //!
-//! Chamber's design uses a medallion (Bronze/Silver/Gold) SQLite layout:
+//! The data design follows a medallion (Bronze/Silver/Gold) layout:
 //! Bronze = raw logged meals + components, Silver = component → ingredient
 //! mappings, Gold = nutrient reference data and a per-meal aggregation view.
-//! Here the same shape lives in one replicated Tangram model: `meals` is the
+//! The whole shape lives in one replicated Tangram model: `meals` is the
 //! Bronze layer (the only thing users write at runtime), the mapping and
-//! nutrient tables are the Silver/Gold reference data (seeded from Chamber's
-//! dataset, extensible via `add_ingredient`), and `meal_nutrition` computes
-//! the gold view on demand.
+//! nutrient tables are the Silver/Gold reference data (seeded from the
+//! built-in dataset, extensible via `add_ingredient`), and `meal_nutrition`
+//! computes the gold view on demand.
 
 use tangram::prelude::*;
 
@@ -120,7 +120,7 @@ impl Nutrition {
                 }
             });
 
-        // Explicit components win, mirroring Chamber's parseMeal contract.
+        // Explicit components win over text parsed from the description.
         let explicit: Vec<MealComponent> = components
             .unwrap_or_default()
             .into_iter()
@@ -161,7 +161,7 @@ impl Nutrition {
         // active strategy — async, never under the store lock.
         // Description-only meals resolve in the foreground (their nutrition
         // IS the lookup); explicit-component meals log immediately and
-        // back-fill in the background (Chamber's fillNutrition behavior).
+        // back-fill in the background.
         let unknown = unknown_components(&ctx, &components)?;
         if strategy.can_resolve() && !unknown.is_empty() {
             if has_explicit {
@@ -181,8 +181,8 @@ impl Nutrition {
                         }
                     }
                 };
-                // Natively the back-fill runs in the background (Chamber's
-                // fillNutrition behavior). Inside a WASM component there is
+                // Natively the back-fill runs in the background. Inside a
+                // WASM component there is
                 // no spawner — dispatch is one synchronous doc-in/doc-out
                 // call — so the same resolution runs inline, best-effort.
                 #[cfg(not(target_family = "wasm"))]
@@ -300,7 +300,7 @@ impl Nutrition {
 
     /// Register nutrition data for a component (per 100g), so future and past
     /// meals using it resolve. The replicated reference data syncs to every
-    /// device, mirroring Chamber's "resolve once, replay forever" caching.
+    /// device, following the "resolve once, replay forever" caching model.
     pub fn add_ingredient(
         &mut self,
         component: String,
@@ -473,7 +473,7 @@ fn slug(name: &str) -> String {
     out
 }
 
-/// Seed with Chamber's reference dataset. This is the genesis state, so it
+/// Seed with the built-in reference dataset. This is the genesis state, so it
 /// must be deterministic (every instance derives the identical genesis
 /// change; that shared root is what lets instances merge).
 impl Default for Nutrition {

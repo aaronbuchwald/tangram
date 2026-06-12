@@ -1,5 +1,4 @@
-//! LLM-backed strategy (Anthropic claude-opus-4-8), ported from Chamber's
-//! `llm_strategy.ts`.
+//! LLM-backed strategy (Anthropic claude-opus-4-8).
 //!
 //! `resolve(component)` asks the model for the comprehensive per-100g
 //! nutrient panel of an arbitrary free-text food via a structured-output
@@ -18,7 +17,7 @@ use super::ResolvedNutrient;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// Same model id as Chamber's llm_strategy.ts (current most-capable Opus).
+/// Uses the current most-capable Opus model id.
 const MODEL: &str = "claude-opus-4-8";
 
 const SYSTEM_PROMPT: &str = "You are a nutrition reference. Given a food or dish name, return the typical \

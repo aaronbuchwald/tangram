@@ -1,5 +1,4 @@
-//! CalorieNinjas-backed strategy, ported from Chamber's
-//! `calorieninjas_strategy.ts`.
+//! CalorieNinjas-backed strategy.
 //!
 //! `resolve(component)` queries the CalorieNinjas API for a free-text food
 //! and maps EVERY nutrient field the API returns for the FIRST matched item
@@ -70,7 +69,7 @@ fn unit_and_kind(field: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Title-case a snake_case field, dropping a trailing unit suffix:
-/// `fat_saturated_g` → "Fat Saturated" (Chamber's `humanizeField`).
+/// `fat_saturated_g` → "Fat Saturated".
 fn humanize_field(field: &str) -> String {
     let base = field
         .strip_suffix("_mcg")

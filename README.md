@@ -61,7 +61,7 @@ crates/tangram-core     the portable core: action registry, CRDT store + dispatc
                         no tokio/hyper; compiles to wasm32-wasip2 (CI-checked)
 crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
-apps/nutrition          fuller example: Chamber's nutrition tracker design on Tangram
+apps/nutrition          fuller example: a nutrition tracker built on Tangram
 apps/shell              multi-app host: serves every app under one port, prefixed
 cloud/cloudflare        Durable-Object app host: full surface (UI/api/sync/mcp)
                         over the same WASM app components, serverless (ADR-0002)
@@ -672,7 +672,7 @@ next request. Setup steps:
 
 ## Nutrition strategies
 
-The nutrition app ports Chamber's pluggable nutrition-resolution seam: a
+The nutrition app has a pluggable nutrition-resolution seam: a
 *strategy* decides how a novel meal component gets its per-100g nutrient
 values. An explicit `NUTRITION_STRATEGY` wins; when unset, the presence of
 `CALORIENINJAS_API_KEY` auto-enables `calorieninjas` (online resolution is

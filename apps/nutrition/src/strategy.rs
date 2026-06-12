@@ -1,5 +1,4 @@
-//! The injectable nutrition-strategy seam, ported from Chamber's
-//! `strategies.ts`.
+//! The injectable nutrition-strategy seam.
 //!
 //! A [`Strategy`] is *how* a meal component gets its per-100g nutrient
 //! values. Selection: an explicit `NUTRITION_STRATEGY` env var
@@ -8,13 +7,11 @@
 //!
 //! - **Offline** (keyless default) — deterministic and keyless. It has NO dynamic
 //!   `resolve`; components fall back to whatever the reference data covers.
-//!   Divergence from Chamber: Chamber pre-seeds a `component_nutrients`
-//!   table from the strategy's `seed` (and creates it EMPTY for online
-//!   strategies), while in Tangram the seed lives in the model's
-//!   deterministic genesis document (`Nutrition::default()`), which every
-//!   instance derives identically so their histories merge. The genesis seed
-//!   is therefore always present; what the strategies vary is how NEW
-//!   components get resolved.
+//!   The seed lives in the model's deterministic genesis document
+//!   (`Nutrition::default()`), which every instance derives identically so
+//!   their histories merge. The genesis seed is therefore always present
+//!   regardless of strategy; what the strategies vary is how NEW components
+//!   get resolved.
 //! - **CalorieNinjas** / **Llm** — online: `resolve` looks a component up
 //!   over the network, OUTSIDE the store's synchronous action transaction.
 //!   The resolved rows are then cached via the `add_component_nutrition`
