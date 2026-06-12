@@ -195,6 +195,191 @@ pub fn templatize_path(segments: &[String]) -> String {
     format!("/{}", parts.join("/"))
 }
 
+/// The observe-mode `[[calls]]` generator (fine-grained-egress §5.2 / EC6).
+/// Turns the bare `http-fetch`es an app actually made — captured as canonical
+/// requests in observe mode — into a paste-ready `[[calls]]` block: one entry
+/// per distinct (method, host, templatized-path), sorted and de-duplicated.
+/// Numeric/uuid path segments are parameterized to `{id}` ([`templatize_path`])
+/// so the declaration generalizes. Re-parsing the result accepts exactly the
+/// observed calls (the round-trip EC6 asserts).
+///
+/// Header/query NAMES seen on the request are emitted as `required` constraints
+/// only when present, so the generated declaration is no broader than observed.
+pub fn generate_calls_block(observed: &[CanonicalRequest]) -> String {
+    // Distinct (method, host, templated-path), each carrying the union of the
+    // query/header NAMES seen across the observations that map to it.
+    type CallKey = (String, String, String);
+    type SeenNames = (BTreeSet<String>, BTreeSet<String>);
+    let mut entries: std::collections::BTreeMap<CallKey, SeenNames> =
+        std::collections::BTreeMap::new();
+    for req in observed {
+        let path = templatize_path(&req.segments);
+        let key = (req.method.clone(), req.host.clone(), path);
+        let slot = entries.entry(key).or_default();
+        slot.0.extend(req.query_names.iter().cloned());
+        slot.1.extend(req.header_names.iter().cloned());
+    }
+    let mut out = String::new();
+    for ((method, host, path), (queries, headers)) in entries {
+        out.push_str("[[calls]]\n");
+        out.push_str(&format!("method = {method:?}\n"));
+        out.push_str(&format!("host   = {host:?}\n"));
+        out.push_str(&format!("path   = {path:?}\n"));
+        if !queries.is_empty() {
+            let names: Vec<String> = queries.iter().map(|q| format!("{q:?}")).collect();
+            out.push_str(&format!(
+                "query  = {{ required = [{}] }}\n",
+                names.join(", ")
+            ));
+        }
+        if !headers.is_empty() {
+            let names: Vec<String> = headers.iter().map(|h| format!("{h:?}")).collect();
+            out.push_str(&format!(
+                "headers = {{ required = [{}] }}\n",
+                names.join(", ")
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The in-Rust authoring helper (fine-grained-egress §5.2): build a declared
+/// call next to the code that makes the fetch, so the fetch and its capability
+/// can't drift. `Call::get("api.x.com", "/v1/items/{id}").query_required(["q"])`
+/// builds the canonical [`CallSpec`] (no inject — the credential is the
+/// operator's), and [`Call::to_toml`] renders the paste-ready `[[calls]]`
+/// entry. A component carries these out via `describe()` (EC5), where the host
+/// intersects them with the operator spec.
+#[derive(Debug, Clone)]
+pub struct Call {
+    method: MethodMatch,
+    host: String,
+    path: PathPattern,
+    query: QueryConstraint,
+    headers: HeaderConstraint,
+    body: Option<BodyMatch>,
+    max_body_bytes: Option<usize>,
+}
+
+impl Call {
+    fn new(method: MethodMatch, host: &str, path: &str) -> Self {
+        Self {
+            method,
+            host: host.trim().trim_end_matches('.').to_ascii_lowercase(),
+            path: PathPattern::parse(path).unwrap_or(PathPattern::Subtree),
+            query: QueryConstraint::default(),
+            headers: HeaderConstraint::default(),
+            body: None,
+            max_body_bytes: None,
+        }
+    }
+
+    pub fn get(host: &str, path: &str) -> Self {
+        Self::new(MethodMatch::Exact("GET".into()), host, path)
+    }
+    pub fn post(host: &str, path: &str) -> Self {
+        Self::new(MethodMatch::Exact("POST".into()), host, path)
+    }
+    pub fn method(method: &str, host: &str, path: &str) -> Self {
+        let m = match method.trim() {
+            "*" | "" => MethodMatch::Any,
+            other => MethodMatch::Exact(other.to_ascii_uppercase()),
+        };
+        Self::new(m, host, path)
+    }
+
+    pub fn query_required<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.query
+            .required
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+    pub fn query_forbidden<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.query
+            .forbidden
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+    pub fn header_required<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.headers
+            .required
+            .extend(names.into_iter().map(|n| n.into().to_ascii_lowercase()));
+        self
+    }
+    pub fn json_method<I, S>(mut self, methods: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.body = Some(BodyMatch {
+            pointer: "/method".into(),
+            allowed: methods.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+    pub fn max_body_bytes(mut self, max: usize) -> Self {
+        self.max_body_bytes = Some(max);
+        self
+    }
+
+    /// The canonical [`CallSpec`] this authoring call denotes (no inject).
+    pub fn to_spec(&self) -> CallSpec {
+        CallSpec {
+            method: self.method.clone(),
+            host: self.host.clone(),
+            path: self.path.clone(),
+            query: self.query.clone(),
+            headers: self.headers.clone(),
+            max_body_bytes: self.max_body_bytes,
+            body: self.body.clone(),
+            inject: None,
+            inject_kind: None,
+        }
+    }
+
+    /// Render this call as a paste-ready `[[calls]]` TOML entry.
+    pub fn to_toml(&self) -> String {
+        let mut out = String::from("[[calls]]\n");
+        out.push_str(&format!("method = {:?}\n", self.method_str()));
+        out.push_str(&format!("host   = {:?}\n", self.host));
+        out.push_str(&format!("path   = {:?}\n", self.path.render()));
+        if !self.query.required.is_empty() || !self.query.forbidden.is_empty() {
+            out.push_str("query  = {");
+            if !self.query.required.is_empty() {
+                let r: Vec<String> = self
+                    .query
+                    .required
+                    .iter()
+                    .map(|q| format!("{q:?}"))
+                    .collect();
+                out.push_str(&format!(" required = [{}]", r.join(", ")));
+            }
+            out.push_str(" }\n");
+        }
+        out
+    }
+
+    fn method_str(&self) -> &str {
+        match &self.method {
+            MethodMatch::Exact(m) => m,
+            MethodMatch::Any => "*",
+        }
+    }
+}
+
 /// Whether a path segment looks like an opaque identifier (parameterized to
 /// `{id}` by the generator): all-digits, or a canonical 8-4-4-4-12 UUID.
 fn is_identifier_segment(seg: &str) -> bool {
@@ -869,6 +1054,128 @@ mod callspec {
         assert!(!c.matches(&r, br#"{"method":"resources/read"}"#));
         // non-JSON body → deny (no match), never a parse panic.
         assert!(!c.matches(&r, b"garbage"));
+    }
+
+    // ── EC6: observe-mode generator + the Call authoring helper. The nested
+    //    module name carries `observe_generate` so the build plan's filter
+    //    `cargo test -p tangram-host observe_generate` selects it. ────────────
+    mod observe_generate {
+        use super::*;
+        use crate::config::HostConfig;
+
+        /// The hosts the generated block grants must be in allow_hosts (the
+        /// fence composes); wrap the generated `[[calls]]` in a minimal app so
+        /// `HostConfig::parse` accepts and lowers it the real way.
+        fn reparse(block: &str, hosts: &[&str]) -> Vec<CallSpec> {
+            let allow = hosts
+                .iter()
+                .map(|h| format!("{h:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // The generator emits bare `[[calls]]` (what an operator pastes
+            // UNDER an `[apps.<app>]` table); to parse it standalone here we
+            // namespace it to the app table.
+            let block = block.replace("[[calls]]", "[[apps.gen.calls]]");
+            let toml = format!(
+                "[apps.gen]\ncomponent = \"g.wasm\"\nui = \"ui\"\n\
+                 allow_hosts = [{allow}]\nenforcement = \"enforce\"\n\n{block}"
+            );
+            HostConfig::parse(&toml)
+                .expect("generated block must parse")
+                .apps["gen"]
+                .resolved_calls()
+        }
+
+        #[test]
+        fn generated_block_round_trips_to_the_observed_calls() {
+            // Observe three fetches: a templatable id path, a query, a repeat.
+            let observed = vec![
+                req("GET", "https://api.x.com/v1/items/42?q=a"),
+                req("GET", "https://api.x.com/v1/items/99?q=b"), // same shape → one entry
+                req("POST", "https://api.x.com/v1/orders"),
+            ];
+            let block = generate_calls_block(&observed);
+            // Numeric segment was parameterized to {id}.
+            assert!(block.contains("/v1/items/{id}"), "block:\n{block}");
+            assert!(block.contains(r#"method = "GET""#));
+            assert!(block.contains(r#"method = "POST""#));
+            assert!(block.contains(r#"required = ["q"]"#));
+
+            // Re-parse: exactly two distinct calls (the two GETs collapsed).
+            let calls = reparse(&block, &["api.x.com"]);
+            assert_eq!(
+                calls.len(),
+                2,
+                "the two same-shape GETs collapse to one entry"
+            );
+
+            // Every observed request matches some re-parsed call (round-trip:
+            // re-parsing accepts exactly the observed calls).
+            for obs in &observed {
+                assert!(
+                    calls.iter().any(|c| c.matches(obs, b"")),
+                    "observed {} {}{} not accepted by the generated block:\n{block}",
+                    obs.method,
+                    obs.host,
+                    obs.path
+                );
+            }
+            // And an UNobserved call (different path) is NOT accepted.
+            let other = req("DELETE", "https://api.x.com/v1/items/1");
+            assert!(!calls.iter().any(|c| c.matches(&other, b"")));
+        }
+
+        #[test]
+        fn uuid_segments_are_parameterized() {
+            let observed = vec![req(
+                "GET",
+                "https://api.x.com/v1/users/550e8400-e29b-41d4-a716-446655440000/profile",
+            )];
+            let block = generate_calls_block(&observed);
+            assert!(block.contains("/v1/users/{id}/profile"), "block:\n{block}");
+            let calls = reparse(&block, &["api.x.com"]);
+            // A DIFFERENT uuid in the same shape is still accepted (generalized).
+            let other = req(
+                "GET",
+                "https://api.x.com/v1/users/00000000-0000-0000-0000-000000000001/profile",
+            );
+            assert!(calls.iter().any(|c| c.matches(&other, b"")));
+        }
+
+        #[test]
+        fn call_authoring_helper_builds_the_same_spec() {
+            // The Call helper (§5.2): write the capability next to the fetch.
+            let spec = Call::get("API.X.com", "/v1/nutrition")
+                .query_required(["query"])
+                .to_spec();
+            assert_eq!(spec.host, "api.x.com", "host canonicalized");
+            assert_eq!(spec.method, MethodMatch::Exact("GET".into()));
+            assert_eq!(spec.query.required, vec!["query".to_string()]);
+            assert!(
+                spec.inject.is_none(),
+                "authoring declares reach, never a credential"
+            );
+            // It matches the fetch it describes.
+            let r = req("GET", "https://api.x.com/v1/nutrition?query=chicken");
+            assert!(spec.matches(&r, b""));
+            // The rendered TOML re-parses to an equivalent spec.
+            let calls = reparse(
+                &Call::get("api.x.com", "/v1/nutrition").to_toml(),
+                &["api.x.com"],
+            );
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].matches(&r, b""));
+        }
+
+        #[test]
+        fn json_method_authoring_helper() {
+            let spec = Call::post("api.x.com", "/rpc")
+                .json_method(["tools/list", "tools/call"])
+                .to_spec();
+            let r = req("POST", "https://api.x.com/rpc");
+            assert!(spec.matches(&r, br#"{"method":"tools/list"}"#));
+            assert!(!spec.matches(&r, br#"{"method":"resources/read"}"#));
+        }
     }
 
     #[test]
