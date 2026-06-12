@@ -20,6 +20,12 @@ jobs:
           # lifecycle tests build and run the WASM components.
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
+      # cargo-nextest: better cross-binary parallelism, per-test timing, and
+      # the workspace `.config/nextest.toml` (which caps the host-spawning
+      # integration tests into a `host-integration` group so they don't
+      # oversubscribe the runner and flake). taiki-e's action fetches a
+      # prebuilt binary — no compile cost.
+      - uses: taiki-e/install-action@nextest
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       # bash -n takes one script per invocation (a second path would just
@@ -48,12 +54,34 @@ jobs:
           cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry
           -p tangram-marketplace -p tangram-app-tangram --lib
           --target wasm32-wasip2 --release
-      - run: cargo test
+      # nextest with the `ci` profile: the host-integration group is capped
+      # (see .config/nextest.toml), flaky-prone tests retry (reported FLAKY,
+      # not silently green), and the run collects every failure instead of
+      # cancelling on the first.
+      - run: cargo nextest run --profile ci
+      # nextest does not run doctests; keep covering them.
+      - run: cargo test --doc
       # tangram-core is the portable half of the SDK (RUNTIME_PLAN Phase 1):
       # it must keep building without tokio/hyper/axum/reqwest/rmcp for
       # non-native hosts (WASI components, Cloudflare, browsers).
       - run: cargo build -p tangram-core --target wasm32-wasip2
       - run: cargo build --release
+
+  # Fast-fail unit lane: the lib/bin unit tests + the cheap integration tests
+  # (rmcp parity, SDK mcp), EXCLUDING the tangram-host integration tests that
+  # spawn real host subprocesses. No wasm-component build needed. Locally this
+  # set runs in ~10s of test execution vs minutes for the full suite, so it is
+  # the "did I break anything" signal — and in CI it fails within ~1-2 min on
+  # an obvious break, well before the slow `check` job finishes the host
+  # lifecycle tests. (Same exclusion the dev box uses for its inner loop.)
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run -E 'not (package(tangram-host) and kind(test))'
 
   # The shell frontend (ADR-0007): the `tangram` app is the ONE app with a
   # build pipeline — npm + Vite producing a `dist/` the host serves as its
