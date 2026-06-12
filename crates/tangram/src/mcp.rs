@@ -39,7 +39,7 @@ struct McpState<M> {
 }
 
 /// The `/mcp` route: the portable MCP server over this app's action registry.
-pub(crate) fn router<M: Model + Actions>(
+pub(super) fn router<M: Model + Actions>(
     store: Arc<Store<M>>,
     name: String,
     instructions: Option<String>,

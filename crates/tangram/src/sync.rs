@@ -25,11 +25,13 @@ use crate::Model;
 use crate::action::Actions;
 use crate::store::Store;
 
-/// The document surface the sync protocol runs over. The SDK's typed
-/// [`Store`] implements it, and so does `tangram-host`'s untyped per-app
-/// document — both sides of the protocol (server [`handle_post`] and client
-/// [`run_remote`]) are generic over this seam, so one implementation serves
-/// native apps and host-managed WASM components identically.
+/// The document surface the sync protocol runs over.
+///
+/// The SDK's typed [`Store`] implements it, and so does `tangram-host`'s
+/// untyped per-app document — both sides of the protocol (server
+/// [`handle_post`] and client [`run_remote`]) are generic over this seam, so
+/// one implementation serves native apps and host-managed WASM components
+/// identically.
 ///
 /// Contract: `receive_sync` persists the document itself when it changed;
 /// `bump` wakes every subscriber (UIs, poke streams, peers) and is the
@@ -52,20 +54,20 @@ pub trait DocHandle: Send + Sync + 'static {
 
 impl<M: Model + Actions> DocHandle for Store<M> {
     fn generate_sync(&self, state: &mut automerge::sync::State) -> Option<Vec<u8>> {
-        Store::generate_sync(self, state)
+        Self::generate_sync(self, state)
     }
     fn receive_sync(
         &self,
         state: &mut automerge::sync::State,
         bytes: &[u8],
     ) -> anyhow::Result<bool> {
-        Store::receive_sync(self, state, bytes)
+        Self::receive_sync(self, state, bytes)
     }
     fn bump(&self) {
-        Store::bump(self);
+        Self::bump(self);
     }
     fn subscribe(&self) -> watch::Receiver<u64> {
-        Store::subscribe(self)
+        Self::subscribe(self)
     }
 }
 

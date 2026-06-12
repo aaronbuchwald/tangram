@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use crate::action::{ActionDef, ActionError, Actions};
 use crate::{Ctx, Model};
 
-pub(crate) struct Store<M> {
+pub(super) struct Store<M> {
     core: Arc<tangram_core::Store<M>>,
     version: watch::Sender<u64>,
 }

@@ -46,7 +46,7 @@ impl<M> FromRef<AppState<M>> for Arc<Store<M>> {
     }
 }
 
-pub(crate) fn router<M: Model + Actions>(store: Arc<Store<M>>, ui_dir: PathBuf) -> Router {
+pub(super) fn router<M: Model + Actions>(store: Arc<Store<M>>, ui_dir: PathBuf) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/state", get(state::<M>))

@@ -59,12 +59,14 @@ impl<M: Model + Actions> App<M> {
     /// environment variable, when set, overrides this value at build time —
     /// apps typically pin an absolute compile-time path here, which doesn't
     /// exist inside a container image.
+    #[must_use]
     pub fn ui_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.ui_dir = dir.into();
         self
     }
 
     /// Instructions handed to MCP clients connecting to this app.
+    #[must_use]
     pub fn instructions(mut self, text: impl Into<String>) -> Self {
         self.instructions = Some(text.into());
         self
@@ -73,6 +75,7 @@ impl<M: Model + Actions> App<M> {
     /// `http://host:port/sync` of a peer instance to replicate with. Takes
     /// precedence over `TANGRAM_REMOTE_<NAME>` (and, in single-app mode,
     /// `TANGRAM_REMOTE`).
+    #[must_use]
     pub fn remote(mut self, url: impl Into<String>) -> Self {
         self.remote = Some(url.into());
         self
