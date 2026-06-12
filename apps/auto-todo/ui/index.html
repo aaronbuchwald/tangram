@@ -89,21 +89,50 @@
       function planCard(item) {
         if (!item.plan) return "";
         const p = item.plan;
+        const approved = item.phase === "APPROVED" || item.phase === "BLOCKED_HUMAN";
+        const confirmed = new Set((item.confirmed_steps || []).map(Number));
         const steps = (p.steps || [])
-          .map(
-            (s, i) =>
-              `<li>${badge(s.kind)} ${escapeHtml(s.summary)}${
-                s.requires_confirm ? ' <em style="color:#ff9f6f">(needs confirm)</em>' : ""
-              }</li>`
+          .map((s, i) => {
+            let tail = "";
+            if (s.requires_confirm) {
+              // The per-step confirm checkpoint (§7.2): a real-time gate the
+              // human must clear before execute() will run an irreversible /
+              // credential-using step. Only actionable on an APPROVED item.
+              if (confirmed.has(i)) {
+                tail = ' <em style="color:#8ce28c">✓ confirmed</em>';
+              } else if (approved) {
+                tail = ` <button data-id="${item.id}" data-fn="confirm" data-step="${i}" style="padding:1px 7px">Confirm</button>`;
+              } else {
+                tail = ' <em style="color:#ff9f6f">(needs confirm)</em>';
+              }
+            }
+            return `<li>${badge(s.kind)} ${escapeHtml(s.summary)}${tail}</li>`;
+          })
+          .join("");
+        // On a PLAN_PROPOSED item the grants are strike-able checkboxes →
+        // approve with a NARROWED set (§7.2).
+        const proposing = item.phase === "PLAN_PROPOSED";
+        const grants = (p.requested_grants || [])
+          .map((g) =>
+            proposing
+              ? `<li><label><input type="checkbox" class="grant" data-id="${item.id}" value="${escapeHtml(
+                  g
+                )}" checked /> ${escapeHtml(g)}</label></li>`
+              : `<li>${escapeHtml(g)}</li>`
           )
           .join("");
-        const grants = (p.requested_grants || []).map((g) => `<li>${escapeHtml(g)}</li>`).join("");
         const assist = (p.human_assist || []).map((g) => `<li>${escapeHtml(g)}</li>`).join("");
+        const granted = item.approval
+          ? `<div class="meta">approved by ${escapeHtml(item.approval.principal)} · granted: ${
+              (item.approval.granted || []).map(escapeHtml).join(", ") || "(none)"
+            }</div>`
+          : "";
         return `<div class="card">
           <div class="meta">Plan (hash <code>${p.plan_hash.slice(0, 12)}…</code>) · reversibility: ${p.reversibility}</div>
-          <strong>Steps</strong><ul>${steps || "<li>(none)</li>"}</ul>
-          ${grants ? `<strong>Requested grants</strong><ul>${grants}</ul>` : ""}
-          ${assist ? `<strong>Where I'll need you</strong><ul>${assist}</ul>` : ""}
+          <strong>Here's my plan</strong><ul>${steps || "<li>(none)</li>"}</ul>
+          ${grants ? `<strong>Here's what I need access to</strong><ul>${grants}</ul>` : ""}
+          ${assist ? `<strong>Here's where I'll need you</strong><ul>${assist}</ul>` : ""}
+          ${granted}
         </div>`;
       }
 
@@ -138,14 +167,16 @@
             out = b("Plan", "plan");
             break;
           case "PLAN_PROPOSED":
-            out = b("Approve", "approve") + b("Request changes", "request_changes") + b("Reject", "reject");
+            out =
+              b("Approve", "approve") +
+              b("Approve (narrowed)", "approve_narrowed") +
+              b("Request changes", "request_changes") +
+              b("Reject", "reject");
             break;
           case "APPROVED":
-            out =
-              b("Confirm step 0", "confirm0") +
-              b("Execute (no-op)", "execute") +
-              b("Block (2FA)", "block") +
-              b("Reject", "reject");
+            // Per-step Confirm buttons live inline in the plan card; here are
+            // the item-level controls. execute() is the safe-tier no-op.
+            out = b("Execute (no-op)", "execute") + b("Block (2FA)", "block") + b("Reject", "reject");
             break;
           case "BLOCKED_HUMAN":
             out = b("Resume", "resume") + b("Reject", "reject");
@@ -163,14 +194,26 @@
           const item = await call("get_item", { id });
           const principal = prompt("Approve as (principal)?", "operator");
           if (!principal) return;
+          // Bind to the EXACT plan hash shown; the host re-validates and the
+          // action refuses a stale hash.
           return call("approve", { id, plan_hash: item.plan.plan_hash, principal });
+        },
+        approve_narrowed: async (id) => {
+          const item = await call("get_item", { id });
+          const principal = prompt("Approve as (principal)?", "operator");
+          if (!principal) return;
+          // Collect only the grants still checked → a NARROWED subset (§7.2).
+          const granted = Array.from(
+            document.querySelectorAll(`input.grant[data-id="${CSS.escape(id)}"]:checked`)
+          ).map((el) => el.value);
+          return call("approve", { id, plan_hash: item.plan.plan_hash, principal, granted });
         },
         request_changes: (id) => {
           const note = prompt("What should change?", "") || "";
           return call("request_changes", { id, note });
         },
         reject: (id) => call("reject", { id, reason: prompt("Reason?", "") || "" }),
-        confirm0: (id) => call("confirm", { id, step_index: 0 }),
+        confirm: (id, step) => call("confirm", { id, step_index: Number(step) }),
         execute: (id) => call("execute", { id }),
         block: (id) => call("block", { id, reason: "waiting on a human (2FA/CAPTCHA)" }),
         resume: (id) => call("resume", { id }),
@@ -190,7 +233,15 @@
                 <span class="phase ${item.phase}">${item.phase}</span>
                 <h3 style="flex:1">${escapeHtml(item.text)}</h3>
               </div>
-              ${item.note ? `<div class="meta">note: ${escapeHtml(item.note)}</div>` : ""}
+              ${
+                item.phase === "BLOCKED_HUMAN"
+                  ? `<div class="meta" style="color:#ff9f6f;font-weight:600">⚠ needs you now: ${escapeHtml(
+                      item.note || "blocked awaiting a human"
+                    )}</div>`
+                  : item.note
+                  ? `<div class="meta">note: ${escapeHtml(item.note)}</div>`
+                  : ""
+              }
               ${item.result ? `<div class="meta">result: ${escapeHtml(item.result)}</div>` : ""}
               ${reqCard(item)}
               ${planCard(item)}
@@ -202,7 +253,7 @@
           btn.addEventListener("click", async () => {
             showErr(null);
             try {
-              await dispatch[btn.dataset.fn](btn.dataset.id);
+              await dispatch[btn.dataset.fn](btn.dataset.id, btn.dataset.step);
               await refresh();
             } catch (e) {
               showErr(e);

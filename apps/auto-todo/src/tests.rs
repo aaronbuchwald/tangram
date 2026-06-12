@@ -355,3 +355,56 @@ fn readonly_tool_steps_need_no_confirm() {
         "read-only tool steps are frictionless (no per-step confirm)"
     );
 }
+
+#[test]
+fn approval_records_a_struck_grant_subset() {
+    let mut app = AutoTodo::default();
+    // An item that produces a requested grant we can then strike.
+    let id = to_plan_proposed(&mut app, "what's on my calendar Tuesday");
+    let plan = app.get_item(id.clone()).unwrap().plan.unwrap();
+    assert!(
+        !plan.requested_grants.is_empty(),
+        "expected at least one requested grant to strike"
+    );
+    // Approve with a one-grant subset (keep the first, strike the rest).
+    let kept = vec![plan.requested_grants[0].clone()];
+    app.approve(
+        id.clone(),
+        plan.plan_hash.clone(),
+        WHO.into(),
+        Some(kept.clone()),
+    )
+    .unwrap();
+    let granted = app.get_item(id).unwrap().approval.unwrap().granted;
+    assert_eq!(granted, kept, "only the kept grant is recorded as granted");
+}
+
+#[test]
+fn confirm_requires_current_approval_after_replan() {
+    let mut app = AutoTodo::default();
+    let id = to_plan_proposed(&mut app, "renew my domain");
+    let plan = app.get_item(id.clone()).unwrap().plan.unwrap();
+    let confirm_idx = plan
+        .steps
+        .iter()
+        .position(|s| s.requires_confirm)
+        .expect("a confirm-gated step") as i64;
+    app.approve(id.clone(), plan.plan_hash, WHO.into(), None)
+        .unwrap();
+    // A confirm works while the approval binds the current plan.
+    app.confirm(id.clone(), confirm_idx).unwrap();
+    // request_changes re-opens; after re-plan there is no current approval, so
+    // execute is refused even if a prior confirm existed.
+    app.request_changes(id.clone(), "tighten".into()).unwrap();
+    app.classify(id.clone()).unwrap();
+    app.plan(id.clone()).unwrap();
+    assert_eq!(app.get_item(id.clone()).unwrap().phase, "PLAN_PROPOSED");
+    assert!(
+        app.confirm(id.clone(), confirm_idx).is_err(),
+        "cannot confirm a re-planned item that is not yet re-approved"
+    );
+    assert!(
+        app.execute(id).is_err(),
+        "cannot execute without re-approval"
+    );
+}
