@@ -37,7 +37,13 @@ app is, by definition:
 2. configured **only** via environment variables (WASI supports env);
 3. state confined to **one data directory** (`TANGRAM_DATA_DIR`) of plain
    files (WASI preopened dirs support this);
-4. outbound network limited to declared needs (sync remotes, strategy APIs).
+4. outbound network limited to declared needs (sync remotes, strategy APIs) —
+   at the **call grain** (method + host + path + request-shape), not just the
+   host: an app declares the exact calls it makes and the host injects the
+   credential onto the matched call only, denying undeclared calls on an
+   allowlisted host (ADR-0008; fine-grained-egress §4). A host-keyed
+   `allow_hosts`/`inject` (the original grain) is the maximally-broad call, so
+   existing apps are unchanged.
 
 Anything that satisfies the contract is schedulable — a host binary (dev), an
 OCI image under runsc (this plan), or a `wasm32-wasip2` component under
@@ -619,6 +625,26 @@ hosted use of the remote, and OAuth-connected local instances.
   (`tests/egress_injection.rs`, self-skips without components / live key)
   proving capabilities gating, env isolation, and that the host-injected
   request authenticates while a sibling app with no rule cannot.
+- [ ] **Phase 10c — fine-grained egress (call-level capabilities)** — section 1
+  delivered on a review branch (ADR-0008; design + build plan
+  [docs/design/fine-grained-egress.md](design/fine-grained-egress.md)). The
+  egress grant moves from `(host)` to the **declared call**
+  `(method, host, path-pattern, request-shape)`, with the credential bound to
+  the matched call — closing the same-host different-call exfil class ADR-0005
+  left open. No WIT change; all enforcement host-side in
+  `HostState::http_fetch`. A single canonicalization seam
+  (`egress::CanonicalRequest`, the SOCKS5 parser-differential discipline)
+  shared with the manifest verifier (manifest-verification-plan §2.6). Small
+  regex-free grammar (`egress::CallSpec`): method + path template/subtree +
+  name-level query/header constraints + the constrained JSON-RPC-method body
+  rung. Three modes (`observe`/`warn`/`enforce`), migration defaults (warn for
+  legacy, enforce for apps declaring ≥1 call). `[[apps.<app>.calls]]` in
+  apps.toml; `describe()`-carried declarations intersected with the operator
+  spec (a request, never authority); observe-mode `[[calls]]` generator +
+  `Call` authoring helper. Strictly additive — a host-keyed `allow_hosts`/
+  `inject` desugars to the maximally-broad call, so the live fleet is
+  byte-identical. **Held for review, not merged**; the general policy engine
+  (§9.2) is deferred to a separate branch.
 - [x] **Phase S1 — tangram shell (foundational slice)** — delivered 2026-06-11.
   A new first-party app `tangram` (crate `tangram-app-tangram`, on-host name
   `tangram`): the Obsidian-style shell. Design:

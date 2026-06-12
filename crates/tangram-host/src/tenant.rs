@@ -119,6 +119,23 @@ pub fn effective_spec(
             );
         }
         effective.allow_hosts = kept;
+        // Call-level grants (fine-grained-egress) intersect with the ceiling
+        // the same way hosts do: a declared call whose host falls outside the
+        // ceiling is dropped, so a tenant cannot reach past it via a call
+        // either. Host comparison is case-insensitive (the ceiling holds raw
+        // host strings; a call host may differ only in case).
+        let (kept_calls, dropped_calls): (Vec<_>, Vec<_>) = effective
+            .calls
+            .drain(..)
+            .partition(|call| ceiling.iter().any(|c| c.eq_ignore_ascii_case(&call.host)));
+        if !dropped_calls.is_empty() {
+            let hosts: Vec<&str> = dropped_calls.iter().map(|c| c.host.as_str()).collect();
+            tracing::warn!(
+                "t/{tenant}/{app}: [[calls]] for hosts {hosts:?} outside the tenant ceiling — \
+                 dropped (effective grant is the intersection)"
+            );
+        }
+        effective.calls = kept_calls;
     }
 
     if source == Source::Registry {
@@ -199,6 +216,9 @@ mod tests {
             .into_iter()
             .collect(),
             inject: std::collections::BTreeMap::new(),
+            calls: Vec::new(),
+            enforcement: None,
+            policy: None,
             remote: None,
             remote_token: None,
             registry: false,

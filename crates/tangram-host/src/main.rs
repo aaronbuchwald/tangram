@@ -26,9 +26,11 @@ mod app;
 mod auth;
 mod config;
 mod doc;
+mod egress;
 mod fetch;
 mod gateway;
 mod mcp;
+mod policy;
 mod registry;
 mod routes;
 mod runtime;
@@ -146,6 +148,9 @@ fn tenant_bootstrap(
         allow_hosts: Vec::new(),
         env: BTreeMap::new(),
         inject: BTreeMap::new(),
+        calls: Vec::new(),
+        enforcement: None,
+        policy: None,
         remote: None,
         remote_token: None,
         registry: true,

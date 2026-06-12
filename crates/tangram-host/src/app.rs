@@ -28,6 +28,85 @@ pub struct Describe {
     /// capabilities and the route 404s, like a native app without the probe.
     #[serde(default)]
     pub capabilities: Option<Value>,
+    /// Optional call-level egress DECLARATION (fine-grained-egress §6, EC5):
+    /// the calls the component says it makes, carried out via `describe()`.
+    /// ADDITIVE (`#[serde(default)]`) — an older component omits it. This is a
+    /// REQUEST, never authority: the host INTERSECTS it with the operator
+    /// spec's calls (a component declaring more than its spec is narrowed to
+    /// the spec). Declared calls name reach only — never a credential (the
+    /// inject always comes from the operator spec).
+    #[serde(default)]
+    pub calls: Vec<DescribeCall>,
+}
+
+/// One component-declared call in `describe()` (EC5). The same small grammar as
+/// a `[[calls]]` entry MINUS `inject` (a component cannot grant itself a
+/// credential — fine-grained-egress §6) and minus `enforcement`. Unknown fields
+/// are tolerated (a newer component may add fields an older host ignores).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DescribeCall {
+    #[serde(default = "describe_method_any")]
+    pub method: String,
+    pub host: String,
+    #[serde(default = "describe_path_subtree")]
+    pub path: String,
+    #[serde(default)]
+    pub query: crate::config::NameConstraintToml,
+    #[serde(default)]
+    pub headers: crate::config::NameConstraintToml,
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
+    #[serde(default)]
+    pub body: Option<crate::config::BodyMatchToml>,
+}
+
+fn describe_method_any() -> String {
+    "*".to_string()
+}
+
+fn describe_path_subtree() -> String {
+    "/**".to_string()
+}
+
+impl DescribeCall {
+    /// Lower a component-declared call into an `egress::CallSpec` (no inject).
+    /// A malformed declaration is dropped (it can only narrow, so a bad entry
+    /// fails safe by simply not covering anything).
+    fn resolve(&self) -> Option<crate::egress::CallSpec> {
+        let toml = crate::config::CallSpecToml {
+            method: self.method.clone(),
+            host: self.host.clone(),
+            path: self.path.clone(),
+            query: self.query.clone(),
+            headers: self.headers.clone(),
+            max_body_bytes: self.max_body_bytes,
+            body: self.body.clone(),
+            inject: None,
+        };
+        match toml.resolve() {
+            Ok(spec) => Some(spec),
+            Err(e) => {
+                tracing::warn!(
+                    "ignoring describe()-declared call for host {:?}: {e:#}",
+                    self.host
+                );
+                None
+            }
+        }
+    }
+}
+
+/// Intersect the operator's effective calls with the component's `describe()`-
+/// declared calls (EC5). A REQUEST that can only narrow: the result is the
+/// operator calls covered by some declared call; an empty declaration leaves
+/// the operator calls unchanged. Shared by `build` and its tests.
+pub fn intersect_describe_calls(
+    operator: Vec<crate::egress::CallSpec>,
+    declared: &[DescribeCall],
+) -> Vec<crate::egress::CallSpec> {
+    let declared: Vec<crate::egress::CallSpec> =
+        declared.iter().filter_map(DescribeCall::resolve).collect();
+    crate::egress::intersect_with_declared(operator, &declared)
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -176,14 +255,38 @@ impl AppRuntime {
     ) -> anyhow::Result<Self> {
         let component_mtime = component_mtime(component_path);
         let env = spec.resolved_env(secrets, name).await;
-        let inject = spec.resolved_inject();
+        // The effective call-level egress capabilities (fine-grained-egress):
+        // either the app's declared `[[calls]]` or the host-keyed compat shim
+        // (byte-identical for legacy apps). The enforcement posture decides the
+        // disposition of an undeclared call.
+        let operator_calls = spec.resolved_calls();
+        let enforcement = spec.effective_enforcement();
+        // The OPT-IN egress policy engine (§9.2 / ADR-0009 — the escape hatch,
+        // None for almost all apps). validate_policy already rejected a
+        // malformed/over-budget policy at config load; resolving here FAILS the
+        // app build on a policy that won't lower, so a surfaced policy is never
+        // silently dropped. When present it is surfaced loudly ("uses custom
+        // policy") and runs as an additional narrowing gate in `http_fetch`.
+        let policy = spec
+            .resolved_policy()
+            .with_context(|| format!("resolving app {name:?}'s egress policy"))?;
+        if let Some(p) = &policy {
+            tracing::info!(
+                app = %name,
+                "egress: app uses a CUSTOM POLICY (§9.2 escape hatch) with {} rule(s) — \
+                 the declarative call grammar remains the first gate; the policy can only narrow",
+                p.rule_count()
+            );
+        }
         let component = ComponentHandle::instantiate(
             engine,
             component_path,
             name,
             &spec.allow_hosts,
             &env,
-            inject,
+            operator_calls.clone(),
+            enforcement,
+            policy,
             secrets.clone(),
         )
         .await
@@ -191,6 +294,25 @@ impl AppRuntime {
 
         let mut describe: Describe = serde_json::from_str(&component.describe().await?)
             .context("parsing the component's describe() manifest")?;
+
+        // EC5: the component's describe()-DECLARED calls are a REQUEST, not a
+        // grant (fine-grained-egress §6). Intersect them with the operator
+        // spec's calls — the result can only NARROW (a component declaring more
+        // than its spec is narrowed to the spec; an empty declaration leaves
+        // the spec unchanged). The narrowed set replaces the enforced list on
+        // the live instance, once, before any dispatch. The credential always
+        // stays on the operator call (a declared call names reach only).
+        if !describe.calls.is_empty() {
+            let narrowed = intersect_describe_calls(operator_calls, &describe.calls);
+            let dropped = narrowed.len();
+            tracing::debug!(
+                app = %name,
+                "describe()-declared {} call(s); enforced set narrowed to {} operator call(s)",
+                describe.calls.len(),
+                dropped
+            );
+            component.set_calls(narrowed).await;
+        }
 
         // ADR-0005: when the app declares egress injection, the capabilities
         // probe's "configured" signal is derived HOST-side from whether an
@@ -200,7 +322,7 @@ impl AppRuntime {
         // reports `description_input: false` and stays offline/degraded
         // cleanly. Apps with no injection rules are left exactly as the
         // component reported (env-injected/native parity preserved).
-        if !spec.inject.is_empty() {
+        if spec.has_any_inject() {
             let configured = spec.any_inject_resolves(secrets, name).await;
             if let Some(caps) = describe.capabilities.as_mut()
                 && let Some(di) = caps.get_mut("description_input")
@@ -301,5 +423,132 @@ impl AppRuntime {
                 serde_json::json!({ "error": format!("state-json failed: {e:#}") }).to_string()
             }
         }
+    }
+}
+
+// The test module name carries `describe_calls` so the build plan's filter
+// `cargo test -p tangram-host describe_calls` selects exactly the EC5 suite.
+#[cfg(test)]
+mod describe_calls {
+    use super::*;
+    use crate::config::CallSpecToml;
+    use crate::egress::{MethodMatch, PathPattern};
+
+    /// Build an operator CallSpec via the config lowering (the real path).
+    fn op(method: &str, host: &str, path: &str) -> crate::egress::CallSpec {
+        CallSpecToml {
+            method: method.into(),
+            host: host.into(),
+            path: path.into(),
+            query: Default::default(),
+            headers: Default::default(),
+            max_body_bytes: None,
+            body: None,
+            // The operator call carries the credential; the describe channel
+            // never does. A header inject so we can assert it survives.
+            inject: Some(crate::config::InjectRule {
+                header: Some("X-Api-Key".into()),
+                bearer: false,
+                query: None,
+                secret: "env://K".into(),
+            }),
+        }
+        .resolve()
+        .unwrap()
+    }
+
+    fn declared(method: &str, host: &str, path: &str) -> DescribeCall {
+        DescribeCall {
+            method: method.into(),
+            host: host.into(),
+            path: path.into(),
+            query: Default::default(),
+            headers: Default::default(),
+            max_body_bytes: None,
+            body: None,
+        }
+    }
+
+    #[test]
+    fn empty_declaration_leaves_the_operator_spec_unchanged() {
+        // No declaration to intersect with ⇒ the operator spec is authority.
+        let operator = vec![op("GET", "api.vendor.com", "/v1/me")];
+        let out = intersect_describe_calls(operator.clone(), &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].host, "api.vendor.com");
+        // The operator credential is preserved.
+        assert!(out[0].inject.is_some());
+    }
+
+    #[test]
+    fn declaring_a_subset_narrows_the_spec() {
+        // Operator grants two calls; component declares only one ⇒ enforced set
+        // narrows to the declared one. Declaring FEWER narrows the spec.
+        let operator = vec![
+            op("GET", "api.vendor.com", "/v1/me"),
+            op("POST", "api.vendor.com", "/v1/me"),
+        ];
+        let out =
+            intersect_describe_calls(operator, &[declared("GET", "api.vendor.com", "/v1/me")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].method, MethodMatch::Exact("GET".into()));
+        // The surviving call still carries the operator's credential.
+        assert!(out[0].inject.is_some());
+    }
+
+    #[test]
+    fn declaring_more_than_the_spec_is_narrowed_to_the_spec() {
+        // Component declares calls the operator never granted ⇒ they do NOT
+        // appear (the declaration is a request, not a grant). The result is
+        // bounded above by the operator spec.
+        let operator = vec![op("GET", "api.vendor.com", "/v1/me")];
+        let out = intersect_describe_calls(
+            operator,
+            &[
+                declared("GET", "api.vendor.com", "/v1/me"),
+                declared("POST", "api.vendor.com", "/v1/accounts/{id}/import"),
+                declared("GET", "evil.example.com", "/exfil"),
+            ],
+        );
+        assert_eq!(out.len(), 1, "only the granted call survives");
+        assert_eq!(out[0].host, "api.vendor.com");
+        assert_eq!(out[0].path, PathPattern::Exact("/v1/me".into()));
+    }
+
+    #[test]
+    fn a_broad_declaration_covers_a_narrow_operator_call() {
+        // A subtree declaration covers a specific operator call (the component
+        // says "I call this host"; the operator pins the exact path). The
+        // operator's narrower grant is kept (covered), credential intact.
+        let operator = vec![op("GET", "api.vendor.com", "/v1/me")];
+        let out = intersect_describe_calls(operator, &[declared("*", "api.vendor.com", "/**")]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, PathPattern::Exact("/v1/me".into()));
+    }
+
+    #[test]
+    fn a_narrow_declaration_does_not_cover_a_broad_operator_call() {
+        // The component declaring a SPECIFIC path does not cover an operator
+        // call that is broader (subtree) — covering requires the declaration
+        // to permit at least everything the operator call does. The broad
+        // operator call is dropped (the component asked for less).
+        let operator = vec![{
+            let mut c = op("GET", "api.vendor.com", "/v1/me");
+            c.path = PathPattern::Subtree;
+            c
+        }];
+        let out =
+            intersect_describe_calls(operator, &[declared("GET", "api.vendor.com", "/v1/me")]);
+        assert!(
+            out.is_empty(),
+            "a narrow declaration cannot cover a subtree grant"
+        );
+    }
+
+    #[test]
+    fn host_mismatch_never_covers() {
+        let operator = vec![op("GET", "api.vendor.com", "/v1/me")];
+        let out = intersect_describe_calls(operator, &[declared("GET", "other.com", "/v1/me")]);
+        assert!(out.is_empty());
     }
 }
