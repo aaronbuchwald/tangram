@@ -82,6 +82,28 @@ NUTRITION_STRATEGY = "calorieninjas"
 [apps.nutrition.inject]
 "api.calorieninjas.com" = { header = "X-Api-Key", secret = "env://CALORIENINJAS_API_KEY" }
 
+# Auto-TODO, SAFE TIER (AC1-AC3) — docs/design/auto-todo.md. A TODO list where
+# each item carries a gated per-item lifecycle (discover → classify → plan →
+# approve); discovery/classification produce REVIEWABLE DATA only, and
+# execute() is a no-op. require_auth gates the risk-bearing mutating actions
+# (approve / reject / request_changes / confirm / execute) behind
+# TANGRAM_AUTH_TOKEN, like the registry/marketplace. No outbound network is
+# granted: discovery defaults to the deterministic OFFLINE rules. The optional
+# LLM assist (discover_assisted, AUTO_TODO_DISCOVERY=llm) needs an Anthropic
+# grant — uncomment allow_hosts + inject below to enable it (the host injects
+# ANTHROPIC_API_KEY at the egress boundary, ADR-0005; the key never enters the
+# component). AC4-AC6 (credentials / browser / 1Password) are NOT built — a
+# later, separately-reviewed tier.
+[apps.auto-todo]
+component = "target/wasm32-wasip2/release/auto_todo.wasm"
+ui = "apps/auto-todo/ui"
+require_auth = true
+# allow_hosts = ["api.anthropic.com"]   # only for the optional LLM assist
+# [apps.auto-todo.env]
+# AUTO_TODO_DISCOVERY = "llm"
+# [apps.auto-todo.inject]
+# "api.anthropic.com" = { header = "x-api-key", secret = "env://ANTHROPIC_API_KEY" }
+
 # ── Multi-tenancy (RUNTIME_PLAN Phase 5; README "Multi-tenancy") ─────────────
 # Uncomment to serve isolated, bearer-gated app sets under /t/<tenant>/
 # alongside the top-level apps above (which stay unauthenticated and
