@@ -37,10 +37,14 @@ slow-timeout = { period = "60s", terminal-after = 4 }
 [test-groups]
 # Every tangram-host integration-test binary spawns real host subprocesses and
 # is IO/convergence-bound; cap how many run at once so they don't oversubscribe
-# the box. 3 is a good balance on an 8-16 core machine: enough overlap to hide
-# each test's wait_for latency, few enough to avoid the contention cliff. Lower
-# to 2 on a 2-core CI runner via a profile override if needed.
-host-integration = { max-threads = 3 }
+# the box. The work each test does is dominated by inter-host sync-convergence
+# WAITS, not CPU, so more concurrency starves each host's sync rounds and the
+# group inflates — there is a sharp contention cliff. Measured on a 16-core box
+# (tangram-host binaries only, warm): cap 2 → 198s, cap 3 → 203s, cap 4 → 222s,
+# cap 5 → 219s; cap 2 is the fastest AND flags zero tests SLOW. It is also the
+# safe choice for the 2-4 core GitHub runners (where cap 3 already
+# oversubscribes), so we use it for both the default and ci profiles.
+host-integration = { max-threads = 2 }
 
 [[profile.default.overrides]]
 filter = 'package(tangram-host) and kind(test)'

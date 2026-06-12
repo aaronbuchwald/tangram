@@ -85,8 +85,7 @@ fn merge_proposal(base: &mut InferredRequirements, p: llm::Proposal) {
     for h in p.human_assistance {
         push_unique(&mut base.human_assistance, &h);
     }
-    let irr = base.irreversibility.clone();
-    base.irreversibility = worse(&irr, &p.irreversibility).to_string();
+    base.irreversibility = worse(&base.irreversibility, &p.irreversibility).to_string();
     if !base.capabilities.is_empty() && base.confidence < 0.85 {
         base.confidence = 0.85;
     }
