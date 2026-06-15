@@ -91,6 +91,18 @@ export class TabStore {
     );
   }
 
+  /** Move the tab with `id` to position `toIndex` (clamped). Reorder only — the
+   *  active tab is unchanged. No-op if the id is unknown or already in place. */
+  move(id: string, toIndex: number): void {
+    const from = this.tabs.findIndex((t) => t.id === id);
+    if (from < 0) return;
+    const clamped = Math.max(0, Math.min(toIndex, this.tabs.length - 1));
+    if (from === clamped) return;
+    const [moved] = this.tabs.splice(from, 1);
+    this.tabs.splice(clamped, 0, moved);
+    this.emit();
+  }
+
   close(id: string) {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx < 0) return;

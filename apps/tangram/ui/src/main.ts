@@ -429,6 +429,49 @@ function renderTabs() {
     });
     chip.appendChild(close);
     chip.addEventListener("click", () => tabs.activate(tab.id));
+
+    // Drag-to-reorder (browser-style). HTML5 DnD does not fire a click on
+    // drop, so dragging never accidentally activates; a plain click still does.
+    chip.draggable = true;
+    chip.dataset.tabId = tab.id;
+    chip.addEventListener("dragstart", (e) => {
+      e.dataTransfer?.setData("text/plain", tab.id);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      chip.classList.add("dragging");
+    });
+    chip.addEventListener("dragend", () => {
+      chip.classList.remove("dragging");
+      tabstripEl
+        .querySelectorAll(".tab.drop-before, .tab.drop-after")
+        .forEach((n) => n.classList.remove("drop-before", "drop-after"));
+    });
+    chip.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      const rect = chip.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      chip.classList.toggle("drop-after", after);
+      chip.classList.toggle("drop-before", !after);
+    });
+    chip.addEventListener("dragleave", () => {
+      chip.classList.remove("drop-before", "drop-after");
+    });
+    chip.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const draggedId = e.dataTransfer?.getData("text/plain");
+      chip.classList.remove("drop-before", "drop-after");
+      if (!draggedId || draggedId === tab.id) return;
+      const rect = chip.getBoundingClientRect();
+      const after = e.clientX > rect.left + rect.width / 2;
+      const ids = tabs.tabs.map((t) => t.id);
+      let targetIndex = ids.indexOf(tab.id);
+      if (after) targetIndex += 1;
+      // Adjust for removal of the dragged item if it sits before the target.
+      const fromIndex = ids.indexOf(draggedId);
+      if (fromIndex < targetIndex) targetIndex -= 1;
+      tabs.move(draggedId, targetIndex);
+    });
+
     tabstripEl.appendChild(chip);
   }
 }

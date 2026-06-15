@@ -229,6 +229,13 @@ body {
 }
 .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .tab.active .tab-title { color: var(--text); font-weight: 500; }
+/* Drag-to-reorder affordances. The drop indicators override the .active top
+   accent during a drag — temporary and fine. */
+.tab { cursor: grab; }
+.tab.dragging { opacity: 0.5; cursor: grabbing; }
+/* Insertion indicator: a blue bar on the side the drop will land. */
+.tab.drop-before { box-shadow: inset 2px 0 0 var(--blue); }
+.tab.drop-after { box-shadow: inset -2px 0 0 var(--blue); }
 .tab-close {
   background: transparent; border: 0; color: var(--faint);
   cursor: pointer; font-size: 11px; padding: 0; flex-shrink: 0;
