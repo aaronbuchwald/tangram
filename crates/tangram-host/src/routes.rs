@@ -126,6 +126,7 @@ impl AppEntry {
             GatePolicy::MultiTenant { store, reads_gated } => {
                 let gate = Arc::new(crate::multitenant::PrincipalGate::new(
                     store,
+                    runtime.name.clone(),
                     mutating_tools(),
                     reads_gated,
                 ));
@@ -188,6 +189,10 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
         .route("/", get(index))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/fleet", get(fleet))
+        // Admin-scoped audit read (auth.md §6, C4). Multi-tenant only — in
+        // self-hosted mode there is no account store, so it 404s like an unknown
+        // route (no capability oracle for a feature that isn't active).
+        .route("/api/audit", get(audit_read))
         .route("/mcp", axum::routing::any(aggregate_mcp))
         // The LLM proxy plane (ADR-0012): `/llm/<name>/…` is reverse-proxied to
         // agentgateway's `ai` backend for that provider, with the provider key
@@ -383,6 +388,25 @@ fn verification_fields(entry: Option<&AppEntry>) -> (bool, serde_json::Value) {
             (v.is_verified(), json!(v.reasons()))
         }
         None => (false, serde_json::Value::Null),
+    }
+}
+
+/// `GET /api/audit` — admin-scoped read of the host's audit log (auth.md §6,
+/// C4). Multi-tenant only: when the host has no account store (self-hosted) the
+/// route 404s, so the feature's existence is not advertised on a host where it
+/// is inactive. Otherwise it delegates to [`crate::audit::get_audit`], which
+/// resolves the principal, requires the `admin` scope (uniform 401 unresolved /
+/// 403 non-admin), and returns the most recent records (`?limit=N`).
+async fn audit_read(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    headers: HeaderMap,
+    raw_query: axum::extract::RawQuery,
+) -> Response {
+    match &host.accounts {
+        Some(store) => {
+            crate::audit::get_audit(axum::extract::State(store.clone()), headers, raw_query).await
+        }
+        None => (StatusCode::NOT_FOUND, "no such route").into_response(),
     }
 }
 

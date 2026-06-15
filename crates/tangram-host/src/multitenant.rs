@@ -121,11 +121,15 @@ pub struct PrincipalGate {
     store: Arc<AccountStore>,
     mutating_tools: std::collections::HashSet<String>,
     reads_gated: bool,
+    /// The app name this gate fronts — the `app` field of every audit record
+    /// it writes on a passed mutation (auth.md §6, C4).
+    app: String,
 }
 
 impl PrincipalGate {
     pub fn new(
         store: Arc<AccountStore>,
+        app: impl Into<String>,
         mutating_tools: impl IntoIterator<Item = String>,
         reads_gated: bool,
     ) -> Self {
@@ -133,6 +137,7 @@ impl PrincipalGate {
             store,
             mutating_tools: mutating_tools.into_iter().collect(),
             reads_gated,
+            app: app.into(),
         }
     }
 
@@ -185,18 +190,37 @@ pub async fn action_guard(
         Some(p) => p,
         None => return unauthorized(),
     };
-    if mutates {
-        let scope = required_scope(&action);
-        if !principal.has_scope(scope) {
-            return forbidden(scope);
-        }
-    } else {
+    if !mutates {
         // A gated read needs at least registry:read.
         if !principal.has_scope(Scope::RegistryRead) {
             return forbidden(Scope::RegistryRead);
         }
+        return next.run(req).await;
     }
-    next.run(req).await
+
+    let scope = required_scope(&action);
+    if !principal.has_scope(scope) {
+        return forbidden(scope);
+    }
+
+    // The mutation passed the guard: buffer the body so we can both digest the
+    // args for the audit log (auth.md §6 — DIGEST, never plaintext) and forward
+    // the request unchanged.
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MCP_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "action body too large").into_response(),
+    };
+    let args: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    crate::audit::record_mutation(
+        &gate.store,
+        &principal,
+        &gate.app,
+        &action,
+        crate::audit::digest_args(&args),
+    );
+    next.run(Request::from_parts(parts, Body::from(bytes)))
+        .await
 }
 
 /// Guard for the MCP endpoint under multi-tenant mode: a `tools/call` of a
@@ -220,7 +244,8 @@ pub async fn mcp_guard(
         Ok(bytes) => bytes,
         Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "mcp body too large").into_response(),
     };
-    let mutating = calls_mutating_tool(&gate, &bytes);
+    let mutating_calls = mutating_tool_calls(&gate, &bytes);
+    let mutating = !mutating_calls.is_empty();
     if mutating || gate.reads_gated {
         let principal = match resolve_user(&gate.store, &parts.headers, now_ms()) {
             Some(p) => p,
@@ -238,28 +263,49 @@ pub async fn mcp_guard(
         if !principal.has_scope(needed) {
             return forbidden(needed);
         }
+        // Passed: audit each mutating call in the (possibly batched) payload
+        // (auth.md §6 — args DIGESTED, never plaintext).
+        for (name, args) in &mutating_calls {
+            crate::audit::record_mutation(
+                &gate.store,
+                &principal,
+                &gate.app,
+                name,
+                crate::audit::digest_args(args),
+            );
+        }
     }
     next.run(Request::from_parts(parts, Body::from(bytes)))
         .await
 }
 
-/// Does this JSON-RPC payload call a mutating tool? (Same logic as
-/// `auth::calls_mutating_tool`; duplicated to keep the gate self-contained.)
-fn calls_mutating_tool(gate: &PrincipalGate, body: &[u8]) -> bool {
+/// The (tool name, arguments) of every MUTATING `tools/call` in a JSON-RPC
+/// payload (single message or batch). Empty ⇒ no mutating call (the read /
+/// pass-through case). The arguments default to `null` when absent.
+fn mutating_tool_calls(gate: &PrincipalGate, body: &[u8]) -> Vec<(String, serde_json::Value)> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
+        return Vec::new();
     };
     let messages: &[serde_json::Value] = match &value {
         serde_json::Value::Array(batch) => batch,
         single => std::slice::from_ref(single),
     };
-    messages.iter().any(|msg| {
-        msg.get("method").and_then(serde_json::Value::as_str) == Some("tools/call")
-            && msg
+    messages
+        .iter()
+        .filter(|msg| msg.get("method").and_then(serde_json::Value::as_str) == Some("tools/call"))
+        .filter_map(|msg| {
+            let name = msg
                 .pointer("/params/name")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|name| gate.tool_mutates(name))
-    })
+                .and_then(serde_json::Value::as_str)?;
+            gate.tool_mutates(name).then(|| {
+                let args = msg
+                    .pointer("/params/arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                (name.to_string(), args)
+            })
+        })
+        .collect()
 }
 
 /// Zero-accounts boot: mint a local-admin PAT (Admin + RegistryWrite +

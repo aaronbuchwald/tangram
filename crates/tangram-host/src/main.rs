@@ -24,6 +24,7 @@
 
 mod accounts;
 mod app;
+mod audit;
 mod auth;
 mod config;
 mod doc;

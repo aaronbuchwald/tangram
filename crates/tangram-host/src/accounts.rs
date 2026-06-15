@@ -192,6 +192,22 @@ impl AccountStore {
                 created_ms INTEGER NOT NULL,
                 expires_ms INTEGER
             );
+            -- The per-principal audit log (auth.md §6, C4): one append-only row
+            -- per PASSED mutating guard. Host-local, NEVER replicated. `args` is
+            -- a sha-256 DIGEST, never plaintext (no injected secret is logged).
+            -- The owning account may vanish (e.g. legacy import); the audit row
+            -- is the human attribution layer and must outlive it, so there is
+            -- deliberately NO foreign key onto accounts here.
+            CREATE TABLE IF NOT EXISTS audit (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     TEXT NOT NULL,
+                email       TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                app         TEXT NOT NULL,
+                args_digest TEXT NOT NULL,
+                outcome     TEXT NOT NULL,
+                ts_ms       INTEGER NOT NULL
+            );
             "#,
         )
         .context("creating account store schema")?;
@@ -409,6 +425,52 @@ impl AccountStore {
     /// hash the value it holds without duplicating the crypto.
     pub fn token_hash(plaintext: &str) -> String {
         hash_token(plaintext)
+    }
+
+    // ── audit log (auth.md §6, C4) ─────────────────────────────────────────────
+
+    /// Append one audit record (a PASSED mutating guard). Append-only; the row
+    /// is never updated or deleted. `args_digest` is a sha-256 digest computed
+    /// by the caller ([`crate::audit::digest_args`]) — never plaintext.
+    pub fn append_audit(&self, record: &crate::audit::AuditRecord) -> anyhow::Result<()> {
+        self.conn()
+            .execute(
+                "INSERT INTO audit (user_id, email, action, app, args_digest, outcome, ts_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    record.user_id,
+                    record.email,
+                    record.action,
+                    record.app,
+                    record.args_digest,
+                    record.outcome,
+                    record.ts_ms,
+                ],
+            )
+            .context("appending audit record")?;
+        Ok(())
+    }
+
+    /// Read the most recent audit records, newest first, capped at `limit`.
+    /// Admin-scoped at the route; the store itself does no authorization.
+    pub fn recent_audit(&self, limit: usize) -> anyhow::Result<Vec<crate::audit::AuditRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT user_id, email, action, app, args_digest, outcome, ts_ms FROM audit \
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(crate::audit::AuditRecord {
+                user_id: row.get(0)?,
+                email: row.get(1)?,
+                action: row.get(2)?,
+                app: row.get(3)?,
+                args_digest: row.get(4)?,
+                outcome: row.get(5)?,
+                ts_ms: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ── validation ───────────────────────────────────────────────────────────

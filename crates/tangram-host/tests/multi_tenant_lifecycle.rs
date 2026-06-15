@@ -270,6 +270,176 @@ fn revoke_all_pats_for(store_path: &Path, user_id: &str, admin_token: &str) {
     .expect("revoke");
 }
 
+/// Mint a full-scope PAT for a NEW account directly in the store (the host's
+/// own `mint_pat` semantics). Used to stand a second attributed principal up
+/// without the C5 account-creation HTTP API.
+fn mint_full_pat_for_new_account(
+    conn: &rusqlite::Connection,
+    user_id: &str,
+    email: &str,
+) -> String {
+    use base64::Engine as _;
+    use rand::RngCore as _;
+    use sha2::{Digest as _, Sha256};
+
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts (user_id, email, groups, created_ms) \
+         VALUES (?1, ?2, '', 0)",
+        rusqlite::params![user_id, email],
+    )
+    .expect("insert account");
+    let mut bytes = [0u8; 20];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = format!(
+        "tgp_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    );
+    let hash = {
+        let d = Sha256::digest(token.as_bytes());
+        d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let id = format!("pat_{user_id}_{}", &hash[..8]);
+    conn.execute(
+        "INSERT INTO pats (token_hash, id, user_id, scopes, label, created_ms, expires_ms) \
+         VALUES (?1, ?2, ?3, 'registry:read,registry:write,admin', 'test', 0, NULL)",
+        rusqlite::params![hash, id, user_id],
+    )
+    .expect("insert PAT");
+    token
+}
+
+/// C4 — the per-principal audit log: two distinct principals each pass a
+/// mutating guard → two attributed records; the args are a DIGEST not the
+/// plaintext; and the audit read is admin-scoped (a registry:read PAT is 403'd).
+#[tokio::test]
+async fn audit_log_attributes_mutations_per_principal_and_is_admin_scoped() {
+    for name in ["registry", "notes"] {
+        if !component(name).exists() {
+            eprintln!("SKIPPING audit_log test: {name} component missing");
+            return;
+        }
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[auth]
+mode = "multi-tenant"
+
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+"#,
+            registry = component("registry").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+    let ok = Some(reqwest::StatusCode::OK);
+
+    wait_for("admin PAT in log", Duration::from_secs(30), || async {
+        admin_pat_from_log(&log).is_some()
+    })
+    .await;
+    let admin = admin_pat_from_log(&log).expect("admin PAT");
+    wait_for("registry healthz", Duration::from_secs(120), || async {
+        get_status(&client, &format!("{base}/registry/healthz"), None).await == ok
+    })
+    .await;
+
+    let store_path = home.join(".tangram").join("accounts.sqlite");
+    // A SECOND attributed principal with full scope.
+    let second = {
+        let conn = rusqlite::Connection::open(&store_path).expect("open store");
+        mint_full_pat_for_new_account(&conn, "second", "second@example.com")
+    };
+
+    let install = format!("{base}/registry/api/actions/install_app");
+    let args_a = serde_json::json!({
+        "name": "auditone",
+        "component": component("notes").display().to_string(),
+        "ui": root.join("apps/notes/ui").display().to_string(),
+    });
+    let args_b = serde_json::json!({
+        "name": "audittwo",
+        "component": component("notes").display().to_string(),
+        "ui": root.join("apps/notes/ui").display().to_string(),
+    });
+    // admin (local-admin) and second each pass the mutating guard once.
+    assert_eq!(
+        action(&client, &install, Some(&admin), &args_a).await,
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        action(&client, &install, Some(&second), &args_b).await,
+        reqwest::StatusCode::OK
+    );
+
+    // The audit read requires admin: the read-only PAT is 403'd, the bare read
+    // 401s.
+    let read_only = {
+        let conn = rusqlite::Connection::open(&store_path).expect("open store");
+        mint_read_only_pat(&conn)
+    };
+    assert_eq!(
+        get_status(&client, &format!("{base}/api/audit"), None).await,
+        Some(reqwest::StatusCode::UNAUTHORIZED),
+        "audit read with no credential must 401"
+    );
+    assert_eq!(
+        get_status(&client, &format!("{base}/api/audit"), Some(&read_only)).await,
+        Some(reqwest::StatusCode::FORBIDDEN),
+        "audit read with a non-admin PAT must 403"
+    );
+
+    // The admin read returns two attributed records, args digested.
+    let body: serde_json::Value = client
+        .get(format!("{base}/api/audit"))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .expect("audit read")
+        .json()
+        .await
+        .expect("audit json");
+    let records = body["records"].as_array().expect("records array");
+    let install_records: Vec<_> = records
+        .iter()
+        .filter(|r| r["action"] == "install_app")
+        .collect();
+    assert_eq!(
+        install_records.len(),
+        2,
+        "two install_app mutations → two records: {records:?}"
+    );
+    let users: std::collections::HashSet<&str> = install_records
+        .iter()
+        .filter_map(|r| r["user_id"].as_str())
+        .collect();
+    assert!(users.contains("local-admin"), "admin attributed: {users:?}");
+    assert!(users.contains("second"), "second attributed: {users:?}");
+    // Args are a 64-hex digest, never the plaintext app name.
+    for r in &install_records {
+        let digest = r["args_digest"].as_str().expect("digest");
+        assert_eq!(digest.len(), 64, "args_digest is a sha-256 hex digest");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!digest.contains("auditone") && !digest.contains("audittwo"));
+        assert_eq!(r["outcome"], "passed");
+    }
+    drop(_host);
+}
+
 #[tokio::test]
 async fn self_hosted_mode_needs_no_credential_over_loopback() {
     // The regression bar: with no [auth] section (self-hosted default) the
