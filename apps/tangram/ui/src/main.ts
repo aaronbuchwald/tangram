@@ -214,6 +214,7 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
   if (tabs.active?.kind === "note" && tabs.active.fileId === node.file.id) {
     row.classList.add("active");
   }
+  row.appendChild(el("span", "twisty")); // spacer — aligns label with folder labels at same depth
   row.appendChild(el("span", "label", displayFileName(node.name)));
   const actions = el("div", "row-actions");
   const ren = rowAction(ICON.pencil, `Rename / move ${node.path}`);
