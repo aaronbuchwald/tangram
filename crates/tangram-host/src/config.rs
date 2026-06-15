@@ -1084,6 +1084,27 @@ impl TenantsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     pub mode: AuthMode,
+    /// Multi-tenant: gate READS (state/list) behind `registry:read`, not just
+    /// mutations. Default `false` — reads stay open (auth.md §11.2). No effect
+    /// in self-hosted mode.
+    #[serde(default)]
+    pub reads_gated: bool,
+    /// Multi-tenant: the `user_id` an existing single registry migrates to
+    /// (auth.md §7). Reserved for the migration path; carried so the config
+    /// schema is stable. Absent → no migration target.
+    #[serde(default)]
+    pub default_user_id: Option<String>,
+    /// Multi-tenant OAuth/OIDC (C6): the OIDC issuer discovery URL. Absent →
+    /// PAT-only bootstrap (still fully functional; auth.md §7).
+    #[serde(default)]
+    pub oauth_issuer: Option<String>,
+    /// Multi-tenant OAuth/OIDC (C6): the registered client id.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    /// Multi-tenant OAuth/OIDC (C6): the client secret (`env://…` indirection,
+    /// resolved through the secret seam; never inline).
+    #[serde(default)]
+    pub oauth_client_secret: Option<String>,
 }
 
 /// The two deployment auth shapes (docs/design/auth.md §1).

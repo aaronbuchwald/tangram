@@ -224,11 +224,25 @@ impl Principal {
     /// authority within their surface (loopback trust / the tenant's own
     /// namespace), so they have every scope; a `User` is checked against the
     /// scopes its credential validated to.
-    #[allow(dead_code)] // enforced by the C3 scope guards
     pub fn has_scope(&self, scope: Scope) -> bool {
         match self {
             Self::LocalUser | Self::Tenant(_) => true,
             Self::User { scopes, .. } => scopes.contains(scope),
+        }
+    }
+
+    /// The per-principal data root, RELATIVE to the host data root (auth.md
+    /// §3). `LocalUser` owns the whole tree (`.tangram`); a `User` is confined
+    /// to its own subtree (`.tangram/<user_id>/`), the same confinement
+    /// `tenant.rs`'s `validate_tenant_data_dir` enforces for `/t/<tenant>/`.
+    /// `Tenant` has no top-level data root (its data lives under the tenant
+    /// tree, routed by the existing tenant machinery).
+    #[allow(dead_code)] // consumed by the per-principal registry wiring (C3+)
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        use std::path::PathBuf;
+        match self {
+            Self::LocalUser | Self::Tenant(_) => PathBuf::from(".tangram"),
+            Self::User { user_id, .. } => PathBuf::from(".tangram").join(user_id),
         }
     }
 }

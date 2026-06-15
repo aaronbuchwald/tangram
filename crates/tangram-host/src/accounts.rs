@@ -25,6 +25,7 @@
 #![allow(dead_code)] // wired in C3
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -125,12 +126,22 @@ fn groups_from_db(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// The host-local account / credential store (auth.md §4).
+/// The host-local account / credential store (auth.md §4). The rusqlite
+/// connection is wrapped in a `Mutex` so the store is `Sync` and can be shared
+/// across the axum handler tasks behind an `Arc` (rusqlite serializes writes
+/// anyway; the credential workload is tiny — a hash lookup per request).
 pub struct AccountStore {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl AccountStore {
+    /// Lock the connection. Poisoning can only happen if a previous holder
+    /// panicked mid-query; we recover the guard rather than propagate, since a
+    /// poisoned credential lookup must not wedge the whole auth plane.
+    fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Open (creating + migrating) the store at `path`.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -150,6 +161,10 @@ impl AccountStore {
     fn from_conn(conn: Connection) -> anyhow::Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)
             .context("enabling foreign_keys")?;
+        // WAL lets a reader and a writer coexist (the credential workload is
+        // tiny, but a replica/CLI minting a PAT while the UI validates one
+        // should never block); harmless for the in-memory store.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS accounts (
@@ -180,14 +195,16 @@ impl AccountStore {
             "#,
         )
         .context("creating account store schema")?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// True when no account exists yet — the zero-accounts boot that mints the
     /// local-admin PAT (auth.md §7, C3).
     pub fn is_empty(&self) -> anyhow::Result<bool> {
         let n: i64 = self
-            .conn
+            .conn()
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
         Ok(n == 0)
     }
@@ -202,7 +219,7 @@ impl AccountStore {
         groups: &[String],
         now_ms: i64,
     ) -> anyhow::Result<Account> {
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO accounts (user_id, email, groups, created_ms) VALUES (?1, ?2, ?3, ?4)",
                 params![user_id, email, groups_to_db(groups), now_ms],
@@ -219,7 +236,7 @@ impl AccountStore {
     /// Look an account up by `user_id`.
     pub fn account(&self, user_id: &str) -> anyhow::Result<Option<Account>> {
         Ok(self
-            .conn
+            .conn()
             .query_row(
                 "SELECT user_id, email, groups, created_ms FROM accounts WHERE user_id = ?1",
                 params![user_id],
@@ -250,7 +267,7 @@ impl AccountStore {
             );
             return Ok(());
         }
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO idents (provider_id, user_id) VALUES (?1, ?2)",
                 params![provider_id, user_id],
@@ -262,7 +279,7 @@ impl AccountStore {
     /// The `user_id` an IdP identity maps to, if any.
     pub fn account_for_ident(&self, provider_id: &str) -> anyhow::Result<Option<String>> {
         Ok(self
-            .conn
+            .conn()
             .query_row(
                 "SELECT user_id FROM idents WHERE provider_id = ?1",
                 params![provider_id],
@@ -291,7 +308,7 @@ impl AccountStore {
         let token = mint_token(PAT_PREFIX);
         let token_hash = hash_token(&token);
         let id = mint_token("pat_"); // opaque, not a credential — just a handle
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO pats (token_hash, id, user_id, scopes, label, created_ms, expires_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -321,7 +338,8 @@ impl AccountStore {
 
     /// List `user_id`'s PATs (metadata only — never the secret or its hash).
     pub fn list_pats(&self, user_id: &str) -> anyhow::Result<Vec<PatInfo>> {
-        let mut stmt = self.conn.prepare(
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
             "SELECT id, user_id, scopes, label, created_ms, expires_ms FROM pats \
              WHERE user_id = ?1 ORDER BY created_ms, id",
         )?;
@@ -343,7 +361,7 @@ impl AccountStore {
     /// revoke another's token by guessing an id. Returns whether a row was
     /// removed.
     pub fn revoke_pat_by_id(&self, user_id: &str, id: &str) -> anyhow::Result<bool> {
-        let n = self.conn.execute(
+        let n = self.conn().execute(
             "DELETE FROM pats WHERE id = ?1 AND user_id = ?2",
             params![id, user_id],
         )?;
@@ -367,7 +385,7 @@ impl AccountStore {
         );
         let token = mint_token(SESSION_PREFIX);
         let token_hash = hash_token(&token);
-        self.conn
+        self.conn()
             .execute(
                 "INSERT INTO sessions (token_hash, user_id, created_ms, expires_ms) \
                  VALUES (?1, ?2, ?3, ?4)",
@@ -380,7 +398,7 @@ impl AccountStore {
     /// Revoke a session by the HASH of its token (sign-out: the caller hashes
     /// the cookie value it holds). Returns whether a row was removed.
     pub fn revoke_session_by_hash(&self, token_hash: &str) -> anyhow::Result<bool> {
-        let n = self.conn.execute(
+        let n = self.conn().execute(
             "DELETE FROM sessions WHERE token_hash = ?1",
             params![token_hash],
         )?;
@@ -414,7 +432,7 @@ impl AccountStore {
 
     fn validate_pat(&self, token_hash: &str, now_ms: i64) -> Option<ValidatedCredential> {
         let row = self
-            .conn
+            .conn()
             .query_row(
                 "SELECT p.user_id, p.scopes, p.expires_ms, a.email, a.groups \
                  FROM pats p JOIN accounts a ON a.user_id = p.user_id \
@@ -447,7 +465,7 @@ impl AccountStore {
 
     fn validate_session(&self, token_hash: &str, now_ms: i64) -> Option<ValidatedCredential> {
         let row = self
-            .conn
+            .conn()
             .query_row(
                 "SELECT s.user_id, s.expires_ms, a.email, a.groups \
                  FROM sessions s JOIN accounts a ON a.user_id = s.user_id \
@@ -510,13 +528,13 @@ mod tests {
 
         // The plaintext is NOT in the DB — only its hash. Probe the raw table.
         let stored_hash: String = store
-            .conn
+            .conn()
             .query_row("SELECT token_hash FROM pats", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored_hash, hash_token(&minted.token));
         assert_ne!(stored_hash, minted.token);
         let plaintext_rows: i64 = store
-            .conn
+            .conn()
             .query_row(
                 "SELECT COUNT(*) FROM pats WHERE token_hash = ?1",
                 params![minted.token],

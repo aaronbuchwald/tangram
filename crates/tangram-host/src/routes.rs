@@ -71,13 +71,26 @@ fn frame_ancestors_csp() -> axum::http::HeaderValue {
         .unwrap_or_else(|_| axum::http::HeaderValue::from_static("frame-ancestors *"))
 }
 
+/// How an app's mutating surface is gated (docs/design/auth.md). Self-hosted
+/// keeps the existing single-token bearer gate; multi-tenant resolves a
+/// `Principal::User` from the host-local credential store and scope-checks.
+pub enum GatePolicy {
+    /// Self-hosted / single-token: `TANGRAM_AUTH_TOKEN` bearer gate on
+    /// registry/require_auth apps (`None` ⇒ no gate, loopback-trusted).
+    SingleToken(Option<String>),
+    /// Multi-tenant: the host-local account store + the `reads_gated` flag.
+    /// Every mutating action / tool requires a resolved, scoped principal.
+    MultiTenant {
+        store: Arc<crate::accounts::AccountStore>,
+        reads_gated: bool,
+    },
+}
+
 impl AppEntry {
-    /// Build the app's router. With `auth_token` set (registry apps and
-    /// `require_auth` apps when the host has TANGRAM_AUTH_TOKEN), the
-    /// mutating surfaces are gated: every `POST /api/actions/*` and every
-    /// MCP `tools/call` of a mutating tool requires the bearer token; read
-    /// routes stay open.
-    pub fn new(runtime: AppRuntime, auth_token: Option<&str>) -> Self {
+    /// Build the app's router. The [`GatePolicy`] selects how the mutating
+    /// surface (`POST /api/actions/*` and MCP mutating `tools/call`) is gated;
+    /// read routes stay open (unless multi-tenant `reads_gated`).
+    pub fn new(runtime: AppRuntime, gate: GatePolicy) -> Self {
         let runtime = Arc::new(runtime);
         let mcp_service = StreamableHttpService::new(
             {
@@ -92,21 +105,39 @@ impl AppEntry {
             .route("/api/actions/{name}", axum::routing::post(run_action))
             .with_state(runtime.clone());
         let mut mcp = Router::new().nest_service("/mcp", mcp_service);
-        if let Some(token) = auth_token {
-            let gate = Arc::new(AuthGate::new(
-                token.to_string(),
-                runtime
-                    .describe
-                    .actions
-                    .iter()
-                    .filter(|a| a.mutates)
-                    .map(|a| a.name.clone()),
-            ));
-            actions = actions.layer(axum::middleware::from_fn_with_state(
-                gate.clone(),
-                auth::bearer_guard,
-            ));
-            mcp = mcp.layer(axum::middleware::from_fn_with_state(gate, auth::mcp_guard));
+        let mutating_tools = || {
+            runtime
+                .describe
+                .actions
+                .iter()
+                .filter(|a| a.mutates)
+                .map(|a| a.name.clone())
+        };
+        match gate {
+            GatePolicy::SingleToken(Some(token)) => {
+                let gate = Arc::new(AuthGate::new(token, mutating_tools()));
+                actions = actions.layer(axum::middleware::from_fn_with_state(
+                    gate.clone(),
+                    auth::bearer_guard,
+                ));
+                mcp = mcp.layer(axum::middleware::from_fn_with_state(gate, auth::mcp_guard));
+            }
+            GatePolicy::SingleToken(None) => {}
+            GatePolicy::MultiTenant { store, reads_gated } => {
+                let gate = Arc::new(crate::multitenant::PrincipalGate::new(
+                    store,
+                    mutating_tools(),
+                    reads_gated,
+                ));
+                actions = actions.layer(axum::middleware::from_fn_with_state(
+                    gate.clone(),
+                    crate::multitenant::action_guard,
+                ));
+                mcp = mcp.layer(axum::middleware::from_fn_with_state(
+                    gate,
+                    crate::multitenant::mcp_guard,
+                ));
+            }
         }
 
         let router = Router::new()

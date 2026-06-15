@@ -31,6 +31,7 @@ mod egress;
 mod fetch;
 mod gateway;
 mod mcp;
+mod multitenant;
 mod policy;
 mod registry;
 mod routes;
@@ -83,6 +84,18 @@ pub struct Host {
     /// `TANGRAM_AUTH_TOKEN`: gates mutating routes on registry/require_auth
     /// apps. `None` = unauthenticated host (loopback-only for registries).
     pub auth_token: Option<String>,
+    /// The deployment auth mode (docs/design/auth.md). `MultiTenant` activates
+    /// the host-local credential store + scope-checked principal gating on the
+    /// top-level surface; `SelfHosted` (the default) keeps byte-identical
+    /// loopback-trusted behavior.
+    pub auth_mode: config::AuthMode,
+    /// Multi-tenant: gate reads behind `registry:read` too (auth.md §11.2).
+    pub reads_gated: bool,
+    /// The host-local account / credential store (auth.md §4) — `Some` only in
+    /// multi-tenant mode. Hashed PATs + sessions; consulted per request for
+    /// principal resolution. NEVER replicated (a replicated credential is a
+    /// leaked credential).
+    pub accounts: Option<Arc<accounts::AccountStore>>,
     /// Tenant → resolved bearer token (Phase 5), refreshed on every converge
     /// — the lookup table behind [`auth::resolve_principal`]. A tenant whose
     /// `${VAR}` token didn't resolve is absent: every request 401s.
@@ -515,8 +528,27 @@ impl Host {
         match AppRuntime::build(&self.engine, &self.secrets, &key.app, spec, &component_path).await
         {
             Ok(runtime) => {
-                let gate_token = gate_token.filter(|_| spec.registry || spec.require_auth);
-                let mut entry = AppEntry::new(runtime, gate_token);
+                // Multi-tenant mode gates TOP-LEVEL registry/require_auth apps
+                // through the host-local credential store (scope-checked
+                // principal resolution). Tenant apps keep the single-token
+                // bearer gate (their `/t/<tenant>/` dispatch already gates the
+                // whole surface). Self-hosted is unchanged.
+                let multitenant = self.auth_mode == config::AuthMode::MultiTenant
+                    && key.tenant.is_none()
+                    && (spec.registry || spec.require_auth);
+                let gate = match (multitenant, &self.accounts) {
+                    (true, Some(store)) => routes::GatePolicy::MultiTenant {
+                        store: store.clone(),
+                        reads_gated: self.reads_gated,
+                    },
+                    _ => {
+                        let token = gate_token
+                            .filter(|_| spec.registry || spec.require_auth)
+                            .map(str::to_string);
+                        routes::GatePolicy::SingleToken(token)
+                    }
+                };
+                let mut entry = AppEntry::new(runtime, gate);
                 if spec.registry {
                     // Registry doc changes (actions, MCP calls, sync from a
                     // replica) re-trigger converge, just like a file edit.
@@ -565,6 +597,18 @@ fn bind_is_loopback(bind_addr: &str) -> bool {
     )
 }
 
+/// The host-local credential store path (multi-tenant mode). Lives under the
+/// host data root (`$HOME/.tangram/accounts.sqlite`), never inside any app's
+/// replicated document. `TANGRAM_DATA_DIR` overrides the root (tests set it to
+/// a scratch dir); else `$HOME/.tangram`; else `./data`.
+fn host_account_store_path() -> PathBuf {
+    let root = std::env::var("TANGRAM_DATA_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".tangram")))
+        .unwrap_or_else(|_| PathBuf::from("data"));
+    root.join("accounts.sqlite")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
@@ -591,14 +635,37 @@ async fn main() -> anyhow::Result<()> {
     // self-hosted, loopback-trusted default. `multi-tenant` preserves today's
     // tenant/token machinery; its identity layer (PATs/sessions/OAuth) lands
     // in checkpoints C2–C6.
-    let auth_mode = HostConfig::load(&config_path)
-        .map(|config| config.auth.mode)
+    let auth_config = HostConfig::load(&config_path)
+        .map(|config| config.auth)
         .unwrap_or_default();
-    if auth_mode == config::AuthMode::MultiTenant {
+    let auth_mode = auth_config.mode;
+    let reads_gated = auth_config.reads_gated;
+
+    // Multi-tenant mode (auth.md §4): open the host-local credential store and,
+    // on a zero-accounts boot, mint a local-admin PAT printed ONCE. The store
+    // lives at the host data root, NEVER inside any app's replicated document.
+    let accounts = if auth_mode == config::AuthMode::MultiTenant {
+        let store_path = host_account_store_path();
+        let store = accounts::AccountStore::open(&store_path)
+            .with_context(|| format!("opening the account store at {}", store_path.display()))?;
+        if let Some(token) = multitenant::bootstrap_admin(&store)? {
+            tracing::warn!(
+                "multi-tenant mode: no accounts existed — minted a local-admin PAT (Admin + \
+                 registry:write + registry:read). THIS IS SHOWN ONCE; store it now:\n\n    \
+                 {token}\n\n(use it as `Authorization: Bearer <token>` or to bootstrap the UI \
+                 login). Account store: {}",
+                store_path.display()
+            );
+        }
         tracing::info!(
-            "multi-tenant mode: per-tenant bearer tokens (identity layer C2–C6 forthcoming)"
+            "multi-tenant mode: host-local credential store at {} — hashed PATs + sessions; \
+             reads_gated = {reads_gated} (auth.md §4)",
+            store_path.display()
         );
-    }
+        Some(Arc::new(store))
+    } else {
+        None
+    };
 
     if auth_token.is_none() {
         if bind_loopback {
@@ -711,6 +778,9 @@ async fn main() -> anyhow::Result<()> {
         apps: RwLock::new(HashMap::new()),
         fleet: RwLock::new(BTreeMap::new()),
         auth_token,
+        auth_mode,
+        reads_gated,
+        accounts,
         tenant_tokens: RwLock::new(BTreeMap::new()),
         bind_loopback,
         nudge: Arc::new(Notify::new()),
