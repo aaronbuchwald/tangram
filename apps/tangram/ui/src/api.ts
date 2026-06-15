@@ -111,6 +111,8 @@ export interface AuthPrincipal {
 export interface AuthState {
   mode: AuthMode;
   principal: AuthPrincipal | null;
+  /** Whether OAuth/OIDC sign-in is available (the "Sign in with GitHub" button). */
+  oauth?: boolean;
 }
 
 export interface PatInfo {

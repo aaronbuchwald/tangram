@@ -206,6 +206,11 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
             "/api/auth/pats/{id}",
             axum::routing::delete(auth_revoke_pat),
         )
+        // OAuth/OIDC authorization-code sign-in (auth.md §7 C6). 404 when OAuth
+        // is not configured (no oracle); otherwise start → IdP, callback → map
+        // identity + mint session.
+        .route("/api/auth/oauth/start", get(oauth_start))
+        .route("/api/auth/oauth/callback", get(oauth_callback))
         .route("/mcp", axum::routing::any(aggregate_mcp))
         // The LLM proxy plane (ADR-0012): `/llm/<name>/…` is reverse-proxied to
         // agentgateway's `ai` backend for that provider, with the provider key
@@ -429,7 +434,7 @@ async fn audit_read(
 /// branch: self-hosted reports `mode = "self-hosted"` (no auth UI); multi-tenant
 /// reports the resolved principal (or null).
 async fn auth_state(State((host, _)): State<(Arc<Host>, bool)>, headers: HeaderMap) -> Response {
-    crate::authapi::auth_state(host.accounts.as_ref(), &headers).await
+    crate::authapi::auth_state(host.accounts.as_ref(), host.oauth.is_some(), &headers).await
 }
 
 /// 404 when the host has no account store (self-hosted) — no capability oracle
@@ -491,6 +496,29 @@ async fn auth_revoke_pat(
         return no_such_route();
     };
     crate::authapi::revoke_pat(&store, &headers, &id).await
+}
+
+/// `GET /api/auth/oauth/start` — begin the authorization-code flow. 404 when
+/// OAuth is not configured (no capability oracle for an inactive feature).
+async fn oauth_start(State((host, _)): State<(Arc<Host>, bool)>, headers: HeaderMap) -> Response {
+    match &host.oauth {
+        Some(cfg) => crate::oauth::start(cfg, &headers),
+        None => no_such_route(),
+    }
+}
+
+/// `GET /api/auth/oauth/callback` — finish the flow: validate state, exchange
+/// the code, map identity → account, mint a session. Needs both the OAuth
+/// config and the account store (both present together in multi-tenant mode).
+async fn oauth_callback(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let (Some(cfg), Some(store)) = (&host.oauth, &host.accounts) else {
+        return no_such_route();
+    };
+    crate::oauth::callback(cfg, store, &headers, query.as_deref()).await
 }
 
 async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_json::Value> {

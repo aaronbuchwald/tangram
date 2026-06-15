@@ -36,12 +36,17 @@ const SESSION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// (self-hosted → no auth UI; multi-tenant → login view / principal chip). In
 /// self-hosted mode `principal` is `null` and the UI shows nothing; in
 /// multi-tenant mode it is the resolved user or `null` when unauthenticated.
-pub async fn auth_state(store: Option<&Arc<AccountStore>>, headers: &HeaderMap) -> Response {
+pub async fn auth_state(
+    store: Option<&Arc<AccountStore>>,
+    oauth_enabled: bool,
+    headers: &HeaderMap,
+) -> Response {
     let Some(store) = store else {
         // Self-hosted: loopback-trusted, no auth UI.
         return axum::Json(serde_json::json!({
             "mode": "self-hosted",
             "principal": serde_json::Value::Null,
+            "oauth": false,
         }))
         .into_response();
     };
@@ -63,6 +68,8 @@ pub async fn auth_state(store: Option<&Arc<AccountStore>>, headers: &HeaderMap) 
     axum::Json(serde_json::json!({
         "mode": "multi-tenant",
         "principal": principal_json,
+        // Whether OAuth sign-in is available (the UI shows the GitHub button).
+        "oauth": oauth_enabled,
     }))
     .into_response()
 }

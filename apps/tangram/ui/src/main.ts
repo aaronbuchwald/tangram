@@ -901,7 +901,7 @@ function startShell() {
 void (async () => {
   const auth = await loadAuthState();
   if (auth.mode === "multi-tenant" && !auth.principal) {
-    renderLogin(root, () => window.location.reload());
+    renderLogin(root, () => window.location.reload(), auth.oauth ?? false);
     return;
   }
   if (auth.mode === "multi-tenant" && auth.principal) {

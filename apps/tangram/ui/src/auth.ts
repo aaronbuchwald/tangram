@@ -27,8 +27,14 @@ import { confirmAction } from "./modal";
 
 /** Render the full-screen login view into `host` and resolve once the user has
  * successfully exchanged a PAT for a session (the caller then re-boots the
- * shell). The OAuth "Sign in" button is C6 — present but disabled here. */
-export function renderLogin(host: HTMLElement, onAuthenticated: () => void): void {
+ * shell). The "Sign in with GitHub" button is enabled only when the host
+ * reports OAuth is configured (C6); it navigates to the host's authorization
+ * start endpoint. */
+export function renderLogin(
+  host: HTMLElement,
+  onAuthenticated: () => void,
+  oauthEnabled = false,
+): void {
   host.replaceChildren();
   const wrap = document.createElement("div");
   wrap.className = "login-view";
@@ -41,8 +47,7 @@ export function renderLogin(host: HTMLElement, onAuthenticated: () => void): voi
              spellcheck="false" placeholder="tgp_…" />
       <div class="login-error" id="login-error"></div>
       <button class="login-btn primary" id="login-submit" type="button">Continue</button>
-      <button class="login-btn" id="login-oauth" type="button" disabled
-              title="OAuth sign-in arrives in a later update">Sign in with GitHub</button>
+      <button class="login-btn" id="login-oauth" type="button">Sign in with GitHub</button>
       <p class="login-hint">Paste a personal access key (shown once when minted).
         Replicas and tools use the same keys.</p>
     </div>
@@ -52,6 +57,18 @@ export function renderLogin(host: HTMLElement, onAuthenticated: () => void): voi
   const input = wrap.querySelector<HTMLInputElement>("#login-key")!;
   const errorEl = wrap.querySelector<HTMLDivElement>("#login-error")!;
   const submit = wrap.querySelector<HTMLButtonElement>("#login-submit")!;
+  const oauthBtn = wrap.querySelector<HTMLButtonElement>("#login-oauth")!;
+  if (oauthEnabled) {
+    // Navigate to the host's authorization-code start endpoint (relative to the
+    // shell's /tangram/ mount → host root). The host sets a state cookie and
+    // 302s to the IdP; the callback returns here with a session cookie.
+    oauthBtn.addEventListener("click", () => {
+      window.location.href = "../api/auth/oauth/start";
+    });
+  } else {
+    oauthBtn.disabled = true;
+    oauthBtn.title = "OAuth sign-in is not configured on this host";
+  }
 
   async function attempt() {
     const token = input.value.trim();

@@ -34,6 +34,7 @@ mod fetch;
 mod gateway;
 mod mcp;
 mod multitenant;
+mod oauth;
 mod policy;
 mod registry;
 mod routes;
@@ -98,6 +99,11 @@ pub struct Host {
     /// principal resolution. NEVER replicated (a replicated credential is a
     /// leaked credential).
     pub accounts: Option<Arc<accounts::AccountStore>>,
+    /// The resolved OAuth/OIDC client config (auth.md §7 C6) — `Some` only in
+    /// multi-tenant mode WITH a complete client id + secret. `None` is PAT-only
+    /// bootstrap (still fully functional). A partial config fails startup, so a
+    /// half-configured OAuth never silently runs.
+    pub oauth: Option<oauth::OauthConfig>,
     /// Tenant → resolved bearer token (Phase 5), refreshed on every converge
     /// — the lookup table behind [`auth::resolve_principal`]. A tenant whose
     /// `${VAR}` token didn't resolve is absent: every request 401s.
@@ -643,6 +649,28 @@ async fn main() -> anyhow::Result<()> {
     let auth_mode = auth_config.mode;
     let reads_gated = auth_config.reads_gated;
 
+    // The secret-resolution seam (ADR-0004). Built here (not inline in the Host
+    // literal) so the OAuth client secret can resolve through it at startup.
+    let secrets = Arc::new(secrets::SecretRegistry::default());
+
+    // Resolve the OAuth/OIDC client config (auth.md §7 C6) in multi-tenant mode.
+    // A PARTIAL or unresolvable config fails startup (no silent open-mode
+    // fallback, auth.md §2); a fully-absent one is PAT-only bootstrap (None).
+    let oauth = if auth_mode == config::AuthMode::MultiTenant {
+        oauth::OauthConfig::resolve(&auth_config, &secrets)
+            .await
+            .context("resolving the [auth] OAuth config")?
+    } else {
+        None
+    };
+    if let Some(cfg) = &oauth {
+        tracing::info!(
+            "multi-tenant mode: OAuth sign-in enabled (provider {}, authorize {})",
+            cfg.provider,
+            cfg.authorize_url
+        );
+    }
+
     // Multi-tenant mode (auth.md §4): open the host-local credential store and,
     // on a zero-accounts boot, mint a local-admin PAT printed ONCE. The store
     // lives at the host data root, NEVER inside any app's replicated document.
@@ -784,12 +812,13 @@ async fn main() -> anyhow::Result<()> {
         auth_mode,
         reads_gated,
         accounts,
+        oauth,
         tenant_tokens: RwLock::new(BTreeMap::new()),
         bind_loopback,
         nudge: Arc::new(Notify::new()),
         gateway: mcp_gateway,
         fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
-        secrets: Arc::new(secrets::SecretRegistry::default()),
+        secrets,
         artifacts_upload_enabled,
     });
     host.converge().await;
