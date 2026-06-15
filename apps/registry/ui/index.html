@@ -112,25 +112,6 @@
     .btn.primary:hover { background: color-mix(in srgb, var(--blue) 85%, #fff); }
     :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
-    /* auth token: the host gates mutating routes behind a bearer token */
-    .tokenrow {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-    }
-    .tokenrow input {
-      flex: 1;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      color: var(--text);
-      font: 12px/1 var(--mono);
-      padding: 8px 10px;
-    }
-    .tokenrow input::placeholder { color: var(--faint); font-family: var(--sans); }
-
     /* fleet rows */
     .fleet { list-style: none; margin: 0; padding: 0 0 8px; }
     .row { border-bottom: 1px solid var(--line); padding: 14px 4px 14px 2px; }
@@ -240,12 +221,6 @@
       <span class="micro">Apps in fleet</span>
     </section>
 
-    <div class="tokenrow">
-      <span class="micro">Auth token</span>
-      <input id="token" type="password" autocomplete="off"
-             placeholder="TANGRAM_AUTH_TOKEN — required for installs/changes" />
-    </div>
-
     <details id="installPanel">
       <summary><span class="micro">+ Install app</span></summary>
       <form class="install" id="installForm">
@@ -274,22 +249,20 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
-    // ── auth: the host gates mutating routes behind a bearer token ─────────
-    const tokenInput = $("token");
-    tokenInput.value = localStorage.getItem("tangram_auth_token") ?? "";
-    tokenInput.addEventListener("change", () =>
-      localStorage.setItem("tangram_auth_token", tokenInput.value));
-
+    // ── actions: in the self-hosted, loopback-trusted default
+    // (docs/design/auth.md) no credential is needed — local connections are
+    // authorized, so mutating actions just POST JSON. If the host requires
+    // credentials (exposed / multi-tenant) a call fails cleanly with 401 and
+    // we surface the message. ──────────────────────────────────────────────
     async function act(name, args) {
-      const headers = { "Content-Type": "application/json" };
-      if (tokenInput.value) headers["Authorization"] = `Bearer ${tokenInput.value}`;
       const res = await fetch(`api/actions/${name}`, {
         method: "POST",
-        headers,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(args ?? {}),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 401) throw new Error("Unauthorized — set the auth token above");
+      if (res.status === 401)
+        throw new Error("unauthorized (this host requires credentials — see docs/design/auth.md)");
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data.result;
     }

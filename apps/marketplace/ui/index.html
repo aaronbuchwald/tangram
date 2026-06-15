@@ -113,25 +113,6 @@
     .btn[disabled] { opacity: .45; cursor: default; }
     :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 
-    /* auth token: installs go through the registry's bearer-gated actions */
-    .tokenrow {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-    }
-    .tokenrow input {
-      flex: 1;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      color: var(--text);
-      font: 12px/1 var(--mono);
-      padding: 8px 10px;
-    }
-    .tokenrow input::placeholder { color: var(--faint); font-family: var(--sans); }
-
     /* listing cards */
     .listings { list-style: none; margin: 0; padding: 14px 0 8px; display: grid; gap: 14px; }
     .card {
@@ -301,12 +282,6 @@
       <span class="micro">Apps in catalog</span>
     </section>
 
-    <div class="tokenrow">
-      <span class="micro">Auth token</span>
-      <input id="token" type="password" autocomplete="off"
-             placeholder="TANGRAM_AUTH_TOKEN — installs go through the registry" />
-    </div>
-
     <ul class="listings" id="listings"></ul>
 
     <details class="addpanel" id="uploadPanel" hidden>
@@ -406,24 +381,20 @@
   <script>
     const $ = (id) => document.getElementById(id);
 
-    // ── auth: same token (and localStorage slot) as the registry UI — the
-    // host gates the registry's install_app and this app's add_listing
-    // behind it ───────────────────────────────────────────────────────────
-    const tokenInput = $("token");
-    tokenInput.value = localStorage.getItem("tangram_auth_token") ?? "";
-    tokenInput.addEventListener("change", () =>
-      localStorage.setItem("tangram_auth_token", tokenInput.value));
-
+    // ── actions: in the self-hosted, loopback-trusted default
+    // (docs/design/auth.md) no credential is needed — local connections are
+    // authorized, so installs (via the registry's install_app) and this app's
+    // add_listing just POST JSON. If the host requires credentials (exposed /
+    // multi-tenant) a call fails cleanly with 401 and we surface the message. ─
     async function post(path, args) {
-      const headers = { "Content-Type": "application/json" };
-      if (tokenInput.value) headers["Authorization"] = `Bearer ${tokenInput.value}`;
       const res = await fetch(path, {
         method: "POST",
-        headers,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(args ?? {}),
       });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 401) throw new Error("Unauthorized — set the auth token above");
+      if (res.status === 401)
+        throw new Error("unauthorized (this host requires credentials — see docs/design/auth.md)");
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data.result;
     }
@@ -678,11 +649,14 @@
     // the host-computed sha. The panel is only shown when the host has open
     // upload enabled (probed via a HEAD/GET below). ───────────────────────
     async function uploadArtifact(bytes) {
-      const headers = { "Content-Type": "application/wasm" };
-      if (tokenInput.value) headers["Authorization"] = `Bearer ${tokenInput.value}`;
-      const res = await fetch("../artifacts", { method: "POST", headers, body: bytes });
+      const res = await fetch("../artifacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/wasm" },
+        body: bytes,
+      });
       const data = await res.json().catch(() => ({}));
-      if (res.status === 401) throw new Error("Unauthorized — set the auth token above");
+      if (res.status === 401)
+        throw new Error("unauthorized (this host requires credentials — see docs/design/auth.md)");
       if (res.status === 404) throw new Error("Open upload is not enabled on this host");
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data; // { sha256, url }
