@@ -38,7 +38,9 @@ dotenvy = "0.15"
 futures-util = "0.3"
 notify = "8"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest ={ version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rmcp = { version = "1.7", features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
 secrecy = "0.10"

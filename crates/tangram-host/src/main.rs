@@ -22,6 +22,7 @@
 //! live — apps appear, disappear, and reload (also when a component file is
 //! rebuilt) without restarting the host.
 
+mod accounts;
 mod app;
 mod auth;
 mod config;

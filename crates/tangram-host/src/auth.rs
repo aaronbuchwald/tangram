@@ -24,7 +24,7 @@
 //! is forthcoming (auth.md checkpoints C2–C6) and slots into the same
 //! [`Principal`] seam.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -89,15 +89,108 @@ pub fn artifact_unauthorized() -> Response {
     unauthorized()
 }
 
+// ── scopes (auth.md §4 step 3, #20 §3.4) ────────────────────────────────────
+
+/// An authorization scope — what a credential may do, checked against the
+/// action's required scope (not all-or-nothing). Sourced from the app's
+/// mutating-tools manifest in C3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Scope {
+    /// Read the registry / app list / state when reads are gated.
+    RegistryRead,
+    /// Install / remove / enable apps (the mutating registry surface).
+    RegistryWrite,
+    /// Administrative operations (audit read, account management).
+    Admin,
+}
+
+impl Scope {
+    /// The on-the-wire / at-rest token for this scope (stable; stored in the
+    /// account DB and parsed back by [`ScopeSet::from_db_string`]).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RegistryRead => "registry:read",
+            Self::RegistryWrite => "registry:write",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parse a single scope token; unknown tokens are dropped by the caller.
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "registry:read" => Some(Self::RegistryRead),
+            "registry:write" => Some(Self::RegistryWrite),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    /// Every scope, in a stable order — the basis of [`ScopeSet::all`].
+    const ALL: [Self; 3] = [Self::RegistryRead, Self::RegistryWrite, Self::Admin];
+}
+
+/// A set of [`Scope`]s carried by a credential / principal. Stored in the
+/// account DB as a comma-joined token string ([`Self::to_db_string`] /
+/// [`Self::from_db_string`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScopeSet {
+    scopes: BTreeSet<Scope>,
+}
+
+impl ScopeSet {
+    /// The empty scope set (no authority).
+    #[allow(dead_code)] // used by C3 callers / tests
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Every scope — the local-admin / interactive-session authority.
+    pub fn all() -> Self {
+        Self {
+            scopes: Scope::ALL.into_iter().collect(),
+        }
+    }
+
+    /// A set from an explicit list of scopes.
+    #[allow(dead_code)] // used by C3 callers / tests
+    pub fn from_scopes(scopes: impl IntoIterator<Item = Scope>) -> Self {
+        Self {
+            scopes: scopes.into_iter().collect(),
+        }
+    }
+
+    /// Does this set contain `scope`?
+    pub fn contains(&self, scope: Scope) -> bool {
+        self.scopes.contains(&scope)
+    }
+
+    /// The at-rest form: scope tokens joined by commas in a stable order.
+    pub fn to_db_string(&self) -> String {
+        self.scopes
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Parse the at-rest form; unknown / empty tokens are dropped (forward
+    /// compatible — a scope this build doesn't know is simply not granted).
+    pub fn from_db_string(raw: &str) -> Self {
+        Self {
+            scopes: raw.split(',').filter_map(Scope::parse).collect(),
+        }
+    }
+}
+
 // ── the request principal (RUNTIME_PLAN Phase 5 → 6 seam) ───────────────────
 
-/// Who a request acts as, in the two-mode model (docs/design/auth.md). Today
-/// there are two kinds: the self-hosted single user / loopback-trusted
-/// principal ([`Principal::LocalUser`]) and a tenant authenticated by its
-/// bearer token. The multi-tenant identity layer (hashed PATs / sessions /
-/// OAuth claims) swaps the lookup in [`resolve_principal`] in checkpoints
-/// C2–C6 without touching call sites — everything downstream consumes a
-/// `Principal`, never a raw header.
+/// Who a request acts as, in the two-mode model (docs/design/auth.md). Three
+/// kinds: the self-hosted single user / loopback-trusted principal
+/// ([`Principal::LocalUser`]); a tenant authenticated by its bearer token
+/// ([`Principal::Tenant`]); and a multi-tenant user authenticated by a hashed
+/// PAT or session ([`Principal::User`], carrying identity + scopes — the
+/// credential layer ports the Cloudflare model, auth.md §4). Everything
+/// downstream consumes a `Principal`, never a raw header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
     /// The self-hosted single user — loopback-trusted, no token needed.
@@ -108,13 +201,34 @@ pub enum Principal {
     LocalUser,
     /// A request authenticated as this tenant.
     Tenant(String),
+    /// A multi-tenant user, authenticated by a hashed PAT or session, carrying
+    /// the identity + scopes the credential validated to (auth.md §3).
+    #[allow(dead_code)] // minted in C3
+    User {
+        user_id: String,
+        email: String,
+        groups: Vec<String>,
+        scopes: ScopeSet,
+    },
 }
 
 impl Principal {
     pub fn tenant(&self) -> Option<&str> {
         match self {
-            Self::LocalUser => None,
+            Self::LocalUser | Self::User { .. } => None,
             Self::Tenant(name) => Some(name.as_str()),
+        }
+    }
+
+    /// Does this principal carry `scope`? `LocalUser` and `Tenant` are full
+    /// authority within their surface (loopback trust / the tenant's own
+    /// namespace), so they have every scope; a `User` is checked against the
+    /// scopes its credential validated to.
+    #[allow(dead_code)] // enforced by the C3 scope guards
+    pub fn has_scope(&self, scope: Scope) -> bool {
+        match self {
+            Self::LocalUser | Self::Tenant(_) => true,
+            Self::User { scopes, .. } => scopes.contains(scope),
         }
     }
 }
@@ -375,6 +489,49 @@ mod tests {
 
         assert_eq!(Principal::Tenant("alice".into()).tenant(), Some("alice"));
         assert_eq!(Principal::LocalUser.tenant(), None);
+    }
+
+    #[test]
+    fn scope_set_round_trips_through_db_string() {
+        let set = ScopeSet::from_scopes([Scope::RegistryWrite, Scope::Admin]);
+        // Stable order, regardless of insertion order.
+        assert_eq!(set.to_db_string(), "registry:write,admin");
+        let parsed = ScopeSet::from_db_string(&set.to_db_string());
+        assert_eq!(parsed, set);
+        assert!(parsed.contains(Scope::Admin));
+        assert!(!parsed.contains(Scope::RegistryRead));
+
+        // all() carries every scope; empty() none.
+        assert!(ScopeSet::all().contains(Scope::RegistryRead));
+        assert!(ScopeSet::all().contains(Scope::RegistryWrite));
+        assert!(ScopeSet::all().contains(Scope::Admin));
+        assert!(!ScopeSet::empty().contains(Scope::Admin));
+
+        // Unknown / empty tokens are dropped (forward compatible).
+        let lenient = ScopeSet::from_db_string("admin,,future:scope,registry:read");
+        assert_eq!(
+            lenient,
+            ScopeSet::from_scopes([Scope::Admin, Scope::RegistryRead])
+        );
+        assert_eq!(ScopeSet::from_db_string("").to_db_string(), "");
+    }
+
+    #[test]
+    fn principal_scope_authority() {
+        // LocalUser and Tenant are full authority within their surface.
+        assert!(Principal::LocalUser.has_scope(Scope::Admin));
+        assert!(Principal::Tenant("alice".into()).has_scope(Scope::RegistryWrite));
+        // A User is checked against its own scope set.
+        let user = Principal::User {
+            user_id: "u1".into(),
+            email: "u@x".into(),
+            groups: vec![],
+            scopes: ScopeSet::from_scopes([Scope::RegistryRead]),
+        };
+        assert!(user.has_scope(Scope::RegistryRead));
+        assert!(!user.has_scope(Scope::RegistryWrite));
+        assert!(!user.has_scope(Scope::Admin));
+        assert_eq!(user.tenant(), None);
     }
 
     #[test]
