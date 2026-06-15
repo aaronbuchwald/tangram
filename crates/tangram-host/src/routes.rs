@@ -189,6 +189,12 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/fleet", get(fleet))
         .route("/mcp", axum::routing::any(aggregate_mcp))
+        // The LLM proxy plane (ADR-0012): `/llm/<name>/…` is reverse-proxied to
+        // agentgateway's `ai` backend for that provider, with the provider key
+        // injected host-side. Without a gateway both 404 with guidance. Explicit
+        // routes (like `/mcp`) so they take precedence over `/<app>/` dispatch.
+        .route("/llm", axum::routing::any(llm_proxy))
+        .route("/llm/{*rest}", axum::routing::any(llm_proxy))
         // The artifact store (Phase S2b): upload a WASM blob (the host
         // computes its sha and content-addresses it) and serve it back by
         // hash. Both routes consult `host.artifacts_upload_enabled` — when
@@ -335,6 +341,24 @@ async fn aggregate_mcp(
             StatusCode::NOT_FOUND,
             "no aggregate /mcp endpoint (enable [gateway] in apps.toml); \
              per-app MCP is at /<app>/mcp",
+        )
+            .into_response(),
+    }
+}
+
+/// The LLM proxy endpoint (ADR-0012): `POST /llm/<name>/…` is reverse-proxied
+/// through agentgateway to the named provider's `ai` backend, with the provider
+/// API key injected host-side (the client/component never holds it). Without a
+/// gateway there is nothing to proxy and the route 404s with guidance — mirrors
+/// the aggregate `/mcp` posture. Loopback-only is enforced on agentgateway's
+/// side by the generated route's authorization rule (v1 is loopback-trusted).
+async fn llm_proxy(State((host, via_gateway)): State<(Arc<Host>, bool)>, req: Request) -> Response {
+    match host.gateway.as_ref().filter(|_| via_gateway) {
+        Some(gateway) => gateway.proxy(req).await,
+        None => (
+            StatusCode::NOT_FOUND,
+            "no LLM proxy (enable [gateway] in apps.toml and declare a \
+             [[gateway.llm]] provider); the provider key is injected host-side",
         )
             .into_response(),
     }

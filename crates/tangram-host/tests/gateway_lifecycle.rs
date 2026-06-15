@@ -561,6 +561,153 @@ async fn missing_binary_falls_back_to_direct_serving() {
     assert_eq!(res.status(), reqwest::StatusCode::NOT_FOUND);
 }
 
+/// ADR-0012: the host proxies declared `[[gateway.llm]]` providers through
+/// agentgateway's `ai` backend at `/llm/<name>`. Pins (a) the generated config
+/// — the `/llm/<name>` route carries the loopback-only authorization rule and a
+/// `backendAuth.key` that is the `$VAR` env ref, never the plaintext key; and
+/// (b) the route WIRING end to end — a POST to `/llm/<name>/v1/chat/completions`
+/// is proxied through the gateway to the real provider, which (with a bogus key)
+/// answers a provider-side auth error. That 4xx is the proof the path mapped to
+/// the provider and the key was injected host-side — no tokens spent.
+///
+/// The client subpath under `/llm/<name>` is documented as
+/// `/v1/chat/completions` (OpenAI-compat); agentgateway's `ai` backend
+/// translates the OpenAI-style body to the provider's native API and the literal
+/// Tangram path is consumed by the prefix match, not forwarded upstream.
+#[tokio::test]
+async fn llm_proxy_route_is_generated_and_wired() {
+    if !component("notes").exists() {
+        eprintln!("SKIPPING llm proxy test: notes component missing");
+        return;
+    }
+    if !agentgateway_on_path() {
+        eprintln!("SKIPPING llm proxy test: no agentgateway binary on PATH");
+        return;
+    }
+
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let gateway_port = free_port();
+    let apps_toml = home.join("apps.toml");
+    // A single passthrough Anthropic provider; the key is a bogus host env var
+    // (NOT a real key) so the provider answers an auth error, not a completion.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[gateway]
+enabled = true
+port = {gateway_port}
+
+[[gateway.llm]]
+name = "claude"
+provider = "anthropic"
+model = "claude-3-5-haiku-20241022"
+key = "env://TANGRAM_TEST_LLM_KEY"
+
+[apps.notes]
+component = "{notes}"
+ui = "{notes_ui}"
+"#,
+            notes = component("notes").display(),
+            notes_ui = root.join("apps/notes/ui").display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    // spawn_host sets TANGRAM_AUTH_TOKEN and the tenant tokens (inert here); we
+    // additionally need the bogus provider key in the gateway child's env. It is
+    // inherited from the host process, which inherits this test process's env.
+    unsafe {
+        std::env::set_var("TANGRAM_TEST_LLM_KEY", "bogus-not-a-real-key");
+    }
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    wait_for("gateway running", Duration::from_secs(120), || async {
+        fleet_gateway(&client, &base).await["running"] == serde_json::Value::Bool(true)
+    })
+    .await;
+
+    // (a) The generated config carries the LLM route with the loopback rule and
+    // the env-ref key (the plaintext key never appears).
+    let config_path = home.join(".tangram-host/agentgateway.json");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("generated config"))
+            .expect("config json");
+    let routes = config["binds"][0]["listeners"][0]["routes"]
+        .as_array()
+        .expect("routes");
+    let llm = routes
+        .iter()
+        .find(|r| r["name"] == "llm-claude")
+        .expect("llm-claude route present");
+    assert_eq!(llm["matches"][0]["path"]["pathPrefix"], "/llm/claude");
+    assert_eq!(
+        llm["policies"]["backendAuth"]["key"],
+        "$TANGRAM_TEST_LLM_KEY"
+    );
+    assert!(
+        llm["policies"]["authorization"]["rules"][0]
+            .as_str()
+            .unwrap()
+            .contains("source.address"),
+        "loopback-only rule on the LLM route: {llm}"
+    );
+    let serialized = std::fs::read_to_string(&config_path).expect("config text");
+    assert!(
+        !serialized.contains("bogus-not-a-real-key"),
+        "the plaintext provider key must never land in the generated config"
+    );
+
+    // (b) Route wiring end to end: a POST to /llm/claude/v1/chat/completions is
+    // proxied through the gateway to Anthropic, which answers an auth error
+    // (the bogus key WAS injected host-side). A 401/403 from the provider is the
+    // proof of wiring; a 404/502 would mean the route or proxy is broken.
+    let res = client
+        .post(format!("{base}/llm/claude/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 16,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .send()
+        .await
+        .expect("llm proxy request");
+    let status = res.status();
+    assert!(
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN,
+        "expected a provider-side auth error (proof the bogus key was injected \
+         and the path mapped to the provider), got {status}"
+    );
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("api-key") || body.contains("authentication") || body.contains("api_key"),
+        "expected an Anthropic auth-error body, got: {body}"
+    );
+
+    // Disabled-gateway behavior is covered by the unit 404 in routes.rs; here we
+    // additionally confirm an unknown provider name 404s through the live host
+    // (no /llm/ghost route exists, so the gateway has no match).
+    let res = client
+        .post(format!("{base}/llm/ghost/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("unknown provider request");
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "an undeclared provider has no route"
+    );
+}
+
 /// Phase 5 × the gateway: tenant MCP lives at `/t/<tenant>/<app>/mcp` plus a
 /// per-tenant aggregate `/t/<tenant>/mcp` that lists ONLY that tenant's
 /// tools; the global aggregate `/mcp` excludes tenant apps entirely; and the

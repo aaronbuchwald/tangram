@@ -491,6 +491,48 @@ curl -sLo agentgateway https://github.com/agentgateway/agentgateway/releases/dow
 sudo install -m 0755 agentgateway /usr/local/bin/agentgateway
 ```
 
+### LLM proxy through agentgateway: one host-managed key boundary
+
+agentgateway also natively proxies LLM providers, so the host can hand apps and
+local clients a single, host-managed LLM egress — one place that injects the
+provider API key at the boundary ([ADR-0012](docs/adr/0012-llm-proxy-via-agentgateway.md);
+the [ADR-0005](docs/adr/0005-egress-credential-injection.md) posture: the key
+never leaves the host, clients/components never hold it). Declare providers
+under the same `[gateway]` section; each becomes a `/llm/<name>` route:
+
+```toml
+[[gateway.llm]]
+name     = "claude"                       # path segment + backend name (unique, path-safe)
+provider = "anthropic"                    # openai | anthropic | gemini | vertex | bedrock | groq
+model    = "claude-3-5-haiku-20241022"    # OPTIONAL; omit ⇒ passthrough (client body's `model`)
+key      = "env://ANTHROPIC_API_KEY"      # env-ref; the plaintext key stays in .env, host-side
+```
+
+Put the real key in `.env` (`ANTHROPIC_API_KEY=sk-…`) — the gateway child
+inherits the host environment, so `key = "env://ANTHROPIC_API_KEY"` is lowered
+to agentgateway's `"$ANTHROPIC_API_KEY"` substitution and resolves host-side.
+A loopback client then picks the provider by URL and sends an OpenAI-style chat
+request:
+
+```sh
+curl http://127.0.0.1:8080/llm/claude/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-3-5-haiku-20241022","max_tokens":64,
+       "messages":[{"role":"user","content":"hello"}]}'
+```
+
+The client contract: **`POST /llm/<name>/v1/chat/completions`** with an
+OpenAI-style body. agentgateway's `ai` backend translates that request to the
+provider's native API (e.g. Anthropic's Messages API) and injects the key — the
+`/llm/<name>` prefix selects the provider and is not forwarded literally
+upstream. Omit `model` in the config for passthrough (the body's `model` is
+honored); pin it to force one model. Every generated `/llm/<name>` route carries
+the same **loopback-only** authorization rule as the MCP routes, so the LLM
+proxy — a spend surface — is unreachable from off the box. **v1 is
+loopback-trusted only:** before any non-loopback exposure the proxy MUST be
+gated per-principal (an `llm` scope + per-principal rate-limit), see ADR-0012.
+With `[gateway]` disabled, `/llm/*` returns a clear 404.
+
 ## Multi-tenancy: isolated app sets under one host (Phase 5)
 
 One host process, one public port, N tenants. A `[tenants]` section in

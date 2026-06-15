@@ -1220,6 +1220,13 @@ impl HostConfig {
                  registry app to clone as its default bootstrap"
             );
         }
+        // `[[gateway.llm]]` providers (ADR-0012): unique path-safe names, a
+        // known provider, and an `env://` key ref — validated at load so a bad
+        // entry is a clear config error, not a route agentgateway rejects.
+        let mut seen_llm = std::collections::BTreeSet::new();
+        for provider in &config.gateway.llm {
+            provider.validate(&mut seen_llm)?;
+        }
         Ok(config)
     }
 
@@ -1232,6 +1239,82 @@ impl HostConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_and_validates_gateway_llm_providers() {
+        // A valid provider set parses; model is optional.
+        let config = HostConfig::parse(
+            r#"
+            [gateway]
+            enabled = true
+
+            [[gateway.llm]]
+            name = "claude"
+            provider = "anthropic"
+            model = "claude-3-5-haiku-20241022"
+            key = "env://ANTHROPIC_API_KEY"
+
+            [[gateway.llm]]
+            name = "gpt"
+            provider = "openai"
+            key = "env://OPENAI_API_KEY"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.gateway.llm.len(), 2);
+        assert_eq!(config.gateway.llm[0].name, "claude");
+        assert_eq!(
+            config.gateway.llm[0].model.as_deref(),
+            Some("claude-3-5-haiku-20241022")
+        );
+        assert_eq!(config.gateway.llm[1].model, None, "model is optional");
+
+        // Duplicate name rejected at load.
+        assert!(
+            HostConfig::parse(
+                r#"
+                [[gateway.llm]]
+                name = "dup"
+                provider = "anthropic"
+                key = "env://A"
+                [[gateway.llm]]
+                name = "dup"
+                provider = "openai"
+                key = "env://B"
+                "#,
+            )
+            .is_err(),
+            "duplicate provider name"
+        );
+
+        // Unknown provider rejected.
+        assert!(
+            HostConfig::parse(
+                r#"
+                [[gateway.llm]]
+                name = "x"
+                provider = "notaprovider"
+                key = "env://K"
+                "#,
+            )
+            .is_err(),
+            "unknown provider"
+        );
+
+        // Non-env key rejected (the secret must never land inline).
+        assert!(
+            HostConfig::parse(
+                r#"
+                [[gateway.llm]]
+                name = "x"
+                provider = "openai"
+                key = "sk-literal-secret"
+                "#,
+            )
+            .is_err(),
+            "inline key"
+        );
+    }
 
     #[test]
     fn parses_declared_manifest_and_defaults_to_derived() {

@@ -34,6 +34,20 @@ enabled = true
 # binary = "/usr/local/bin/agentgateway"  # default: `agentgateway` on $PATH
 # port = 19200                            # internal port; default: auto
 
+# LLM proxy through agentgateway (ADR-0012). Each [[gateway.llm]] becomes a
+# route at /llm/<name>: a loopback client POSTs an OpenAI-style chat request to
+# /llm/<name>/v1/chat/completions and the host proxies it → agentgateway → the
+# provider, with the provider API key INJECTED HOST-SIDE (ADR-0005: the key
+# never leaves the host; clients/components never see it). The key MUST be an
+# env:// ref — put the actual key in .env (e.g. ANTHROPIC_API_KEY=sk-…). v1 is
+# loopback-trusted (every route is loopback-only); do not expose off-box without
+# the per-principal gate noted in ADR-0012.
+# [[gateway.llm]]
+# name     = "claude"                       # path segment + backend name (unique, path-safe)
+# provider = "anthropic"                    # openai|anthropic|gemini|vertex|bedrock|groq
+# model    = "claude-3-5-haiku-20241022"    # OPTIONAL; omit ⇒ passthrough (client body's `model`)
+# key      = "env://ANTHROPIC_API_KEY"      # env-ref; lowered to agentgateway's "$VAR"
+
 # Browser task automation (host-side; ADR-0010, docs/design/task-automation-
 # browser.md). When enabled, tangram-host supervises a browser-driver child
 # (like [gateway]) OUTSIDE the WASM sandbox and runs gated, credential-

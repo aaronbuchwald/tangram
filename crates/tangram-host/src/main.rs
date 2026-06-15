@@ -756,6 +756,7 @@ async fn main() -> anyhow::Result<()> {
                     binary,
                     port,
                     internal_port,
+                    gateway_settings.llm.clone(),
                     config_file,
                 )))
             }

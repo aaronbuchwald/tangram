@@ -219,6 +219,19 @@ capability at all — the host is the only thing touching `$HOME/.<app-name>`.
   direct per-app serving exactly as before (pinned by
   `tests/gateway_lifecycle.rs`, alongside handshake/auth/converge/crash-
   recovery coverage).
+- [x] agentgateway as an LLM proxy — delivered 2026-06-15 (ADR-0012;
+  `[[gateway.llm]]` in apps.toml; README "LLM proxy through agentgateway").
+  Beyond MCP multiplexing, the host renders one `ai` route per declared
+  provider at `/llm/<name>` (path-based selection, config-driven providers),
+  reverse-proxying `POST /llm/<name>/v1/chat/completions` host→gateway→the
+  provider with the provider API key INJECTED HOST-SIDE (`key="env://VAR"`
+  lowered to agentgateway's `"$VAR"`; ADR-0005 — the key never reaches
+  clients/components). Every LLM route carries the same loopback-only source
+  rule as the MCP routes; v1 is loopback-trusted. It is a SPEND SURFACE: before
+  any non-loopback exposure it MUST gate per-principal (an `llm` scope +
+  per-principal rate-limit). Pinned by `tests/gateway_lifecycle.rs`
+  (config generation + the loopback rule + the `$VAR` key ref + the live
+  proxy path, asserted via a provider-side auth error — no tokens spent).
 - `tangram-shell` stays as zero-dependency dev mode (unchanged, verified).
 - [x] Capabilities parity (the former known gap): `describe()` carries an
   optional `capabilities` object, computed by the app at instantiation from

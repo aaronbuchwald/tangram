@@ -63,6 +63,95 @@ pub struct GatewaySettings {
     /// free port chosen at startup.
     #[serde(default)]
     pub port: Option<u16>,
+    /// `[[gateway.llm]]` — LLM providers the host proxies through agentgateway's
+    /// native `ai` backends (ADR-0012). Each becomes a `/llm/<name>` route with
+    /// the provider API key injected host-side (ADR-0005: the key never leaves
+    /// the host). Empty (the default) → no LLM proxy, MCP-only behavior.
+    #[serde(default)]
+    pub llm: Vec<LlmProvider>,
+}
+
+/// One `[[gateway.llm]]` provider (ADR-0012). The host renders it into an
+/// agentgateway `ai` route at `/llm/<name>` and injects the provider key
+/// host-side. Clients pick the provider by URL and POST an OpenAI-style chat
+/// request; agentgateway translates it to the provider's native API.
+///
+/// ```toml
+/// [[gateway.llm]]
+/// name     = "claude"                      # path segment + backend name (unique, path-safe)
+/// provider = "anthropic"                   # one of agentgateway's AI providers
+/// model    = "claude-3-5-haiku-20241022"   # OPTIONAL; omit ⇒ passthrough (client's body `model`)
+/// key      = "env://ANTHROPIC_API_KEY"     # env-ref; lowered to agentgateway's "$VAR"
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LlmProvider {
+    /// Path segment + agentgateway backend name. Unique across providers and
+    /// path-safe (alphanumeric / dash / underscore — validated at load).
+    pub name: String,
+    /// The AI provider, one of agentgateway's supported set (see
+    /// [`KNOWN_PROVIDERS`]). Validated at load.
+    pub provider: String,
+    /// OPTIONAL model pin. Omitted ⇒ passthrough: the client's request-body
+    /// `model` is honored by agentgateway.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The provider API key as an `env://NAME` reference (mirrors the inject
+    /// `env://` rule so the secret never lands in a replicated doc). Lowered to
+    /// agentgateway's `"$NAME"` substitution; the gateway child inherits the
+    /// host env (dotenvy `.env`) so the key resolves host-side at the boundary.
+    pub key: String,
+}
+
+/// agentgateway's supported AI providers (the `provider` tag set on an `ai`
+/// backend). Declared providers are validated against this at load so a typo is
+/// a clear config error, not a runtime route the gateway silently rejects.
+pub const KNOWN_PROVIDERS: &[&str] =
+    &["openai", "anthropic", "gemini", "vertex", "bedrock", "groq"];
+
+impl LlmProvider {
+    /// Validate this provider entry: a non-empty, path-safe, unique `name`
+    /// (checked against `seen`); a `provider` in [`KNOWN_PROVIDERS`]; and a
+    /// `key` that is an `env://NAME` reference (the secret never lands inline).
+    pub fn validate(&self, seen: &mut std::collections::BTreeSet<String>) -> anyhow::Result<()> {
+        crate::config::validate_name(&self.name)
+            .with_context(|| format!("[[gateway.llm]] name {:?}", self.name))?;
+        anyhow::ensure!(
+            seen.insert(self.name.clone()),
+            "[[gateway.llm]] name {:?} is declared more than once (names map to /llm/<name> \
+             routes and must be unique)",
+            self.name
+        );
+        anyhow::ensure!(
+            KNOWN_PROVIDERS.contains(&self.provider.as_str()),
+            "[[gateway.llm]] {:?}: provider {:?} is not one of agentgateway's AI providers ({})",
+            self.name,
+            self.provider,
+            KNOWN_PROVIDERS.join(", ")
+        );
+        self.env_var()?;
+        Ok(())
+    }
+
+    /// The env var name behind the `env://NAME` key reference. Errors when the
+    /// key is not an `env://` ref (an inline key would land the secret in the
+    /// spec — refused, mirroring the inject rule).
+    pub fn env_var(&self) -> anyhow::Result<&str> {
+        let name = self.key.strip_prefix("env://").ok_or_else(|| {
+            anyhow::anyhow!(
+                "[[gateway.llm]] {:?}: key {:?} must be an env reference of the form \
+                 \"env://VAR_NAME\" (the plaintext key stays host-side, never in the spec)",
+                self.name,
+                self.key
+            )
+        })?;
+        anyhow::ensure!(
+            !name.trim().is_empty(),
+            "[[gateway.llm]] {:?}: key \"env://\" is missing the variable name",
+            self.name
+        );
+        Ok(name)
+    }
 }
 
 impl GatewaySettings {
@@ -162,6 +251,40 @@ fn aggregate_route(route_name: &str, path: &str, apps: &[&AppKey], internal_port
     })
 }
 
+/// One LLM proxy route (ADR-0012): `/llm/<name>` → agentgateway's native `ai`
+/// backend for the provider, with the provider API key injected host-side via
+/// `backendAuth` (`key="env://VAR"` lowered to `"$VAR"`; the gateway child
+/// inherits the host env). Carries the SAME loopback-only authorization rule
+/// every MCP route does — the gateway binds wildcard, so the LLM spend surface
+/// is unreachable from off the box (ADR-0012 §security; v1 is loopback-trusted,
+/// non-loopback exposure MUST first gate per-principal). A `model` is emitted
+/// only when pinned; omitted ⇒ passthrough (the client's body `model`).
+fn llm_route(provider: &LlmProvider) -> Value {
+    let env_var = provider
+        .env_var()
+        .expect("validated at load: key is an env:// ref");
+    let mut provider_block = serde_json::Map::new();
+    if let Some(model) = &provider.model {
+        provider_block.insert("model".to_string(), json!(model));
+    }
+    // `{ "<provider>": { "model": … } }` — the tag is dynamic, so build the
+    // one-key map directly (json! keys must be literals).
+    let mut provider_map = serde_json::Map::new();
+    provider_map.insert(provider.provider.clone(), Value::Object(provider_block));
+    json!({
+        "name": format!("llm-{}", provider.name),
+        "policies": {
+            "authorization": { "rules": [LOOPBACK_RULE] },
+            "backendAuth": { "key": format!("${env_var}") }
+        },
+        "matches": [{ "path": { "pathPrefix": format!("/llm/{}", provider.name) } }],
+        "backends": [{ "ai": {
+            "name": provider.name,
+            "provider": Value::Object(provider_map)
+        } }]
+    })
+}
+
 /// Render the full agentgateway config for the given RUNNING apps: one
 /// per-app route (`/<app>/mcp` or `/t/<tenant>/<app>/mcp` → the same path on
 /// the host's internal listener, tool names unchanged), the aggregate `/mcp`
@@ -171,7 +294,17 @@ fn aggregate_route(route_name: &str, path: &str, apps: &[&AppKey], internal_port
 /// internal endpoints still enforce the tenant bearer (the gateway forwards
 /// Authorization). Deterministic for a given input (apps are sorted), so
 /// converge can diff bytes to decide whether to rewrite.
-pub fn render_config(apps: &[AppKey], gateway_port: u16, internal_port: u16) -> Value {
+///
+/// Appends one LLM proxy route per `llm` provider (ADR-0012): a `/llm/<name>`
+/// `ai` backend with the host-injected key. These are startup config (the
+/// provider list is fixed; only the MCP routes change as apps converge), but
+/// they ride along in every render so the file stays the single source.
+pub fn render_config(
+    apps: &[AppKey],
+    llm: &[LlmProvider],
+    gateway_port: u16,
+    internal_port: u16,
+) -> Value {
     let mut apps: Vec<&AppKey> = apps.iter().collect();
     apps.sort();
     apps.dedup();
@@ -223,6 +356,13 @@ pub fn render_config(apps: &[AppKey], gateway_port: u16, internal_port: u16) -> 
         &top,
         internal_port,
     ));
+
+    // The LLM proxy routes (ADR-0012), after the MCP routes: one `/llm/<name>`
+    // `ai` backend per declared provider, each loopback-gated with the key
+    // injected host-side. Disjoint prefixes from `/mcp`, so order is cosmetic.
+    for provider in llm {
+        routes.push(llm_route(provider));
+    }
 
     json!({
         // The admin/stats/readiness listeners are pinned to ephemeral
@@ -280,6 +420,9 @@ pub struct Gateway {
     pub port: u16,
     /// The host's internal listener that agentgateway targets per app.
     pub internal_port: u16,
+    /// `[[gateway.llm]]` providers rendered into `/llm/<name>` `ai` routes
+    /// (ADR-0012). Fixed at startup (startup config, like the ports).
+    llm: Vec<LlmProvider>,
     config_path: PathBuf,
     client: reqwest::Client,
     running: AtomicBool,
@@ -288,11 +431,18 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(binary: PathBuf, port: u16, internal_port: u16, config_path: PathBuf) -> Self {
+    pub fn new(
+        binary: PathBuf,
+        port: u16,
+        internal_port: u16,
+        llm: Vec<LlmProvider>,
+        config_path: PathBuf,
+    ) -> Self {
         Self {
             binary,
             port,
             internal_port,
+            llm,
             config_path,
             client: reqwest::Client::new(),
             running: AtomicBool::new(false),
@@ -315,7 +465,7 @@ impl Gateway {
     /// (tmp + rename) and only when the bytes changed — agentgateway watches
     /// the file and hot-reloads. Called by every converge pass.
     pub fn sync_apps(&self, apps: &[AppKey]) {
-        let rendered = render_config(apps, self.port, self.internal_port);
+        let rendered = render_config(apps, &self.llm, self.port, self.internal_port);
         let bytes = serde_json::to_vec_pretty(&rendered).expect("static json renders");
         match write_if_changed(&self.config_path, &bytes) {
             Ok(true) => tracing::info!(
@@ -528,13 +678,119 @@ mod tests {
     }
 
     #[test]
+    fn renders_llm_routes_after_mcp_routes() {
+        // Two providers: a model-pinned one and a passthrough (no model).
+        let llm = vec![
+            LlmProvider {
+                name: "claude".into(),
+                provider: "anthropic".into(),
+                model: Some("claude-3-5-haiku-20241022".into()),
+                key: "env://ANTHROPIC_API_KEY".into(),
+            },
+            LlmProvider {
+                name: "gpt".into(),
+                provider: "openai".into(),
+                model: None,
+                key: "env://OPENAI_API_KEY".into(),
+            },
+        ];
+        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300);
+        let routes = config["binds"][0]["listeners"][0]["routes"]
+            .as_array()
+            .expect("routes");
+        // 1 per-app MCP + 1 aggregate MCP + 2 LLM = 4, LLM routes LAST.
+        assert_eq!(routes.len(), 4);
+
+        // The model-pinned provider.
+        let claude = &routes[2];
+        assert_eq!(claude["name"], "llm-claude");
+        assert_eq!(claude["matches"][0]["path"]["pathPrefix"], "/llm/claude");
+        let ai = &claude["backends"][0]["ai"];
+        assert_eq!(ai["name"], "claude");
+        assert_eq!(
+            ai["provider"]["anthropic"]["model"],
+            "claude-3-5-haiku-20241022"
+        );
+        // The key is lowered to agentgateway's "$VAR" substitution (the
+        // plaintext key never appears in the rendered config).
+        assert_eq!(
+            claude["policies"]["backendAuth"]["key"],
+            "$ANTHROPIC_API_KEY"
+        );
+        // Loopback-only authorization rule, same hardening as every MCP route.
+        let rule = claude["policies"]["authorization"]["rules"][0]
+            .as_str()
+            .unwrap();
+        assert!(rule.contains("source.address"));
+
+        // The passthrough provider: NO `model` key (client's body model wins).
+        let gpt = &routes[3];
+        assert_eq!(gpt["name"], "llm-gpt");
+        assert_eq!(gpt["matches"][0]["path"]["pathPrefix"], "/llm/gpt");
+        let openai = &gpt["backends"][0]["ai"]["provider"]["openai"];
+        assert!(
+            openai.get("model").is_none(),
+            "omitted model ⇒ no model field (passthrough), got {openai:?}"
+        );
+        assert_eq!(gpt["policies"]["backendAuth"]["key"], "$OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn llm_provider_validation() {
+        let mut seen = std::collections::BTreeSet::new();
+        // Valid entry parses.
+        let ok = LlmProvider {
+            name: "claude".into(),
+            provider: "anthropic".into(),
+            model: None,
+            key: "env://ANTHROPIC_API_KEY".into(),
+        };
+        assert!(ok.validate(&mut seen).is_ok());
+        // Duplicate name rejected (same `seen` set).
+        let dup = LlmProvider {
+            name: "claude".into(),
+            provider: "openai".into(),
+            model: None,
+            key: "env://OPENAI_API_KEY".into(),
+        };
+        assert!(dup.validate(&mut seen).is_err(), "dup name");
+        // Unknown provider rejected.
+        let mut s2 = std::collections::BTreeSet::new();
+        let bad_provider = LlmProvider {
+            name: "x".into(),
+            provider: "notaprovider".into(),
+            model: None,
+            key: "env://K".into(),
+        };
+        assert!(bad_provider.validate(&mut s2).is_err(), "bad provider");
+        // Non-env key rejected (the secret must stay host-side).
+        let mut s3 = std::collections::BTreeSet::new();
+        let inline_key = LlmProvider {
+            name: "y".into(),
+            provider: "openai".into(),
+            model: None,
+            key: "sk-literal-secret".into(),
+        };
+        assert!(inline_key.validate(&mut s3).is_err(), "inline key");
+        // Path-unsafe name rejected.
+        let mut s4 = std::collections::BTreeSet::new();
+        let bad_name = LlmProvider {
+            name: "bad/name".into(),
+            provider: "openai".into(),
+            model: None,
+            key: "env://K".into(),
+        };
+        assert!(bad_name.validate(&mut s4).is_err(), "path-unsafe name");
+    }
+
+    #[test]
     fn renders_per_app_and_aggregate_routes() {
         let apps = vec![
             AppKey::top("nutrition"),
             AppKey::top("notes"),
             AppKey::top("registry"),
         ];
-        let config = render_config(&apps, 19200, 19300);
+        let config = render_config(&apps, &[], 19200, 19300);
 
         // One public-ish surface knob: the bind port; admin planes pinned to
         // ephemeral loopback.
@@ -595,7 +851,7 @@ mod tests {
             AppKey::tenant("alice", "todo"),
             AppKey::tenant("bob", "notes"),
         ];
-        let config = render_config(&apps, 19200, 19300);
+        let config = render_config(&apps, &[], 19200, 19300);
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .expect("routes");
@@ -665,7 +921,7 @@ mod tests {
     #[test]
     fn render_sanitizes_underscores_and_dedupes_collisions() {
         let apps = vec![AppKey::top("my_app"), AppKey::top("my-app")];
-        let config = render_config(&apps, 1, 2);
+        let config = render_config(&apps, &[], 1, 2);
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .unwrap();
@@ -688,7 +944,7 @@ mod tests {
 
     #[test]
     fn render_with_no_apps_keeps_the_aggregate_bind() {
-        let config = render_config(&[], 19200, 19300);
+        let config = render_config(&[], &[], 19200, 19300);
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .unwrap();
@@ -702,9 +958,10 @@ mod tests {
 
     #[test]
     fn render_is_deterministic_for_unsorted_input() {
-        let a = render_config(&[AppKey::top("b"), AppKey::top("a")], 1, 2);
+        let a = render_config(&[AppKey::top("b"), AppKey::top("a")], &[], 1, 2);
         let b = render_config(
             &[AppKey::top("a"), AppKey::top("b"), AppKey::top("a")],
+            &[],
             1,
             2,
         );
