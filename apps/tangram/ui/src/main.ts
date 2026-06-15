@@ -74,7 +74,7 @@ const root = document.getElementById("app")!;
 root.innerHTML = `
   <div class="shell">
     <header class="topbar">
-      <div class="brand">tangram</div>
+      <div class="brand">Tangram</div>
       <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">Connecting…</span></div>
     </header>
     <div class="body">
@@ -299,7 +299,7 @@ async function manageApp(action: () => Promise<unknown>) {
 // ── main window: tab strip + content ────────────────────────────────────────
 
 function tabTitle(tab: Tab): string {
-  if (tab.kind === "home") return "tangram";
+  if (tab.kind === "home") return "Tangram";
   if (tab.kind === "app") return displayName(tab.app);
   const file = filesById.get(tab.fileId);
   if (!file) return "(Missing)";
@@ -373,7 +373,7 @@ function renderContent() {
 
 function renderHome() {
   const wrap = el("div", "home");
-  wrap.appendChild(el("h1", undefined, "tangram"));
+  wrap.appendChild(el("h1", undefined, "Tangram"));
   wrap.appendChild(
     el("p", "sub", "Manage the set of apps (tangrams) on your device."),
   );
