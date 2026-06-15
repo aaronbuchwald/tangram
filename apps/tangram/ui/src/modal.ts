@@ -154,3 +154,84 @@ export function promptName(opts: NamePromptOptions): Promise<string | null> {
     }
   });
 }
+
+export interface ConfirmOptions {
+  /** Dialog title, e.g. "Delete note". */
+  title: string;
+  /** Optional body line describing what will happen. */
+  message?: string;
+  /** Confirm-button label. Defaults to "Delete". */
+  confirmLabel?: string;
+  /** Style the confirm button as destructive (red). Defaults to true. */
+  danger?: boolean;
+}
+
+/**
+ * Open a confirmation dialog in the shell's own UI (not window.confirm).
+ * Resolves true if the user confirms, false if they cancel (Esc, backdrop
+ * click, or Cancel). Keyboard-first: the confirm button autofocuses, Enter
+ * confirms, Esc cancels. Only settles once.
+ */
+export function confirmAction(opts: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const dialog = document.createElement("div");
+    dialog.className = "modal";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "modal-title";
+    titleEl.textContent = opts.title;
+
+    const msgEl = document.createElement("div");
+    msgEl.className = "modal-message";
+    msgEl.textContent = opts.message ?? "";
+
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "modal-btn";
+    cancelBtn.textContent = "Cancel";
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = (opts.danger ?? true) ? "modal-btn danger" : "modal-btn primary";
+    confirmBtn.textContent = opts.confirmLabel ?? "Delete";
+    actions.append(cancelBtn, confirmBtn);
+
+    dialog.append(titleEl, msgEl, actions);
+    overlay.appendChild(dialog);
+
+    let settled = false;
+    function close(result: boolean) {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(result);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        close(true);
+      }
+    }
+    cancelBtn.addEventListener("click", () => close(false));
+    confirmBtn.addEventListener("click", () => close(true));
+    overlay.addEventListener("mousedown", (e) => {
+      if (e.target === overlay) close(false);
+    });
+    document.addEventListener("keydown", onKey, true);
+
+    document.body.appendChild(overlay);
+    confirmBtn.focus();
+  });
+}

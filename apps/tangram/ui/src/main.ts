@@ -15,7 +15,7 @@ import {
 } from "./api";
 import { MdEditor } from "./editor";
 import { authToken, registry, setAuthToken } from "./manage";
-import { promptName } from "./modal";
+import { confirmAction, promptName } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -122,8 +122,8 @@ root.innerHTML = `
       <aside class="sidebar" id="sidebar">
         <section class="side-section">
           <div class="side-head" id="vault-head">
-            <span class="twisty" id="vault-twisty">▸</span>
             <span class="micro">Vault</span>
+            <span class="section-caret" id="vault-twisty">▸</span>
             <div class="side-actions">
               <button class="head-action" id="new-note" title="New note" aria-label="New note">${ICON.file}</button>
               <button class="head-action" id="new-folder" title="New folder" aria-label="New folder">${ICON.folderPlus}</button>
@@ -135,8 +135,8 @@ root.innerHTML = `
         </section>
         <section class="side-section">
           <div class="side-head" id="apps-head">
-            <span class="twisty" id="apps-twisty">▸</span>
             <span class="micro">Apps</span>
+            <span class="section-caret" id="apps-twisty">▸</span>
             <div class="side-actions">
               <button class="ghost" id="open-marketplace" title="Browse the marketplace">+ Install</button>
             </div>
@@ -371,8 +371,15 @@ function renderApps() {
       remove.title = `Remove ${displayName(app.name)}`;
       remove.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (!window.confirm(`Remove ${app.name} from the fleet?`)) return;
-        void manageApp(() => registry.removeApp(app.name));
+        void (async () => {
+          const ok = await confirmAction({
+            title: "Remove app",
+            message: `Remove "${displayName(app.name)}" from the fleet?`,
+            confirmLabel: "Remove",
+          });
+          if (!ok) return;
+          void manageApp(() => registry.removeApp(app.name));
+        })();
       });
       ctls.appendChild(remove);
       row.appendChild(ctls);
@@ -754,7 +761,13 @@ async function renameFile(file: MdFile) {
 
 async function deleteFile(id: string) {
   const file = filesById.get(id);
-  if (file && !window.confirm(`Delete ${file.path}?`)) return;
+  const name = file ? (file.path.split("/").pop() ?? file.path).replace(/\.md$/i, "") : "this note";
+  const ok = await confirmAction({
+    title: "Delete note",
+    message: `Permanently delete "${name}"? This cannot be undone.`,
+    confirmLabel: "Delete",
+  });
+  if (!ok) return;
   try {
     await vault.deleteFile(id);
   } catch (e) {
@@ -763,7 +776,12 @@ async function deleteFile(id: string) {
 }
 
 async function deleteFolder(path: string) {
-  if (!window.confirm(`Delete folder ${path} and everything in it?`)) return;
+  const ok = await confirmAction({
+    title: "Delete folder",
+    message: `Permanently delete the folder "${path}" and everything in it? This cannot be undone.`,
+    confirmLabel: "Delete folder",
+  });
+  if (!ok) return;
   try {
     await vault.deleteFolder(path);
   } catch (e) {

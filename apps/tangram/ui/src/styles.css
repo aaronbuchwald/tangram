@@ -85,13 +85,14 @@ body {
 }
 .side-section { padding: 10px 6px; border-bottom: 1px solid var(--line); }
 .side-head {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; gap: 7px;
   min-height: 48px; padding: 4px 8px;
   cursor: pointer; border-radius: 6px;
   transition: background 0.1s ease;
   user-select: none;
 }
 .side-head:hover { background: var(--panel-2); }
+.section-caret { font-size: 9px; color: var(--faint); line-height: 1; }
 .side-body { overflow: hidden; }
 .sidebar-resizer {
   position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
@@ -99,7 +100,7 @@ body {
   transition: background 0.12s ease;
 }
 .sidebar-resizer:hover { background: var(--blue); opacity: 0.4; }
-.side-actions { display: flex; align-items: center; gap: 2px; }
+.side-actions { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 
 /* Section-header actions (Vault: new note / new folder). Borderless icon
    glyphs that sit quietly beside the "VAULT" label and brighten to the accent
@@ -313,3 +314,6 @@ body {
 .modal-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .modal-btn.primary:disabled { background: var(--blue); }
 .modal-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.modal-message { font-size: 13px; color: var(--dim); line-height: 1.5; }
+.modal-btn.danger { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
+.modal-btn.danger:hover { filter: brightness(1.08); color: #fff; }
