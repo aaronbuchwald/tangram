@@ -193,6 +193,19 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
         // self-hosted mode there is no account store, so it 404s like an unknown
         // route (no capability oracle for a feature that isn't active).
         .route("/api/audit", get(audit_read))
+        // The session + PAT API for the shell UI (auth.md §9 C5). `GET
+        // /api/auth` reports {mode, principal} in BOTH modes (self-hosted →
+        // mode="self-hosted", principal=null) so the UI can branch; the
+        // session/PAT routes are multi-tenant only (404 without an account
+        // store — no oracle for an inactive feature).
+        .route("/api/auth", get(auth_state))
+        .route("/api/auth/login", axum::routing::post(auth_login))
+        .route("/api/auth/logout", axum::routing::post(auth_logout))
+        .route("/api/auth/pats", get(auth_list_pats).post(auth_mint_pat))
+        .route(
+            "/api/auth/pats/{id}",
+            axum::routing::delete(auth_revoke_pat),
+        )
         .route("/mcp", axum::routing::any(aggregate_mcp))
         // The LLM proxy plane (ADR-0012): `/llm/<name>/…` is reverse-proxied to
         // agentgateway's `ai` backend for that provider, with the provider key
@@ -408,6 +421,76 @@ async fn audit_read(
         }
         None => (StatusCode::NOT_FOUND, "no such route").into_response(),
     }
+}
+
+// ── the session + PAT API for the shell UI (auth.md §9 C5) ──────────────────
+
+/// `GET /api/auth` — {mode, principal}. Works in BOTH modes so the UI can
+/// branch: self-hosted reports `mode = "self-hosted"` (no auth UI); multi-tenant
+/// reports the resolved principal (or null).
+async fn auth_state(State((host, _)): State<(Arc<Host>, bool)>, headers: HeaderMap) -> Response {
+    crate::authapi::auth_state(host.accounts.as_ref(), &headers).await
+}
+
+/// 404 when the host has no account store (self-hosted) — no capability oracle
+/// for a multi-tenant-only endpoint.
+fn store_or_404(host: &Arc<Host>) -> Option<Arc<crate::accounts::AccountStore>> {
+    host.accounts.clone()
+}
+
+fn no_such_route() -> Response {
+    (StatusCode::NOT_FOUND, "no such route").into_response()
+}
+
+async fn auth_login(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    body: Option<axum::Json<serde_json::Value>>,
+) -> Response {
+    let Some(store) = store_or_404(&host) else {
+        return no_such_route();
+    };
+    let body = body.map(|axum::Json(v)| v).unwrap_or(json!({}));
+    crate::authapi::login(&store, &body).await
+}
+
+async fn auth_logout(State((host, _)): State<(Arc<Host>, bool)>, headers: HeaderMap) -> Response {
+    let Some(store) = store_or_404(&host) else {
+        return no_such_route();
+    };
+    crate::authapi::logout(&store, &headers).await
+}
+
+async fn auth_list_pats(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(store) = store_or_404(&host) else {
+        return no_such_route();
+    };
+    crate::authapi::list_pats(&store, &headers).await
+}
+
+async fn auth_mint_pat(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    headers: HeaderMap,
+    body: Option<axum::Json<serde_json::Value>>,
+) -> Response {
+    let Some(store) = store_or_404(&host) else {
+        return no_such_route();
+    };
+    let body = body.map(|axum::Json(v)| v).unwrap_or(json!({}));
+    crate::authapi::mint_pat(&store, &headers, &body).await
+}
+
+async fn auth_revoke_pat(
+    State((host, _)): State<(Arc<Host>, bool)>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(store) = store_or_404(&host) else {
+        return no_such_route();
+    };
+    crate::authapi::revoke_pat(&store, &headers, &id).await
 }
 
 async fn fleet(State((host, _)): State<(Arc<Host>, bool)>) -> axum::Json<serde_json::Value> {

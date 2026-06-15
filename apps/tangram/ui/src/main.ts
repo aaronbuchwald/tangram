@@ -13,6 +13,7 @@ import {
   type MdFile,
   type VaultState,
 } from "./api";
+import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
 import { registry } from "./manage";
 import { confirmAction, promptName } from "./modal";
@@ -116,7 +117,10 @@ root.innerHTML = `
         </button>
         <div class="brand">Tangram</div>
       </div>
-      <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">Connecting…</span></div>
+      <div class="topbar-right">
+        <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">Connecting…</span></div>
+        <div id="principal-slot"></div>
+      </div>
     </header>
     <div class="body">
       <aside class="sidebar" id="sidebar">
@@ -874,13 +878,35 @@ tabs.subscribe(() => {
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 
-setLive(false);
-tabs.openHome();
-renderTabs();
-renderContent();
-renderTree();
-renderApps();
+// Start the live shell (vault stream + fleet polling). Called once the host has
+// confirmed we are authorized (self-hosted always is; multi-tenant after a
+// session cookie is in place).
+function startShell() {
+  setLive(false);
+  tabs.openHome();
+  renderTabs();
+  renderContent();
+  renderTree();
+  renderApps();
 
-subscribeVault(onVaultState);
-void refreshFleet();
-window.setInterval(() => void refreshFleet(), 5000);
+  subscribeVault(onVaultState);
+  void refreshFleet();
+  window.setInterval(() => void refreshFleet(), 5000);
+}
+
+// Auth gate (auth.md §9 C5). In self-hosted mode there is no auth chrome and the
+// shell starts immediately (the loopback-trusted default — unchanged). In
+// multi-tenant mode an unauthenticated visitor gets the login view; once a
+// session is established the principal chip appears and the shell boots.
+void (async () => {
+  const auth = await loadAuthState();
+  if (auth.mode === "multi-tenant" && !auth.principal) {
+    renderLogin(root, () => window.location.reload());
+    return;
+  }
+  if (auth.mode === "multi-tenant" && auth.principal) {
+    const slot = document.getElementById("principal-slot");
+    if (slot) renderPrincipalChip(slot, auth.principal);
+  }
+  startShell();
+})();

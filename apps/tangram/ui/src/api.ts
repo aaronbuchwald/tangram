@@ -91,3 +91,94 @@ export async function fetchFleet(): Promise<Fleet> {
   if (!res.ok) throw new Error(`fleet fetch failed (${res.status})`);
   return (await res.json()) as Fleet;
 }
+
+// ── auth (multi-tenant session + PAT API, auth.md §9 C5) ─────────────────────
+//
+// All paths are RELATIVE to the shell's `/tangram/` mount, so `../api/auth…`
+// resolves to the host root. In self-hosted mode the host reports
+// mode="self-hosted" and the UI shows no auth chrome (the loopback-trusted
+// default is unchanged).
+
+export type AuthMode = "self-hosted" | "multi-tenant";
+
+export interface AuthPrincipal {
+  user_id: string;
+  email: string;
+  groups: string[];
+  scopes: string[];
+}
+
+export interface AuthState {
+  mode: AuthMode;
+  principal: AuthPrincipal | null;
+}
+
+export interface PatInfo {
+  id: string;
+  label: string;
+  scopes: string[];
+  created_ms: number;
+  expires_ms: number | null;
+}
+
+export interface MintedPat extends PatInfo {
+  token: string; // shown ONCE
+}
+
+/** The host's auth state: {mode, principal}. The shell branches on this. */
+export async function fetchAuth(): Promise<AuthState> {
+  const res = await fetch("../api/auth", { credentials: "same-origin" });
+  if (!res.ok) throw new Error(`auth state fetch failed (${res.status})`);
+  return (await res.json()) as AuthState;
+}
+
+/** Exchange a pasted PAT for an HttpOnly session cookie. Throws on a bad PAT. */
+export async function login(token: string): Promise<void> {
+  const res = await fetch("../api/auth/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) {
+    throw new Error("That access key was not accepted (check it and try again).");
+  }
+}
+
+/** Revoke the current session and clear the cookie. */
+export async function logout(): Promise<void> {
+  await fetch("../api/auth/logout", {
+    method: "POST",
+    credentials: "same-origin",
+  });
+}
+
+/** List the caller's own PATs (metadata only — never the secret). */
+export async function listPats(): Promise<PatInfo[]> {
+  const res = await fetch("../api/auth/pats", { credentials: "same-origin" });
+  if (!res.ok) throw new Error(`could not list keys (${res.status})`);
+  return ((await res.json()) as { pats: PatInfo[] }).pats ?? [];
+}
+
+/** Mint a PAT (token returned ONCE). Requires a session credential. */
+export async function mintPat(label: string, scopes?: string[]): Promise<MintedPat> {
+  const res = await fetch("../api/auth/pats", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(scopes ? { label, scopes } : { label }),
+  });
+  if (!res.ok) throw new Error(`could not mint a key (${res.status})`);
+  return (await res.json()) as MintedPat;
+}
+
+/** Revoke one of the caller's PATs by id. */
+export async function revokePat(id: string): Promise<void> {
+  const res = await fetch(`../api/auth/pats/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`could not revoke the key (${res.status})`);
+  }
+}

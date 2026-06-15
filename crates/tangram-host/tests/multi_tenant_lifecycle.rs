@@ -270,6 +270,179 @@ fn revoke_all_pats_for(store_path: &Path, user_id: &str, admin_token: &str) {
     .expect("revoke");
 }
 
+/// C5 — the shell session API: `GET /api/auth` reports {mode, principal};
+/// `POST /api/auth/login` exchanges a PAT for an HttpOnly session cookie;
+/// the cookie then authenticates the principal, mints + lists + revokes PATs;
+/// `POST /api/auth/logout` revokes the session.
+#[tokio::test]
+async fn shell_session_api_login_cookie_pat_crud_and_logout() {
+    if !component("registry").exists() {
+        eprintln!("SKIPPING shell_session_api: registry component missing");
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[auth]
+mode = "multi-tenant"
+
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+"#,
+            registry = component("registry").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    // reqwest's `cookies` feature is not enabled in the workspace, so we carry
+    // the session cookie by hand (exactly the browser round-trip): capture the
+    // Set-Cookie's `tangram_session=<value>` and replay it as a Cookie header.
+    let client = reqwest::Client::new();
+
+    wait_for("admin PAT in log", Duration::from_secs(30), || async {
+        admin_pat_from_log(&log).is_some()
+    })
+    .await;
+    let admin = admin_pat_from_log(&log).expect("admin PAT");
+    wait_for("registry healthz", Duration::from_secs(120), || async {
+        get_status(&client, &format!("{base}/registry/healthz"), None).await
+            == Some(reqwest::StatusCode::OK)
+    })
+    .await;
+
+    // GET /api/auth — multi-tenant, no principal yet.
+    let auth: serde_json::Value = client
+        .get(format!("{base}/api/auth"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(auth["mode"], "multi-tenant");
+    assert!(auth["principal"].is_null(), "no principal before login");
+
+    // A bad PAT is rejected (uniform 401).
+    let bad = client
+        .post(format!("{base}/api/auth/login"))
+        .json(&serde_json::json!({ "token": "tgp_nope" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Login with the admin PAT → 200 + Set-Cookie.
+    let login = client
+        .post(format!("{base}/api/auth/login"))
+        .json(&serde_json::json!({ "token": admin }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), reqwest::StatusCode::OK);
+    let set_cookie = login
+        .headers()
+        .get(reqwest::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .expect("Set-Cookie on login");
+    assert!(
+        set_cookie.contains("HttpOnly") && set_cookie.contains("tangram_session="),
+        "login sets an HttpOnly session cookie: {set_cookie}"
+    );
+    // The `name=value` pair to replay (everything up to the first `;`).
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    // GET /api/auth WITH the cookie → principal present.
+    let auth: serde_json::Value = client
+        .get(format!("{base}/api/auth"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(auth["principal"]["user_id"], "local-admin");
+
+    // Mint a PAT via the session cookie → token shown once.
+    let minted: serde_json::Value = client
+        .post(format!("{base}/api/auth/pats"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({ "label": "laptop" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pat_id = minted["id"].as_str().expect("id").to_string();
+    assert!(minted["token"].as_str().unwrap().starts_with("tgp_"));
+
+    // List → the minted PAT is present (plus the bootstrap one).
+    let list: serde_json::Value = client
+        .get(format!("{base}/api/auth/pats"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        list["pats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == pat_id),
+        "minted PAT is listed"
+    );
+
+    // Revoke it → 204.
+    let revoke = client
+        .delete(format!("{base}/api/auth/pats/{pat_id}"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoke.status(), reqwest::StatusCode::NO_CONTENT);
+
+    // Logout → 200, and the session no longer authenticates.
+    let logout = client
+        .post(format!("{base}/api/auth/logout"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), reqwest::StatusCode::OK);
+    // The SAME cookie now fails to authenticate (the session row is revoked).
+    let auth: serde_json::Value = client
+        .get(format!("{base}/api/auth"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        auth["principal"].is_null(),
+        "after logout the session no longer authenticates: {auth:?}"
+    );
+    drop(_host);
+}
+
 /// Mint a full-scope PAT for a NEW account directly in the store (the host's
 /// own `mint_pat` semantics). Used to stand a second attributed principal up
 /// without the C5 account-creation HTTP API.
