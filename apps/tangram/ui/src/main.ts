@@ -498,6 +498,28 @@ function stat(value: string, label: string): HTMLElement {
   return s;
 }
 
+// The note's title is its first heading line (Obsidian-style). Returns the
+// heading text, or null if the first non-empty line isn't an ATX heading.
+function firstHeading(body: string): string | null {
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    const m = /^#{1,6}\s+(.+?)\s*#*$/.exec(line);
+    return m ? (m[1].trim() || null) : null; // first non-empty line decides
+  }
+  return null;
+}
+
+// Convert heading text into a safe filename base (no extension, no slashes,
+// no path-hostile/invalid chars). Returns null if nothing usable remains.
+function headingToBaseName(heading: string): string | null {
+  const base = heading
+    .replace(/[/<>:"\\|?*\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return base.length ? base : null;
+}
+
 // A single Obsidian-style "Live Preview" CodeMirror 6 editor (issue #11): the
 // editable view *is* the rendered note — markdown syntax is concealed off the
 // active line and rendered inline (see editor.ts / livePreview.ts). There is no
@@ -511,12 +533,6 @@ function renderNoteTab(fileId: string) {
     return;
   }
   const wrap = el("div", "note");
-  const bar = el("div", "note-bar");
-  bar.appendChild(el("span", "note-path", file.path));
-  const renameBtn = el("button", "ghost", "Rename");
-  renameBtn.addEventListener("click", () => void renameFile(file));
-  bar.appendChild(renameBtn);
-  wrap.appendChild(bar);
 
   const editorHost = el("div", "editor-host");
 
@@ -529,6 +545,7 @@ function renderNoteTab(fileId: string) {
     state.saveTimer = window.setTimeout(() => {
       editor.markWritten(doc); // expect this body to echo back over SSE
       void vault.writeFile(fileId, doc).catch((e) => console.error(e));
+      maybeRenameFromHeading(fileId, doc);
     }, 400);
   });
   state.editor = editor;
@@ -548,6 +565,28 @@ function syncActiveNote() {
   const file = filesById.get(activeEditor.fileId);
   if (!file) return; // pruneNotes will close a vanished note's tab
   activeEditor.editor.syncRemote(file.body);
+}
+
+// Keep the filename in sync with the note's first heading. Renames only when
+// the derived base name is valid, differs from the current name, and doesn't
+// collide with another file. The parent folder is preserved and the file id is
+// stable, so the open tab/editor are not disrupted (the tab title re-derives
+// from the new path).
+function maybeRenameFromHeading(fileId: string, body: string): void {
+  const file = filesById.get(fileId);
+  if (!file) return;
+  const heading = firstHeading(body);
+  if (!heading) return;
+  const base = headingToBaseName(heading);
+  if (!base) return;
+  const segs = file.path.split("/");
+  const currentBase = (segs[segs.length - 1] ?? "").replace(/\.md$/i, "");
+  if (base === currentBase) return;
+  const folder = segs.slice(0, -1).join("/");
+  const newPath = folder ? `${folder}/${base}.md` : `${base}.md`;
+  const normNew = normalizePath(newPath);
+  if (files.some((f) => f.id !== fileId && normalizePath(f.path) === normNew)) return;
+  void vault.renameFile(fileId, newPath).catch((e) => console.error(e));
 }
 
 // ── vault naming: validation + custom modal ──────────────────────────────────
@@ -746,6 +785,9 @@ function onVaultState(state: VaultState) {
   for (const f of files) filesById.set(f.id, f);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
+  // A header-driven rename re-derives the active tab's title from the new path,
+  // so refresh the tab strip too (otherwise it would go stale after a rename).
+  renderTabs();
   // Patch the live note editor in place from the new snapshot (echo-safe),
   // then refresh content. renderContent reuses the mounted editor for the
   // active note, so this never clobbers an in-progress edit.
