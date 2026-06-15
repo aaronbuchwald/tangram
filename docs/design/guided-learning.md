@@ -1,9 +1,13 @@
 # Guided Learning — design & decisions for approval
 
-**Status:** PLANNING ONLY — no production code written. This document exists to
-get the owner's approval on the design and the major forks **before** any build
-begins. The "OPEN DECISIONS FOR THE OWNER" and "PLACEMENT + MERGE STRATEGY"
-sections at the end are the actionable output.
+**Status:** IMPLEMENTED — shipped as `apps/guided-learning`: a *Make It
+Stick*-driven tutor (quiz-don't-re-present, gated reveal on an attempt,
+confidence-vs-grade calibration, spaced reviews, and a collaboratively-editable
+`.md` study artifact in its Automerge doc). The only egress is the Anthropic
+Messages call with a host-injected credential (ADR-0005, `[apps.guided-learning]`
+inject); CI is fixture-LLM (no live key). This document is retained as the
+design record; where it says "no production code" or "morning-brief not in the
+tree", read it as the original plan — both apps have since landed.
 
 **Date:** 2026-06-12
 **Author:** Aaron (owner), with research + design by Claude

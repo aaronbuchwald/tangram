@@ -6,8 +6,9 @@
 ADR-0004 (the secret-resolver seam — the `op://` scheme this implements),
 ADR-0005 (egress credential injection — the *exposure* axis this mirrors onto
 the browser), ADR-0006 (tenant isolation / gVisor — where the browser process
-runs); `docs/design/task-automation-browser.md` (the spec, AC0-AC8); PR #1
-fine-grained egress (the canonicalization seam this will consume); RUNTIME_PLAN.
+runs); `docs/design/task-automation-browser.md` (the spec, AC0-AC8); ADR-0008
+fine-grained egress (the canonicalization seam this consumes, now the shared
+`crates/tangram-egress` leaf crate); RUNTIME_PLAN.
 
 ## Context
 
@@ -45,9 +46,10 @@ browser-unaware) implements four reusable primitives, supervised by
   decided on **parsed** `(host, path)` components (canonicalize once; never
   string-suffix match — the SOCKS5 parser-differential lesson). Default-deny.
   A call-level path-deny is the network-layer backstop for the order-submit
-  endpoint. *Implemented here as a focused canonicalizer with a `TODO` to
-  unify with PR #1's shared seam when it merges, so the browser fence and the
-  component fence can never disagree on what a host means.*
+  endpoint. *The browser gate (`crates/tangram-automation/src/egress.rs`)
+  consumes the shared `crates/tangram-egress` canonicalizer — the same one the
+  component fence and the manifest verifier use — so they can never disagree on
+  what a host or path means.*
 - **C. Credential broker** — the `op://` `SecretResolver` (ADR-0004 follow-on,
   via the `op` CLI + `OP_SERVICE_ACCOUNT_TOKEN`) resolves a credential
   *reference* host-side at the point of use and `fill`s it into the field; the
@@ -85,11 +87,11 @@ ceilings.
   run it under tighter OS confinement (dedicated low-priv user, seccomp/ns,
   ephemeral profile, gVisor for the untrusted tier). The secret is in the
   browser's address space only for the duration of one `fill`.
-- **Most-dangerous-workstream merge posture.** This lands on a dedicated
-  branch, **held for human review, not merged**, and the live Amazon run (AC8)
-  is gated separately behind explicit owner approval even after the code is
-  reviewed. Building the cart and stopping before checkout is the entire
-  deliverable; placing an order is never autonomous.
+- **Most-dangerous-workstream posture.** The substrate
+  (`crates/tangram-automation`) was reviewed separately and merged; the live
+  Amazon run (AC8) remains gated behind explicit owner approval. Building the
+  cart and stopping before checkout is the entire deliverable; placing an order
+  is never autonomous.
 
 ## Session reuse: make login + CAPTCHA a one-time cost
 

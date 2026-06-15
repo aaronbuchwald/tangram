@@ -1,9 +1,14 @@
 # Design: LLM + Playwright task automation — the browser + credential substrate
 
-**Status:** design / proposal (no production code). Read-only research +
-design. **Nothing here has been executed**: no browser automation was run, the
-1Password service-account token was not touched, and no live Amazon access was
-attempted. Execution happens only after the owner approves (see §10, §12).
+**Status:** IMPLEMENTED (substrate) — shipped as `crates/tangram-automation`
+(ADR-0010): the supervised runner, the browser egress gate on the shared
+`crates/tangram-egress` canonicalizer, the `op://` credential broker, and the
+record→replay→validated-LLM-fallback engine. The Amazon cart demo builds the
+cart and **stops** (cart-only, stops at CAPTCHA, never places an order). The
+live Amazon run (AC8) remains gated behind explicit owner approval. This
+document is the design record; where it says "no production code / nothing
+executed / do-not-merge", read it as the original plan — the substrate has
+landed on `main`.
 **Date:** 2026-06-12
 **Author:** Aaron (owner), with research + design by Claude
 **Related:**

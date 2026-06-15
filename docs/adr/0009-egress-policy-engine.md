@@ -1,7 +1,9 @@
 # ADR-0009: Egress policy engine (the deferred imperative escape hatch — opt-in, latency-budgeted, never the default)
 
-**Status:** proposed (2026-06-12) — on a pushed review branch
-(`egress-policy-engine`), held for the owner's separate review, NOT merged.
+**Status:** accepted (2026-06-12) — merged. The engine ships as
+`crates/tangram-host/src/policy.rs`, opt-in via `[apps.<app>.policy]`, and
+remains an escape hatch, not the default: ADR-0008's declarative call-level
+engine is the first and preferred gate.
 **Deciders:** Aaron (owner), with design + implementation by Claude
 **Related:** ADR-0008 (the declarative call-level engine this composes WITH —
 the default and first gate), ADR-0005 (egress credential injection — the
@@ -26,8 +28,8 @@ shape of the eventual variant: it must be **bounded, not Turing-complete**,
 **reuse the existing canonicalization seam** (no second parser — the SOCKS5
 parser-differential lesson, §2/§8), carry a **hard latency budget** that fails
 **closed**, and be **surfaced + opt-in** so "this app uses custom policy" is
-never silent. It is built to the same merge-ready quality bar as everything
-else, **pushed** to the remote for review, and left there rather than merged.
+never silent. It is built to the same quality bar as everything else and, after
+the owner's separate review, merged into `main`.
 
 This ADR records that variant.
 
@@ -116,10 +118,10 @@ that operator-authoritative — a policy lives in the operator's apps.toml).
   policy-allowed* write-call safe against smuggling data the app could already
   send there. That remains the model-layer / human-review tier. Side-channels
   remain ADR-0006's separate axis.
-- **Status: opt-in escape hatch, pushed for review, not the default and not
-  merged.** Per §9.2, this branch is pushed to the remote and left for the
-  owner's separate review rather than merged into main. The default egress
-  contract stays the declarative ADR-0008 grammar.
+- **Status: opt-in escape hatch, merged but not the default.** Per §9.2, this
+  was reviewed separately and merged into main. The default egress contract
+  stays the declarative ADR-0008 grammar; the policy engine activates only when
+  an app declares `[apps.<app>.policy]`.
 
 ## Open questions for review
 

@@ -106,9 +106,10 @@ npx wrangler dev --var CALORIENINJAS_API_KEY:...  # local
 ```
 
 Without it, nutrition degrades cleanly: `GET /nutrition/api/capabilities`
-reports `{"strategy":"offline","description_input":false}`, manual
+reports `{"strategy":"calorieninjas","description_input":false}` (the strategy
+is still selected; only description-based logging is unavailable), manual
 gram-quantified logging keeps working, and description-only meals fail with
-a clear 422. The component's outbound network grant is its `allowHosts`
+a clear error. The component's outbound network grant is its `allowHosts`
 list in `src/components.ts` (`api.calorieninjas.com` only) — requests to any
 other host are denied with an error naming the missing grant, enforced in
 the Worker's `http-fetch` import, not in the app.
@@ -187,7 +188,7 @@ initialize/tools-list/tools-call against `/notes/mcp` (session issued, the
 tool call lands in the document, bogus sessions 404); **the flagship** — a
 native local replica syncing bidirectionally with the miniflare-hosted app
 (< 5 s each way, including a DO-side action reaching the replica); and
-nutrition's offline fallback + the `http-fetch` allowlist denial. Cleanup is
+nutrition's keyless-degrade path + the `http-fetch` allowlist denial. Cleanup is
 trap-based with explicit PID tracking; reruns never share state and never
 touch a live instance on `:8080`.
 

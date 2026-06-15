@@ -260,8 +260,9 @@ for their most sensitive isolation tiers.
 
 ADR-0004 is explicit that today the `env://` resolver still injects the
 plaintext **value** into the component, and that the orthogonal axis — "does
-the component ever see the plaintext at all" — is ADR-0005 (pending; no file
-in `docs/adr/` yet). The current host code confirms this: `spec.resolved_env`
+the component ever see the plaintext at all" — is ADR-0005 (which has since
+shipped: `docs/adr/0005-egress-credential-injection.md`; this review predates
+it). The host code at review time confirmed the gap: `spec.resolved_env`
 is passed into `WasiCtx::env` at instantiation (`app.rs:123`,
 `runtime.rs:185-187`), so the tenant's linear memory **holds its own API key
 in plaintext** for the instance's lifetime.
@@ -468,7 +469,6 @@ the cache channel.
 - `crates/tangram-host/wit/tangram.wit` — closed component world (imports:
   `http-fetch`, `log`, `now-ms` only).
 - `docs/RUNTIME_PLAN.md` (Phases 2, 5, 9), `docs/adr/0001-...md`,
-  `docs/adr/0004-secret-resolution-interface.md` (ADR-0005 referenced as
-  pending; no file present yet).
-</content>
-</invoke>
+  `docs/adr/0004-secret-resolution-interface.md`,
+  `docs/adr/0005-egress-credential-injection.md` (referenced as pending at
+  review time; has since shipped).

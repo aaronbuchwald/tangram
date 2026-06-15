@@ -10,9 +10,11 @@
 //! model, the config/feedback actions, the pluggable source seam with
 //! checked-in **fixtures**, the prompt builder, and a fully offline
 //! `run_brief` that runs against fixtures with a recorded (no-network) LLM
-//! response. The egress + live tier (real Google/Anthropic calls, the
-//! `[[calls]]` grants, manifest verification — checkpoints MB6–MB8) is a
-//! separate later PR; the source/LLM strategy seam is the slot it drops into.
+//! response. This app's egress + live tier (real Google/Anthropic calls,
+//! wired up to the host's call-level `[[calls]]` grants and manifest
+//! verification — checkpoints MB6–MB8) is a separate later PR; the host-side
+//! egress and verification machinery it will use already ships (ADR-0008, the
+//! verifier), and the source/LLM strategy seam is the slot it drops into.
 //!
 //! ## The AI-enabled-component pattern (the design's center of gravity)
 //!

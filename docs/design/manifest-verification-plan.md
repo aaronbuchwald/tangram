@@ -1,7 +1,12 @@
 # Design: Mechanical capability-manifest verification
 
-**Status:** design / planning (no production code). Read-only research +
-implementation plan + effort estimate + testable checkpoints.
+**Status:** IMPLEMENTED — the `granted ⊆ declared ⊆ audited` chain ships as
+`crates/tangram-host/src/verify.rs` (function-level import audit at the converge
+chokepoint, soft-flag/hard-fail dispositions, the `verified` fleet field;
+pinned by `crates/tangram-host/tests/verification.rs`). This document is
+retained as the design record; CP6 (call-grain converge consumption) remains
+the one designed-for-but-deferred checkpoint (see verify.rs). Where the body
+says "no production code", read it as the original plan.
 **Date:** 2026-06-11
 **Author:** Aaron (owner), with research + planning by Claude
 **Related:** ADR-0006 (tenant isolation — this is the *mechanical* half of the

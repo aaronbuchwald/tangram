@@ -222,8 +222,8 @@ capability at all — the host is the only thing touching `$HOME/.<app-name>`.
 - `tangram-shell` stays as zero-dependency dev mode (unchanged, verified).
 - [x] Capabilities parity (the former known gap): `describe()` carries an
   optional `capabilities` object, computed by the app at instantiation from
-  its granted env (nutrition derives it exactly as its native
-  `GET /api/capabilities` route does — one shared constructor), and the
+  its granted env (nutrition derives it from the same constructor its
+  `get_capabilities` action returns — no hand-written route), and the
   host serves it at `GET /<app>/api/capabilities` (404 for apps that
   publish none, matching a native app without the probe). Byte-for-byte
   parity native↔host is pinned by `crates/tangram-host/tests/capabilities.rs`.
@@ -485,8 +485,8 @@ hosted use of the remote, and OAuth-connected local instances.
     the e2e.
   - [x] Capability parity with tangram-host: per-app `allow_hosts` enforced in
     the Worker's `http-fetch` (denial names the grant), env grants from Worker
-    vars/secrets (nutrition's CalorieNinjas key; clean offline fallback
-    without it).
+    vars/secrets (nutrition's CalorieNinjas key; manual logging still works
+    without it, description-based logging errors cleanly).
   - [x] Miniflare e2e (`scripts/e2e-cloudflare-apps.sh`, CI job
     `e2e-cloudflare-apps`; the Phase-4 sync e2e kept green): UI/healthz,
     dispatch write-through + error envelope, SSE state events, MCP
@@ -559,8 +559,9 @@ hosted use of the remote, and OAuth-connected local instances.
     installs (a parse-time warning nudges toward it).
   - Per-host secrets: the replicated document carries env KEYS and `${VAR}`
     references only; each host expands them from its own environment, so a peer
-    missing a secret runs the app degraded (nutrition → offline) or errors
-    cleanly — secret VALUES never sync.
+    missing a secret runs the app degraded (nutrition keeps manual logging but
+    description-based logging errors) or errors cleanly — secret VALUES never
+    sync.
   - Anti-flap / idempotence: runtime failures (fetch errors, missing
     artifacts, unresolved secrets) live ONLY in `GET /api/fleet`, never written
     back to the registry document. The document is desired state, so two hosts
@@ -586,8 +587,9 @@ hosted use of the remote, and OAuth-connected local instances.
   ONE resolver — `EnvResolver` for `env://NAME` (the host process env, today's
   source) — and rewrites the existing `${VAR}` expansion so `${VAR}` is sugar
   for `env://VAR`. Behavior is byte-identical: a missing var still expands to
-  empty → app runs degraded (nutrition → offline); an unknown scheme is a
-  clear error. Resolution still INJECTS the value into the component env in
+  empty → app runs degraded (nutrition keeps manual logging, description-based
+  logging errors); an unknown scheme is a clear error. Resolution still INJECTS
+  the value into the component env in
   10a (ADR-0005 / Phase 10b is what later moves it to the egress boundary so
   the component never sees plaintext). The federated/tenant/nutrition flows are
   unaffected (regression tests stay green); new unit tests cover env:// resolve,
@@ -625,8 +627,8 @@ hosted use of the remote, and OAuth-connected local instances.
   (`tests/egress_injection.rs`, self-skips without components / live key)
   proving capabilities gating, env isolation, and that the host-injected
   request authenticates while a sibling app with no rule cannot.
-- [ ] **Phase 10c — fine-grained egress (call-level capabilities)** — section 1
-  delivered on a review branch (ADR-0008; design + build plan
+- [x] **Phase 10c — fine-grained egress (call-level capabilities)** — merged
+  (ADR-0008; design + build plan
   [docs/design/fine-grained-egress.md](design/fine-grained-egress.md)). The
   egress grant moves from `(host)` to the **declared call**
   `(method, host, path-pattern, request-shape)`, with the credential bound to
@@ -634,17 +636,22 @@ hosted use of the remote, and OAuth-connected local instances.
   left open. No WIT change; all enforcement host-side in
   `HostState::http_fetch`. A single canonicalization seam
   (`egress::CanonicalRequest`, the SOCKS5 parser-differential discipline)
-  shared with the manifest verifier (manifest-verification-plan §2.6). Small
-  regex-free grammar (`egress::CallSpec`): method + path template/subtree +
-  name-level query/header constraints + the constrained JSON-RPC-method body
-  rung. Three modes (`observe`/`warn`/`enforce`), migration defaults (warn for
-  legacy, enforce for apps declaring ≥1 call). `[[apps.<app>.calls]]` in
-  apps.toml; `describe()`-carried declarations intersected with the operator
-  spec (a request, never authority); observe-mode `[[calls]]` generator +
-  `Call` authoring helper. Strictly additive — a host-keyed `allow_hosts`/
-  `inject` desugars to the maximally-broad call, so the live fleet is
-  byte-identical. **Held for review, not merged**; the general policy engine
-  (§9.2) is deferred to a separate branch.
+  shared with the manifest verifier (manifest-verification-plan §2.6); the
+  canonicalizer itself was extracted to the shared leaf crate
+  `crates/tangram-egress` (consumed by the host enforcer, the verifier, AND the
+  browser-automation gate — one canonicalizer fleet-wide). Small regex-free
+  grammar (`egress::CallSpec`): method + path template/subtree + name-level
+  query/header constraints + the constrained JSON-RPC-method body rung. Three
+  modes (`observe`/`warn`/`enforce`), migration defaults (warn for legacy,
+  enforce for apps declaring ≥1 call). `[[apps.<app>.calls]]` in apps.toml;
+  `describe()`-carried declarations intersected with the operator spec (a
+  request, never authority); observe-mode `[[calls]]` generator + `Call`
+  authoring helper. Strictly additive — a host-keyed `allow_hosts`/`inject`
+  desugars to the maximally-broad call, so the live fleet is byte-identical.
+  Pinned by `tests/egress_enforcement.rs`. The opt-in bounded **policy engine**
+  (§9.2, ADR-0009) also merged as `crates/tangram-host/src/policy.rs`
+  (`[apps.<app>.policy]`): a latency-budgeted, fail-closed AST over the same
+  egress seam that can only NARROW a grant — an escape hatch, never the default.
 - [x] **Phase S1 — tangram shell (foundational slice)** — delivered 2026-06-11.
   A new first-party app `tangram` (crate `tangram-app-tangram`, on-host name
   `tangram`): the Obsidian-style shell. Design:
@@ -661,19 +668,37 @@ hosted use of the remote, and OAuth-connected local instances.
     bundling marked + DOMPurify and the shell chrome; committed `ui/dist/`
     served as the app's UI dir, all asset URLs relative. Persistent left
     sidebar (vault folder tree + the live `GET /api/fleet` apps list) and a
-    tab strip whose tabs render a `.md` file (textarea editor + rendered
-    preview) or embed an app as `<iframe src="../<app>/">`. (`apps/tangram/ui/`,
-    `apps/tangram/README.md`.)
-  - Host wiring: `[apps.tangram]` in apps.toml (`ui = "apps/tangram/ui/dist"`);
-    no host index/default-route change. CI: a `shell-frontend` job
-    (npm ci + typecheck + build + committed-dist freshness check); the wasm
-    component added to the `check` job's component build.
-  - **Deferred follow-ups** (NOT in S1; see `apps/tangram/README.md`):
-    CodeMirror 6 live-preview editing (S4); marketplace WASM-blob upload +
-    content-addressed hosting behind the default-off `[artifacts]` gate (S3);
-    folding registry/marketplace management into the sidebar; making `tangram`
-    the default `/` route; postMessage shell↔app coordination + app-in-note
-    (composability); split/docking panes; multi-tenant/federated shell views.
+    tab strip whose tabs render a `.md` file or embed an app as
+    `<iframe src="../<app>/">`. (`apps/tangram/ui/`, `apps/tangram/README.md`.)
+  - Host wiring: `[apps.tangram]` in apps.toml (`ui = "apps/tangram/ui/dist"`).
+    CI: a `shell-frontend` job (npm ci + typecheck + build + committed-dist
+    freshness check); the wasm component added to the `check` job's component
+    build.
+  - **Since shipped on top of S1:** the CodeMirror 6 live-preview editor
+    (`apps/tangram/ui/src/livePreview.ts`), the folder-aware vault polish (icon
+    buttons, custom naming modal, tab-dedup, no self-nesting), and making
+    `tangram` the host's default `/` route (307 redirect from `/`).
+  - **Deferred follow-ups** (NOT yet built; see `apps/tangram/README.md`):
+    folding registry/marketplace management into the sidebar; postMessage
+    shell↔app coordination + app-in-note (composability); split/docking panes;
+    multi-tenant/federated shell views. (The marketplace WASM-blob upload +
+    content-addressed hosting behind the default-off `[artifacts]` gate shipped
+    as Phase S2b — `POST /artifacts`, `crates/tangram-host/README.md`.)
+- [x] **Manifest verification** — the `granted ⊆ declared ⊆ audited` chain
+  (function-level import audit at the converge chokepoint, soft-flag/hard-fail
+  dispositions, the `verified` fleet field): `crates/tangram-host/src/verify.rs`,
+  pinned by `tests/verification.rs` (design: `docs/design/manifest-verification-plan.md`).
+- [x] **Browser + credential automation substrate** (ADR-0010,
+  `docs/design/task-automation-browser.md`) — `crates/tangram-automation`: a
+  supervised browser runner, the browser egress gate on the shared
+  `tangram-egress` canonicalizer, the `op://` 1Password credential broker, and
+  a record→replay→validated-LLM-fallback engine. First consumer: the Amazon
+  cart demo (cart-only, stops at CAPTCHA, never places an order; the live run is
+  owner-gated). Native-only.
+- [x] **New apps** — `apps/morning-brief` (AI-enabled component, offline core),
+  `apps/guided-learning` (Make-It-Stick tutor, host-injected Anthropic egress),
+  `apps/auto-todo` (per-item agent lifecycle, safe tier AC1–AC3 only). Specs in
+  `docs/design/{morning-brief,guided-learning,auto-todo}.md`.
 
 Sequencing: wave 1 (registry+auth, tangram-core, parity fixes) → wave 2
 (agentgateway single-instance/single-port, miniflare e2e) → checkpoint-3 →

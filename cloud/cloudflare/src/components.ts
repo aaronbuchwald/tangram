@@ -36,8 +36,8 @@ export interface Env {
   OAUTH_USER_URL?: string;
   /** Nutrition's strategy config — set CALORIENINJAS_API_KEY as a Worker
    * secret (`wrangler secret put CALORIENINJAS_API_KEY`) to enable
-   * description-based meal logging; without it nutrition falls back to
-   * offline/manual cleanly. */
+   * description-based meal logging. Manual gram-quantified logging always
+   * works; without a key a description-only meal fails with a clear error. */
   NUTRITION_STRATEGY?: string;
   CALORIENINJAS_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
@@ -49,7 +49,9 @@ interface AppDef {
     imports: Record<string, Record<string, unknown>>,
   ) => Promise<Record<string, unknown>>;
   ui: string;
-  /** The app's ENTIRE outbound-network grant (tangram-host's allow_hosts). */
+  /** The app's outbound-network grant on the Worker runtime — the coarse host
+   * fence (tangram-host's `allow_hosts`). Call-level egress (ADR-0008) is a
+   * native-host feature and does not apply here. */
   allowHosts: string[];
   /** Env vars granted to the component, from the Worker's vars/secrets. */
   env: (env: Env) => [string, string][];

@@ -1,6 +1,15 @@
 # Tangram SDK — Design
 
-**Status:** draft / pre-implementation
+**Status:** original design / pre-implementation vision — kept as the rationale
+record. The shipped architecture has since diverged in several concrete ways;
+where this doc and the code disagree, the code wins. Notably: the workspace is
+`tangram` + `tangram-core` + `tangram-host` + `tangram-egress` +
+`tangram-automation` + `tangram-macros` (NOT the `tangram-mcp` / `-web` /
+`-sync` / `-auth` / `-model` split sketched below); sync is raw Automerge over
+HTTP(+SSE), not samod and not WebSockets (see `docs/SYNC_PROTOCOL.md`); and the
+model macros are `#[model]` / `#[actions]`, not `#[derive(Model)]`. Auth is
+designed but not yet built (`docs/design/auth.md`). For the as-built picture see
+`AGENTS.md`, `docs/RUNTIME_PLAN.md`, and `docs/TOUR.md`.
 **Goal:** make it trivial to vibe-code a Tangram app: define a plain Rust data
 model + methods, and get — automatically — a local-first replicated store,
 cross-device sync, multiplayer with access control, an MCP server, a minimal

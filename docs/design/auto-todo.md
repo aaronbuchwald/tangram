@@ -1,7 +1,14 @@
 # Design: Auto-completing TODO list (`apps/auto-todo`)
 
-**Status:** design / proposal (no production code). Read-only research + design
-+ effort estimate + testable checkpoints + open decisions.
+**Status:** IMPLEMENTED (safe tier, AC1–AC3) — shipped as `apps/auto-todo`: the
+DRAFTED→DISCOVERED→CLASSIFIED→PLAN_PROPOSED→APPROVED per-item lifecycle,
+read-only rule-based discovery/classification (optional offline-fixture LLM
+assist), and the plan-hash-bound approval + per-step `confirm()` UI. `execute()`
+is a no-op; `require_auth` gates the mutating actions. AC4–AC6 (the
+credential/browser tier) are intentionally NOT built — they remain gated on the
+automation substrate (now shipped, ADR-0010) plus owner approval. This document
+is retained as the design record; where it says "no production code", read it as
+the original plan for the safe tier.
 **Date:** 2026-06-12
 **Author:** Aaron (owner), with research + design by Claude
 

@@ -49,9 +49,15 @@ Deliberately out of scope and recorded here (and in
 operator-curated via `add_listing`. Accepting third-party submissions
 requires a submission pipeline that gates listing approval on:
 
-1. **automated capability verification** — the declared manifest is a
-   SUBSET of the audited component imports (manifest ⊆ imports);
-2. **a sandboxed smoke-run** of the artifact;
-3. **an LLM behavioral sanity check**.
+1. **automated capability verification** — `granted ⊆ declared ⊆ audited`
+   (the declared manifest is a subset of the audited component imports). The
+   *mechanical* check now ships as the host's converge-time verifier
+   (`crates/tangram-host/src/verify.rs`, pinned by `tests/verification.rs`); it
+   stamps a `verified` verdict on the fleet. What is still missing is wiring it
+   into a third-party **submission gate** (and the host enforcing the audit
+   reject at upload time — see `crates/tangram-host/README.md`).
+2. **a sandboxed smoke-run** of the artifact — not built;
+3. **an LLM behavioral sanity check** — not built.
 
-None of that exists yet; nothing in this app pretends it does.
+The submission pipeline itself does not exist; nothing in this app pretends it
+does. Today the catalog is operator-curated only.

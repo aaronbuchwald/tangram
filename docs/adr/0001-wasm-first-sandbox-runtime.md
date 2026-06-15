@@ -119,7 +119,8 @@ The owner confirmed Option B and fixed the deployment targets:
    `TANGRAM_REMOTE_<APP>` at either `https://<host>/<app>/sync` (EC2) or
    the Worker's URL and cannot tell the difference. CF is reached via a
    thin TS/automerge-wasm relay first, not a `workers-rs` port of the SDK;
-   full app logic on CF (MCP/UI via the Agents SDK) remains Phase 4 scope.
+   full app logic on CF was then Phase 4 scope (since delivered — the
+   jco-transpiled per-app Durable Object host, ADR-0002).
 3. **Sequencing within Option B**: the shared interface ships first
    (sync-over-HTTP in the SDK + the CF relay + the new data layout), then
    the embedded-Wasmtime host adds capability enforcement on top. If small

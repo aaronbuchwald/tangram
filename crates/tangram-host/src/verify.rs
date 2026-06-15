@@ -130,9 +130,12 @@ impl AuditedImports {
 /// containment it drives is delegated to THE single egress seam
 /// ([`crate::egress::CallSpec::covers`]) so the verifier and the egress enforcer
 /// can never disagree on what a host/path means (the SOCKS5 parser-differential
-/// lesson — one canonicalizer, one containment relation). DESIGNED-FOR but GATED
-/// on the live converge path: grants are host-grained today, so `granted.calls`
-/// is empty and this arm is a no-op until call-grain grants reach converge.
+/// lesson — one canonicalizer, one containment relation). Call-level egress
+/// itself ships (ADR-0008): the egress *enforcer* matches against declared
+/// `[[apps.<app>.calls]]` at the `http_fetch` boundary. This verifier arm is
+/// GATED on the *converge* path specifically — registry/`apps.toml` grants are
+/// still host-grained there, so `granted.calls` is empty and this arm is a
+/// no-op until call-grain grants reach converge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CallSpec {
@@ -269,12 +272,14 @@ pub struct GrantedCapabilities {
     pub allow_hosts: BTreeSet<String>,
     pub inject_hosts: BTreeSet<String>,
     pub env_keys: BTreeSet<String>,
-    /// Call-grained grants (DESIGNED-FOR, gated on fine-grained-egress; plan
-    /// §2.6). EMPTY in the live converge path today — grants are host-grained.
-    /// When fine-grained-egress ships, the egress enforcer's effective
-    /// `CallSpec`s populate this and the chain's call-grain containment arm
-    /// (in [`verify`]) becomes load-bearing. Kept here so the seam is the
-    /// SAME canonicalization the enforcer uses (the SOCKS5 lesson).
+    /// Call-grained grants (DESIGNED-FOR; plan §2.6). Call-level egress ships
+    /// (ADR-0008) — the egress *enforcer* matches declared calls at the
+    /// `http_fetch` boundary — but this field stays EMPTY on the *converge*
+    /// path: registry/`apps.toml` grants are still host-grained there. When the
+    /// converge path begins emitting call-grain grants, the enforcer's
+    /// effective `CallSpec`s populate this and the chain's call-grain
+    /// containment arm (in [`verify`]) becomes load-bearing. Kept here so the
+    /// seam is the SAME canonicalization the enforcer uses (the SOCKS5 lesson).
     pub calls: Vec<CallSpec>,
 }
 
@@ -564,13 +569,15 @@ mod tests {
     /// CP6 (DEFERRED, designed-for) — the `CallSpec ⊆ CallSpec` containment
     /// arm exists and is correct, and now routes through the single egress seam
     /// ([`crate::egress::CallSpec::covers`]), but `NetworkClaim::Calls` is not
-    /// produced or consumed anywhere in the live converge path: grants are
-    /// host-grained today. This stub activates (drop the `#[ignore]`) when the
-    /// host begins emitting call-grain grants/declarations at converge (plan
-    /// §2.6, CP6). Until then it is the explicit deferred marker.
+    /// produced or consumed anywhere in the live converge path: converge grants
+    /// are host-grained today (the egress *enforcer* already matches call-level
+    /// grants at runtime; ADR-0008). This stub activates (drop the `#[ignore]`)
+    /// when the host begins emitting call-grain grants/declarations at converge
+    /// (plan §2.6, CP6). Until then it is the explicit deferred marker.
     #[test]
-    #[ignore = "gated on fine-grained-egress (not built); plan §2.6 / CP6 — \
-                activate when call-grain grants reach the converge path"]
+    #[ignore = "gated on call-grain grants reaching the converge path (plan \
+                §2.6 / CP6); the egress enforcer already matches call-level \
+                grants at runtime"]
     fn call_grain_subset() {
         let declared_call = CallSpec {
             host: "api.vendor.com".into(),

@@ -217,8 +217,9 @@ impl Registry {
     /// `component_url` + `component_sha256` (the host downloads the
     /// artifact, verifies the sha-256 BEFORE running it, and caches it by
     /// hash — e.g. a marketplace listing). `ui` is a directory of static
-    /// files on the host. `allow_hosts` is the app's entire
-    /// outbound-network grant (exact host names; omit for no network).
+    /// files on the host. `allow_hosts` is the app's coarse outbound-network
+    /// fence (exact host names; omit for no network); the host can narrow it
+    /// further with call-level egress grants (`[[apps.<app>.calls]]`, ADR-0008).
     /// `env` entries with a value of the exact form `${VAR}` are expanded
     /// from the host's environment, so secrets can stay in the host's .env.
     /// `inject` declares egress credentials the HOST attaches to outbound

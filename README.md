@@ -59,10 +59,23 @@ crates/tangram          the SDK: native tokio/axum host (web + sync + MCP transp
 crates/tangram-core     the portable core: action registry, CRDT store + dispatch,
                         sync sessions/framing, sans-io streamable-HTTP MCP server —
                         no tokio/hyper; compiles to wasm32-wasip2 (CI-checked)
+crates/tangram-host     embedded-Wasmtime host: runs apps as WASM components from
+                        apps.toml with capability grants, call-level egress, the
+                        registry/marketplace planes, multi-tenancy (serves the shell)
+crates/tangram-egress   the single egress-canonicalization seam (host/path), a leaf
+                        crate shared by the host enforcer, verifier, and browser gate
+crates/tangram-automation host-side browser + op:// credential + record/replay/LLM-
+                        fallback substrate (native-only; ADR-0010)
 crates/tangram-macros   #[model] and #[actions] proc macros
 apps/notes              minimal example: a replicated notes list
 apps/nutrition          fuller example: a nutrition tracker built on Tangram
-apps/shell              multi-app host: serves every app under one port, prefixed
+apps/registry           the fleet's source of truth (a Tangram app); federates
+apps/marketplace        operator-curated catalog of installable apps (sha256-pinned)
+apps/morning-brief      AI-enabled component: an offline-core daily digest
+apps/guided-learning    AI-enabled component: a Make-It-Stick tutor
+apps/auto-todo          per-item agent lifecycle TODO (safe tier only)
+apps/tangram            the Obsidian-style shell (sidebar vault + live apps, tabs)
+apps/shell              simple no-WASM multi-app host: every app under one port
 cloud/cloudflare        Durable-Object app host: full surface (UI/api/sync/mcp)
                         over the same WASM app components, serverless (ADR-0002)
 docs/SDK_DESIGN.md      architecture & roadmap
@@ -200,8 +213,9 @@ builds the shell UI, then runs the host:
 ```sh
 rustup target add wasm32-wasip2                                       # once
 cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
-  -p tangram-marketplace -p tangram-app-tangram --lib \
-  --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace,tangram_app}.wasm
+  -p tangram-marketplace -p tangram-app-tangram -p tangram-morning-brief \
+  -p tangram-guided-learning -p tangram-app-auto-todo --lib \
+  --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace,tangram_app,morning_brief,guided_learning,auto_todo}.wasm
 (cd apps/tangram/ui && npm ci && npm run build)                      # the shell UI → apps/tangram/ui/dist
 cargo run -p tangram-host --release -- apps.toml
 # open http://127.0.0.1:8080/ — 307 → /tangram/ (the Obsidian-style shell)
@@ -222,7 +236,7 @@ ui = "apps/notes/ui"
 [apps.nutrition]
 component = "target/wasm32-wasip2/release/nutrition.wasm"
 ui = "apps/nutrition/ui"
-allow_hosts = ["api.calorieninjas.com"]     # the app's ENTIRE outbound grant
+allow_hosts = ["api.calorieninjas.com"]     # the coarse outbound fence (call-level below narrows it)
 
 [apps.nutrition.env]
 NUTRITION_STRATEGY = "calorieninjas"                 # a non-secret selector
@@ -295,12 +309,12 @@ grants no `allow_hosts` simply cannot reach the network: nutrition's
 description-based `log_meal` then fails with an error saying which host to
 grant in `apps.toml`.
 
-Custom capability probes survive the cutover too: a component can publish an
-optional `capabilities` object in its `describe()` manifest, computed at
-instantiation from the env vars its spec grants, and the host serves it at
-`GET /<app>/api/capabilities` (404 for apps that publish none). Nutrition
-uses this to report its active strategy with the exact same JSON as its
-native route — same env, same bytes — so its UI offers description-based
+Capability probes survive the cutover too: a component can publish an optional
+`capabilities` object in its `describe()` manifest, computed at instantiation
+from the env vars its spec grants, and the host serves it at
+`GET /<app>/api/capabilities` (404 for apps that publish none). Nutrition uses
+this to report its active strategy — the same object its `get_capabilities`
+action returns (no hand-written route), so its UI offers description-based
 logging under the host as well (pinned by
 `crates/tangram-host/tests/capabilities.rs`).
 
@@ -416,7 +430,8 @@ Two rules make federation safe:
 - **Per-host secrets** — the replicated document carries only env KEYS,
   `${VAR}` / `scheme://locator` references, and `inject` rules, never values.
   Each host resolves them from its own environment; a peer missing the secret
-  runs the app degraded (e.g. nutrition → offline) or errors cleanly. Secret
+  runs the app degraded (e.g. nutrition keeps manual gram-quantified logging but
+  description-based logging errors cleanly). Secret
   VALUES never sync — and with egress injection (ADR-0005) a credential never
   even enters the component, only the host's memory for one outbound request.
 
@@ -771,7 +786,7 @@ components get resolved.
 - **`llm`** — asks Anthropic's `claude-opus-4-8` (structured output) for a
   comprehensive per-100g nutrient panel (`ANTHROPIC_API_KEY`).
 
-With an online strategy active, meals can be logged from a plain-language
+With a strategy credential configured, meals can be logged from a plain-language
 **description** — quantities included, no explicit components needed. This is
 the same registered `log_meal` action everywhere (HTTP action route, MCP
 tool, web UI — one contract by construction):
@@ -781,8 +796,9 @@ curl -s localhost:8080/api/actions/log_meal -H 'content-type: application/json' 
   -d '{"description": "1 cup brown rice and 200g grilled chicken"}'
 ```
 
-`GET /api/capabilities` reports the active strategy (the web UI uses it to
-offer the description box). Explicit components always win when provided;
+The `get_capabilities` action reports the active strategy (served at
+`GET /api/capabilities`; the web UI uses it to offer the description box).
+Explicit components always win when provided;
 unknown ones are then back-filled in the background. `log_meal` is an async
 action: it resolves over the network *without* holding the store lock and
 caches results through an idempotent mutation, so each resolution lands as an

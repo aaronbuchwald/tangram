@@ -67,9 +67,11 @@ exist. Only items marked DONE ship today:
    — **NOT YET DONE.**
 4. **Type/shape validation** — accept only valid `wasm32-wasip2` components
    (magic + Wasmtime parse) **and** enforce the closed-world import audit
-   (reject `wasi:sockets` / `wasi:http` / a filesystem import). — wasm-validity
-   **DONE**; the import-audit reject is **NOT YET DONE** (the marketplace
-   *displays* the audit but the host does not yet enforce it on upload).
+   (reject `wasi:sockets` / `wasi:http` / a filesystem import) at upload time.
+   — wasm-validity **DONE**; the upload-time import-audit reject is **NOT YET
+   DONE** (the marketplace *displays* the audit, and the converge-time verifier
+   `src/verify.rs` stamps a `granted ⊆ declared ⊆ audited` verdict on the fleet,
+   but neither hard-rejects a forbidden import on upload).
 5. **Content/abuse controls** — at minimum a hash blocklist of known-bad
    artifacts; ideally a sandboxed smoke-run + the behavioral check the
    marketplace README lists as the third-party-submission TODO. — **NOT YET DONE.**

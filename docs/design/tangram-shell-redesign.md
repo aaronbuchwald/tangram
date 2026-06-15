@@ -1,9 +1,15 @@
 # Tangram Shell Redesign — design & decisions for approval
 
-**Status:** PLANNING ONLY — no code written. This document exists to get the
-owner's approval on major design decisions and library choices **before** any
-build begins. Nothing here is implemented; the "DECISIONS NEEDING OWNER
-APPROVAL" section at the end is the actionable output.
+**Status:** LARGELY IMPLEMENTED — the Obsidian-style shell shipped as
+`apps/tangram` (sidebar vault + live apps, tabbed main window, a CodeMirror
+live-preview editor, folder-aware vault with icon buttons, tab-dedup, a custom
+naming modal). Its `ui/` uses the Vite build pipeline the build-step exception
+(Decision A) granted — see ADR-0007. `tangram-host` serves it at `/tangram/`
+and 307-redirects `/` there. This document is retained as the design record;
+the marketplace blob-upload artifact store (§5) remains design-only (see the
+marketplace MUST-FIX). Where the body says "no code / nothing implemented" or
+recommends no live-preview editor in v1 (Decision C), read it as the original
+plan — the shell has since been built.
 
 **Scope:** four owner-specified threads — (1) rename/reframe the host's base
 view as an app called **tangram**; (2) an Obsidian-style shell (persistent left

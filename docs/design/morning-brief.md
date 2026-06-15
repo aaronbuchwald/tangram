@@ -1,8 +1,13 @@
 # Design: Morning Brief — Tangram's first AI-enabled component
 
-**Status:** design / proposal (no production code). Read-only research + design
-+ effort estimate + testable checkpoints. This document is the only artifact;
-no code is written and no in-flight PR branch is touched.
+**Status:** IMPLEMENTED (offline core, MB1–MB5) — shipped as
+`apps/morning-brief`: the model, config/feedback actions, the pluggable source
+seam with checked-in fixtures, the prompt builder, and a fully offline
+`run_brief` (input_mode "fixture", zero-network, CI's flagship). The egress +
+live tier (real Google/Anthropic calls, MB6–MB8) is the app's own later PR; the
+host-side egress and verification machinery it will use already ships
+(ADR-0008, verify.rs). This document is retained as the design record; where it
+says "no production code", read it as the original plan.
 **Date:** 2026-06-12
 **Author:** Aaron (owner), with research + design by Claude
 **Related (read these for the spine):**

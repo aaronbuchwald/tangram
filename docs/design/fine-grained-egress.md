@@ -1,7 +1,12 @@
 # Design: Fine-grained egress — from host allowlists to call-level capabilities
 
-**Status:** design / proposal (no production code). Read-only research +
-design.
+**Status:** IMPLEMENTED — call-level egress shipped as ADR-0008
+(`crates/tangram-host/src/egress.rs`, `[[apps.<app>.calls]]` + `enforcement`),
+with the canonicalizer extracted to the shared `crates/tangram-egress` leaf
+crate, and the §9.2 policy engine shipped as ADR-0009
+(`crates/tangram-host/src/policy.rs`). This document is retained as the design
+record; where it says "no production code" / "deferred" / "held, not merged",
+read it as the original plan — the work has since landed on `main`.
 **Date:** 2026-06-11
 **Author:** Aaron (owner), with research + design by Claude
 **Related:** ADR-0005 (egress credential injection — the *exposure* axis this
