@@ -1080,7 +1080,7 @@ impl TenantsConfig {
 
 /// `[auth]` — the deployment auth mode (docs/design/auth.md). Absent (the
 /// default) → self-hosted, loopback-trusted (no token required over loopback).
-#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -1105,6 +1105,38 @@ pub struct AuthConfig {
     /// resolved through the secret seam; never inline).
     #[serde(default)]
     pub oauth_client_secret: Option<String>,
+    /// Per-principal mutation rate limit (auth.md §12; C7): the max mutating
+    /// requests one principal may make per rolling minute before the host 429s
+    /// it (blunting a leaked-PAT brute force). Multi-tenant ON by default
+    /// ([`DEFAULT_RATE_LIMIT_PER_MIN`]); `0` DISABLES the limit. No effect in
+    /// self-hosted mode (loopback-trusted) unless the host opts in.
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_per_min: u32,
+}
+
+/// The default per-principal mutation rate limit (auth.md §12, §11.5). ~60/min
+/// is generous for an interactive user / replica while still bounding a leaked
+/// credential's blast radius.
+pub const DEFAULT_RATE_LIMIT_PER_MIN: u32 = 60;
+
+fn default_rate_limit() -> u32 {
+    DEFAULT_RATE_LIMIT_PER_MIN
+}
+
+impl Default for AuthConfig {
+    /// The programmatic default mirrors the serde default exactly (a config-load
+    /// failure falls back here; the rate limit must not silently become 0).
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::default(),
+            reads_gated: false,
+            default_user_id: None,
+            oauth_issuer: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            rate_limit_per_min: default_rate_limit(),
+        }
+    }
 }
 
 /// The two deployment auth shapes (docs/design/auth.md §1).

@@ -104,6 +104,10 @@ pub struct Host {
     /// bootstrap (still fully functional). A partial config fails startup, so a
     /// half-configured OAuth never silently runs.
     pub oauth: Option<oauth::OauthConfig>,
+    /// The host-wide per-principal mutation rate limiter (auth.md §12, C7).
+    /// Shared into every multi-tenant app gate so a principal counts against ONE
+    /// budget across all apps. `0`/disabled in self-hosted unless opted in.
+    pub rate_limiter: Arc<multitenant::RateLimiter>,
     /// Tenant → resolved bearer token (Phase 5), refreshed on every converge
     /// — the lookup table behind [`auth::resolve_principal`]. A tenant whose
     /// `${VAR}` token didn't resolve is absent: every request 401s.
@@ -221,6 +225,14 @@ impl Host {
             }
         }
         *self.tenant_tokens.write().await = tokens.clone();
+
+        // Tenant→PAT convergence (auth.md §7, C7): in multi-tenant mode each
+        // per-tenant static token becomes a seeded per-tenant PAT in the
+        // host-local store, so the host & tenant credential models converge on
+        // ONE account model. Idempotent — a no-op once seeded.
+        if let Some(store) = &self.accounts {
+            multitenant::converge_tenant_pats(store, &tokens);
+        }
 
         let mut apps = self.apps.write().await;
         let mut errors: BTreeMap<AppKey, String> = BTreeMap::new();
@@ -548,6 +560,7 @@ impl Host {
                     (true, Some(store)) => routes::GatePolicy::MultiTenant {
                         store: store.clone(),
                         reads_gated: self.reads_gated,
+                        limiter: self.rate_limiter.clone(),
                     },
                     _ => {
                         let token = gate_token
@@ -648,6 +661,13 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     let auth_mode = auth_config.mode;
     let reads_gated = auth_config.reads_gated;
+    // The per-principal mutation rate limit (auth.md §12, C7). The limiter is
+    // only ever consulted by the multi-tenant `PrincipalGate`, so self-hosted
+    // (which uses the single-token gate) is unaffected regardless of value.
+    // Multi-tenant default is ~60/min; `0` disables it.
+    let rate_limiter = Arc::new(multitenant::RateLimiter::new(
+        auth_config.rate_limit_per_min,
+    ));
 
     // The secret-resolution seam (ADR-0004). Built here (not inline in the Host
     // literal) so the OAuth client secret can resolve through it at startup.
@@ -813,6 +833,7 @@ async fn main() -> anyhow::Result<()> {
         reads_gated,
         accounts,
         oauth,
+        rate_limiter,
         tenant_tokens: RwLock::new(BTreeMap::new()),
         bind_loopback,
         nudge: Arc::new(Notify::new()),

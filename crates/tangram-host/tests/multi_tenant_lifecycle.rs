@@ -443,6 +443,98 @@ registry = true
     drop(_host);
 }
 
+/// C7 — per-principal mutation rate limit: with a low `rate_limit_per_min`, a
+/// principal's mutations are allowed up to the budget then 429'd, while a
+/// DIFFERENT principal keeps its own budget (recovery-after-window is unit-
+/// tested in `multitenant.rs`, which is clock-free; a 60s wait here would be
+/// flaky/slow).
+#[tokio::test]
+async fn per_principal_mutation_rate_limit_trips_and_is_per_principal() {
+    for name in ["registry", "notes"] {
+        if !component(name).exists() {
+            eprintln!("SKIPPING rate_limit test: {name} component missing");
+            return;
+        }
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let apps_toml = home.join("apps.toml");
+    // A tiny budget so the test trips it quickly.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[auth]
+mode = "multi-tenant"
+rate_limit_per_min = 3
+
+[apps.registry]
+component = "{registry}"
+ui = "{root}/apps/registry/ui"
+registry = true
+"#,
+            registry = component("registry").display(),
+            root = root.display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+    let ok = Some(reqwest::StatusCode::OK);
+
+    wait_for("admin PAT in log", Duration::from_secs(30), || async {
+        admin_pat_from_log(&log).is_some()
+    })
+    .await;
+    let admin = admin_pat_from_log(&log).expect("admin PAT");
+    wait_for("registry healthz", Duration::from_secs(120), || async {
+        get_status(&client, &format!("{base}/registry/healthz"), None).await == ok
+    })
+    .await;
+
+    let store_path = home.join(".tangram").join("accounts.sqlite");
+    let second = {
+        let conn = rusqlite::Connection::open(&store_path).expect("open store");
+        mint_full_pat_for_new_account(&conn, "second", "second@example.com")
+    };
+
+    let install = format!("{base}/registry/api/actions/install_app");
+    let args = |n: usize| {
+        serde_json::json!({
+            "name": format!("rl{n}"),
+            "component": component("notes").display().to_string(),
+            "ui": root.join("apps/notes/ui").display().to_string(),
+        })
+    };
+
+    // The admin's first 3 mutations pass; the 4th is 429'd (over budget).
+    for n in 0..3 {
+        assert_eq!(
+            action(&client, &install, Some(&admin), &args(n)).await,
+            reqwest::StatusCode::OK,
+            "mutation {n} within budget"
+        );
+    }
+    assert_eq!(
+        action(&client, &install, Some(&admin), &args(99)).await,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "the 4th mutation in the window is rate-limited"
+    );
+
+    // A DIFFERENT principal has its OWN budget (the limit is per-principal).
+    assert_eq!(
+        action(&client, &install, Some(&second), &args(100)).await,
+        reqwest::StatusCode::OK,
+        "a different principal is not affected by the first's limit"
+    );
+    drop(_host);
+}
+
 /// Mint a full-scope PAT for a NEW account directly in the store (the host's
 /// own `mint_pat` semantics). Used to stand a second attributed principal up
 /// without the C5 account-creation HTTP API.

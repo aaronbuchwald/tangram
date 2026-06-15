@@ -78,11 +78,13 @@ pub enum GatePolicy {
     /// Self-hosted / single-token: `TANGRAM_AUTH_TOKEN` bearer gate on
     /// registry/require_auth apps (`None` ⇒ no gate, loopback-trusted).
     SingleToken(Option<String>),
-    /// Multi-tenant: the host-local account store + the `reads_gated` flag.
-    /// Every mutating action / tool requires a resolved, scoped principal.
+    /// Multi-tenant: the host-local account store + the `reads_gated` flag +
+    /// the shared per-principal mutation rate limiter. Every mutating action /
+    /// tool requires a resolved, scoped, within-budget principal.
     MultiTenant {
         store: Arc<crate::accounts::AccountStore>,
         reads_gated: bool,
+        limiter: Arc<crate::multitenant::RateLimiter>,
     },
 }
 
@@ -123,12 +125,17 @@ impl AppEntry {
                 mcp = mcp.layer(axum::middleware::from_fn_with_state(gate, auth::mcp_guard));
             }
             GatePolicy::SingleToken(None) => {}
-            GatePolicy::MultiTenant { store, reads_gated } => {
+            GatePolicy::MultiTenant {
+                store,
+                reads_gated,
+                limiter,
+            } => {
                 let gate = Arc::new(crate::multitenant::PrincipalGate::new(
                     store,
                     runtime.name.clone(),
                     mutating_tools(),
                     reads_gated,
+                    limiter,
                 ));
                 actions = actions.layer(axum::middleware::from_fn_with_state(
                     gate.clone(),

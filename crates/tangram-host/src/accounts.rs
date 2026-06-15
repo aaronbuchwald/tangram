@@ -352,6 +352,59 @@ impl AccountStore {
         })
     }
 
+    /// Seed a PAT for a KNOWN plaintext token (auth.md §7 tenant convergence,
+    /// C7): the per-tenant static token in `apps.toml` becomes a per-tenant PAT
+    /// in the store, validated by the same hash lookup as any other PAT. Stores
+    /// ONLY the hash (the plaintext is the operator's config value, never
+    /// persisted in plaintext here). Idempotent: a no-op when a row with this
+    /// token's hash already exists, so re-converging never duplicates or churns
+    /// it. Returns `true` when a row was inserted.
+    pub fn seed_pat(
+        &self,
+        user_id: &str,
+        token: &str,
+        scopes: ScopeSet,
+        label: &str,
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            self.account(user_id)?.is_some(),
+            "cannot seed a PAT for unknown account {user_id:?}"
+        );
+        let token_hash = hash_token(token);
+        // Idempotent: skip if this exact token is already seeded.
+        let exists: bool = self
+            .conn()
+            .query_row(
+                "SELECT 1 FROM pats WHERE token_hash = ?1",
+                params![token_hash],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            return Ok(false);
+        }
+        // A stable, deterministic id derived from the hash so the seeded row is
+        // recognizable and re-seeding is a clean no-op.
+        let id = format!("pat_seed_{}", &token_hash[..16]);
+        self.conn()
+            .execute(
+                "INSERT INTO pats (token_hash, id, user_id, scopes, label, created_ms, expires_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+                params![
+                    token_hash,
+                    id,
+                    user_id,
+                    scopes.to_db_string(),
+                    label,
+                    now_ms
+                ],
+            )
+            .context("seeding tenant PAT")?;
+        Ok(true)
+    }
+
     /// List `user_id`'s PATs (metadata only — never the secret or its hash).
     pub fn list_pats(&self, user_id: &str) -> anyhow::Result<Vec<PatInfo>> {
         let conn = self.conn();
@@ -476,19 +529,23 @@ impl AccountStore {
     // ── validation ───────────────────────────────────────────────────────────
 
     /// Validate a presented token plaintext, routing by prefix:
-    /// `tgp_` → PAT table, `tgs_` → sessions, anything else → `None`. Returns
-    /// the authenticated principal's identity + scopes, or `None` for an
-    /// unknown / expired / revoked credential. The uniform-`None` is the
-    /// no-existence-oracle guarantee (auth.md §12): missing, wrong, expired,
-    /// and revoked all look identical to the caller.
+    /// `tgp_` → PAT table, `tgs_` → sessions. A token with NEITHER prefix falls
+    /// back to a PAT-table hash lookup — this is the seeded per-tenant static
+    /// token (auth.md §7 convergence, C7), an arbitrary operator-chosen string
+    /// with no `tgp_` prefix. Returns the authenticated principal's identity +
+    /// scopes, or `None` for an unknown / expired / revoked credential. The
+    /// uniform-`None` is the no-existence-oracle guarantee (auth.md §12):
+    /// missing, wrong, expired, and revoked all look identical. The hash lookup
+    /// is authoritative — the prefix is only a fast-path router, so a
+    /// non-prefixed garbage token (not in any table) still resolves to `None`.
     pub fn validate(&self, plaintext: &str, now_ms: i64) -> Option<ValidatedCredential> {
         let token_hash = hash_token(plaintext);
-        if plaintext.starts_with(PAT_PREFIX) {
-            self.validate_pat(&token_hash, now_ms)
-        } else if plaintext.starts_with(SESSION_PREFIX) {
+        if plaintext.starts_with(SESSION_PREFIX) {
             self.validate_session(&token_hash, now_ms)
         } else {
-            None
+            // `tgp_`-prefixed PATs and non-prefixed seeded tenant tokens both
+            // resolve through the PAT table by hash.
+            self.validate_pat(&token_hash, now_ms)
         }
     }
 
