@@ -114,7 +114,7 @@ body {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .twisty { width: 12px; color: var(--dim); font-size: 10px; }
-.folder-row .label { color: var(--dim); }
+.folder-row .label { color: var(--text); }
 
 /* Per-row vault actions (folder: new note / new folder / rename / delete;
    file: rename / delete). Hidden at rest so the tree reads as a calm list of

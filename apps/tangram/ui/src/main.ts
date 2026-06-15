@@ -50,6 +50,10 @@ function displayName(slug: string): string {
   return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
+function displayFileName(name: string): string {
+  return name.endsWith(".md") ? name.slice(0, -3) : name;
+}
+
 // ── shared mutable shell state ──────────────────────────────────────────────
 
 let files: MdFile[] = [];
@@ -160,7 +164,7 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
   if (node.kind === "folder") {
     const wrap = el("div", "tree-folder");
     const row = el("div", "tree-row folder-row");
-    row.style.paddingLeft = `${depth * 14 + 8}px`;
+    row.style.paddingLeft = `${depth * 20 + 8}px`;
     const isCollapsed = collapsed.has(node.path);
     row.appendChild(el("span", "twisty", isCollapsed ? "▸" : "▾"));
     row.appendChild(el("span", "label", node.name));
@@ -206,11 +210,11 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
     return wrap;
   }
   const row = el("div", "tree-row file-row");
-  row.style.paddingLeft = `${depth * 14 + 8}px`;
+  row.style.paddingLeft = `${depth * 20 + 8}px`;
   if (tabs.active?.kind === "note" && tabs.active.fileId === node.file.id) {
     row.classList.add("active");
   }
-  row.appendChild(el("span", "label", node.name));
+  row.appendChild(el("span", "label", displayFileName(node.name)));
   const actions = el("div", "row-actions");
   const ren = rowAction(ICON.pencil, `Rename / move ${node.path}`);
   ren.addEventListener("click", (e) => {
