@@ -46,6 +46,10 @@ function rowAction(icon: string, title: string, danger = false): HTMLButtonEleme
   return btn;
 }
 
+function displayName(slug: string): string {
+  return slug.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
 // ── shared mutable shell state ──────────────────────────────────────────────
 
 let files: MdFile[] = [];
@@ -247,7 +251,7 @@ function renderApps() {
     const dot = el("span", `dot ${statusClass(app)}`);
     if (app.error) dot.title = app.error;
     row.appendChild(dot);
-    const label = el("span", "label", app.name);
+    const label = el("span", "label", displayName(app.name));
     label.addEventListener("click", () => tabs.openApp(app.name));
     row.appendChild(label);
 
@@ -259,14 +263,14 @@ function renderApps() {
     if (app.source === "registry") {
       const ctls = el("div", "app-ctls");
       const toggle = el("button", "ctl", app.enabled ? "disable" : "enable");
-      toggle.title = app.enabled ? `Disable ${app.name}` : `Enable ${app.name}`;
+      toggle.title = app.enabled ? `Disable ${displayName(app.name)}` : `Enable ${displayName(app.name)}`;
       toggle.addEventListener("click", (e) => {
         e.stopPropagation();
         void manageApp(() => registry.setEnabled(app.name, !app.enabled));
       });
       ctls.appendChild(toggle);
       const remove = el("button", "ctl danger", "remove");
-      remove.title = `Remove ${app.name}`;
+      remove.title = `Remove ${displayName(app.name)}`;
       remove.addEventListener("click", (e) => {
         e.stopPropagation();
         if (!window.confirm(`Remove ${app.name} from the fleet?`)) return;
@@ -296,7 +300,7 @@ async function manageApp(action: () => Promise<unknown>) {
 
 function tabTitle(tab: Tab): string {
   if (tab.kind === "home") return "tangram";
-  if (tab.kind === "app") return tab.app;
+  if (tab.kind === "app") return displayName(tab.app);
   const file = filesById.get(tab.fileId);
   if (!file) return "(Missing)";
   const name = file.path.split("/").pop() ?? file.path;
