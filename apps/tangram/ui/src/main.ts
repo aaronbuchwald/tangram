@@ -72,43 +72,87 @@ interface ActiveEditor {
 }
 let activeEditor: ActiveEditor | null = null;
 
+// ── sidebar state ─────────────────────────────────────────────────────────────
+const collapsedSections = new Set<string>(["vault", "apps"]); // both collapsed by default
+let sidebarOpen = true;
+let sidebarWidth = parseInt(localStorage.getItem("sidebar-width") ?? "268", 10);
+
+function applySidebarOpen() {
+  const sidebar = document.getElementById("sidebar") as HTMLElement;
+  if (sidebarOpen) {
+    sidebar.style.width = `${sidebarWidth}px`;
+    sidebar.style.minWidth = `${sidebarWidth}px`;
+    sidebar.style.overflow = "";
+  } else {
+    sidebar.style.width = "0";
+    sidebar.style.minWidth = "0";
+    sidebar.style.overflow = "hidden";
+  }
+}
+
+function applySectionState() {
+  const vaultBody = document.getElementById("vault-body") as HTMLElement;
+  const appsBody = document.getElementById("apps-body") as HTMLElement;
+  const vaultTwisty = document.getElementById("vault-twisty") as HTMLElement;
+  const appsTwisty = document.getElementById("apps-twisty") as HTMLElement;
+  vaultBody.style.display = collapsedSections.has("vault") ? "none" : "";
+  appsBody.style.display = collapsedSections.has("apps") ? "none" : "";
+  vaultTwisty.textContent = collapsedSections.has("vault") ? "▸" : "▾";
+  appsTwisty.textContent = collapsedSections.has("apps") ? "▸" : "▾";
+}
+
 // ── DOM scaffold ─────────────────────────────────────────────────────────────
 
 const root = document.getElementById("app")!;
 root.innerHTML = `
   <div class="shell">
     <header class="topbar">
-      <div class="brand">Tangram</div>
+      <div class="topbar-left">
+        <button class="sidebar-btn" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1" y="1" width="14" height="14" rx="2"/>
+            <line x1="5" y1="1" x2="5" y2="15"/>
+          </svg>
+        </button>
+        <div class="brand">Tangram</div>
+      </div>
       <div class="status"><span class="dot" id="live-dot"></span><span id="live-label">Connecting…</span></div>
     </header>
     <div class="body">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <section class="side-section">
-          <div class="side-head">
+          <div class="side-head" id="vault-head">
+            <span class="twisty" id="vault-twisty">▸</span>
             <span class="micro">Vault</span>
             <div class="side-actions">
               <button class="head-action" id="new-note" title="New note" aria-label="New note">${ICON.file}</button>
               <button class="head-action" id="new-folder" title="New folder" aria-label="New folder">${ICON.folderPlus}</button>
             </div>
           </div>
-          <div class="tree" id="tree"></div>
+          <div class="side-body" id="vault-body">
+            <div class="tree" id="tree"></div>
+          </div>
         </section>
         <section class="side-section">
-          <div class="side-head">
+          <div class="side-head" id="apps-head">
+            <span class="twisty" id="apps-twisty">▸</span>
             <span class="micro">Apps</span>
             <div class="side-actions">
               <button class="ghost" id="open-marketplace" title="Browse the marketplace">+ Install</button>
             </div>
           </div>
-          <div class="applist" id="applist"></div>
-          <div class="manage" id="manage">
-            <div class="tokenrow">
-              <span class="micro">Auth token</span>
-              <input id="token" type="password" autocomplete="off"
-                     placeholder="TANGRAM_AUTH_TOKEN — required to manage apps" />
+          <div class="side-body" id="apps-body">
+            <div class="applist" id="applist"></div>
+            <div class="manage" id="manage">
+              <div class="tokenrow">
+                <span class="micro">Auth token</span>
+                <input id="token" type="password" autocomplete="off"
+                       placeholder="TANGRAM_AUTH_TOKEN — required to manage apps" />
+              </div>
             </div>
           </div>
         </section>
+        <div class="sidebar-resizer" id="sidebar-resizer"></div>
       </aside>
       <main class="main">
         <div class="tabstrip" id="tabstrip"></div>
@@ -140,6 +184,55 @@ document
 // localStorage slot; mutating registry actions are gated on it host-side.
 tokenInput.value = authToken();
 tokenInput.addEventListener("change", () => setAuthToken(tokenInput.value));
+
+// Sidebar open/close toggle
+document.getElementById("sidebar-toggle")!.addEventListener("click", () => {
+  sidebarOpen = !sidebarOpen;
+  applySidebarOpen();
+});
+
+// Section header toggles — skip if click landed on an action button inside the head
+document.getElementById("vault-head")!.addEventListener("click", (e) => {
+  if ((e.target as HTMLElement).closest(".head-action")) return;
+  if (collapsedSections.has("vault")) collapsedSections.delete("vault");
+  else collapsedSections.add("vault");
+  applySectionState();
+});
+document.getElementById("apps-head")!.addEventListener("click", (e) => {
+  if ((e.target as HTMLElement).closest(".ghost")) return;
+  if (collapsedSections.has("apps")) collapsedSections.delete("apps");
+  else collapsedSections.add("apps");
+  applySectionState();
+});
+
+// Drag-to-resize the sidebar
+document.getElementById("sidebar-resizer")!.addEventListener("mousedown", (startEvt) => {
+  startEvt.preventDefault();
+  const startX = startEvt.clientX;
+  const startW = sidebarWidth;
+  const sidebar = document.getElementById("sidebar") as HTMLElement;
+
+  const onMove = (e: MouseEvent) => {
+    sidebarWidth = Math.max(180, Math.min(520, startW + e.clientX - startX));
+    sidebar.style.width = `${sidebarWidth}px`;
+    sidebar.style.minWidth = `${sidebarWidth}px`;
+    localStorage.setItem("sidebar-width", String(sidebarWidth));
+  };
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove);
+    document.removeEventListener("mouseup", onUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  };
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+});
+
+// Apply initial states
+applySidebarOpen();
+applySectionState();
 
 // ── sidebar: vault tree ──────────────────────────────────────────────────────
 
