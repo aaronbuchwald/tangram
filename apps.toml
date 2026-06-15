@@ -12,6 +12,16 @@
 # entries win on name collision. Set TANGRAM_AUTH_TOKEN (.env) to gate the
 # registry's mutating routes — required for any non-loopback BIND_ADDR.
 
+# Deployment auth mode (docs/design/auth.md). Omit [auth] entirely (the
+# default) and you get self-hosted, loopback-trusted: one trusted user / LAN,
+# local connections may use every route, no token required over loopback. The
+# host still REFUSES a non-loopback bind of a registry app without a token.
+# [auth]
+# mode = "self-hosted"   # default — loopback-trusted, no token over loopback
+# mode = "multi-tenant"  # per-user identity (OAuth/OIDC + hashed PATs); the
+#                        # identity layer lands in checkpoints C2–C6 — today
+#                        # this preserves the existing tenant/token gating.
+
 # MCP through agentgateway (optional, RUNTIME_PLAN D3). The host runs the
 # binary as a supervised child on an internal loopback port and routes
 # /<app>/mcp through it, plus the aggregate /mcp endpoint (every app's tools

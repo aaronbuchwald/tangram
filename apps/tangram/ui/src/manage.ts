@@ -2,35 +2,21 @@
 // standalone fleet-management UI, folded into the APPS section.
 //
 // The shell does NOT add a new host API for this — it talks to the registry
-// app's bearer-gated actions over RELATIVE cross-app paths (the registry is a
-// sibling app under the same host, mounted at `/registry/`, so from the
-// shell's `/tangram/` mount `../registry/api/actions/*` resolves to it). The
-// bearer token is the same `tangram_auth_token` localStorage slot the
-// standalone registry + marketplace UIs use, so a token set in one surface is
-// shared. Mutating actions are bearer-gated host-side, so an unauthenticated
-// call just fails cleanly (401) and we surface the message.
-
-const TOKEN_KEY = "tangram_auth_token";
-
-/** The bearer token the user supplied (shared with the registry/marketplace UIs). */
-export function authToken(): string {
-  return localStorage.getItem(TOKEN_KEY) ?? "";
-}
-
-export function setAuthToken(value: string): void {
-  if (value) localStorage.setItem(TOKEN_KEY, value);
-  else localStorage.removeItem(TOKEN_KEY);
-}
+// app's actions over RELATIVE cross-app paths (the registry is a sibling app
+// under the same host, mounted at `/registry/`, so from the shell's
+// `/tangram/` mount `../registry/api/actions/*` resolves to it). In the
+// self-hosted, loopback-trusted default (docs/design/auth.md) no credential is
+// needed — local connections are authorized. If the host requires credentials
+// (exposed / multi-tenant), a mutating call fails cleanly (401) and we surface
+// the message; the session-cookie / paste-a-key login UX lands in C5.
 
 // POST a registry action. Path is relative: `../registry/...` from the shell's
-// `/tangram/` mount. The token, when present, rides as a bearer header.
+// `/tangram/` mount. Over loopback self-hosted this is authorized with no
+// credential; the C5 session flow will attach one when the host requires it.
 async function registryAction(name: string, args: unknown): Promise<unknown> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  const token = authToken();
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(`../registry/api/actions/${name}`, {
     method: "POST",
-    headers,
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(args ?? {}),
   });
   const data = (await res.json().catch(() => ({}))) as {
@@ -38,7 +24,9 @@ async function registryAction(name: string, args: unknown): Promise<unknown> {
     error?: string;
   };
   if (res.status === 401) {
-    throw new Error("Unauthorized — set the auth token first");
+    throw new Error(
+      "Unauthorized (this host requires credentials — see docs/design/auth.md)",
+    );
   }
   if (!res.ok) {
     throw new Error(data.error ?? `action ${name} failed (${res.status})`);

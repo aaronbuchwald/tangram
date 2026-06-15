@@ -1,8 +1,16 @@
-//! Bearer-token auth for mutating surfaces (RUNTIME_PLAN Phase 3).
+//! Auth for mutating surfaces — two deployment modes (docs/design/auth.md).
 //!
-//! When the host has a `TANGRAM_AUTH_TOKEN`, apps flagged `registry = true`
-//! (and any app with `require_auth = true`) get two guards layered onto
-//! their router:
+//! **Self-hosted (the default, `[auth]` omitted): loopback-trusted.** One
+//! trusted user (or trusted LAN); a local connection may use every route and
+//! no token is required. The host still refuses to run a registry app on a
+//! *non*-loopback bind without a credential (see `main.rs`) — loopback trust
+//! is the model, internet exposure is not.
+//!
+//! **Bearer-token gating** (the guards below) applies when a token is
+//! configured — an *exposed* self-host that opts into `TANGRAM_AUTH_TOKEN` —
+//! and to every `/t/<tenant>/` request in multi-tenant mode. Apps flagged
+//! `registry = true` (and any app with `require_auth = true`) get two guards
+//! layered onto their router:
 //!
 //! - [`bearer_guard`] on `POST /api/actions/{name}` — every action POST
 //!   requires `Authorization: Bearer <token>`;
@@ -12,8 +20,9 @@
 //!   trusted to write.
 //!
 //! Everything else (UI, state, events, sync) is read-or-CRDT surface and
-//! stays open; without a token nothing is gated, but the host then refuses
-//! to run a registry app on a non-loopback bind (see `main.rs`).
+//! stays open. Richer identity — hashed PATs, HttpOnly sessions, OAuth/OIDC —
+//! is forthcoming (auth.md checkpoints C2–C6) and slots into the same
+//! [`Principal`] seam.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -82,19 +91,21 @@ pub fn artifact_unauthorized() -> Response {
 
 // ── the request principal (RUNTIME_PLAN Phase 5 → 6 seam) ───────────────────
 
-/// Who a request acts as. Today there are two kinds: the implicit
-/// single-tenant principal (top-level routes, trusted-localhost model) and a
-/// tenant authenticated by its bearer token. Phase 6 swaps the token lookup
-/// in [`resolve_principal`] for OAuth claims without touching call sites —
-/// everything downstream consumes a `Principal`, never a raw header.
+/// Who a request acts as, in the two-mode model (docs/design/auth.md). Today
+/// there are two kinds: the self-hosted single user / loopback-trusted
+/// principal ([`Principal::LocalUser`]) and a tenant authenticated by its
+/// bearer token. The multi-tenant identity layer (hashed PATs / sessions /
+/// OAuth claims) swaps the lookup in [`resolve_principal`] in checkpoints
+/// C2–C6 without touching call sites — everything downstream consumes a
+/// `Principal`, never a raw header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Principal {
-    /// A top-level request — the single-tenant surface, exactly as before.
-    /// (Not minted anywhere yet: top-level routes skip principal resolution
-    /// entirely today, preserving byte-identical behavior; Phase 6 starts
-    /// constructing it when per-user identity arrives.)
+    /// The self-hosted single user — loopback-trusted, no token needed.
+    /// (Not minted anywhere yet: self-hosted top-level routes skip principal
+    /// resolution entirely today, preserving byte-identical behavior; the
+    /// loopback-trust middleware that mints it lands in a later checkpoint.)
     #[allow(dead_code)]
-    Local,
+    LocalUser,
     /// A request authenticated as this tenant.
     Tenant(String),
 }
@@ -102,7 +113,7 @@ pub enum Principal {
 impl Principal {
     pub fn tenant(&self) -> Option<&str> {
         match self {
-            Self::Local => None,
+            Self::LocalUser => None,
             Self::Tenant(name) => Some(name.as_str()),
         }
     }
@@ -363,7 +374,7 @@ mod tests {
         assert_eq!(resolve_principal(&basic, "alice", alice), None);
 
         assert_eq!(Principal::Tenant("alice".into()).tenant(), Some("alice"));
-        assert_eq!(Principal::Local.tenant(), None);
+        assert_eq!(Principal::LocalUser.tenant(), None);
     }
 
     #[test]

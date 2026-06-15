@@ -14,7 +14,7 @@ import {
   type VaultState,
 } from "./api";
 import { MdEditor } from "./editor";
-import { authToken, registry, setAuthToken } from "./manage";
+import { registry } from "./manage";
 import { confirmAction, promptName } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
@@ -143,13 +143,6 @@ root.innerHTML = `
           </div>
           <div class="side-body" id="apps-body">
             <div class="applist" id="applist"></div>
-            <div class="manage" id="manage">
-              <div class="tokenrow">
-                <span class="micro">Auth token</span>
-                <input id="token" type="password" autocomplete="off"
-                       placeholder="TANGRAM_AUTH_TOKEN — required to manage apps" />
-              </div>
-            </div>
           </div>
         </section>
         <div class="sidebar-resizer" id="sidebar-resizer"></div>
@@ -168,7 +161,6 @@ const tabstripEl = document.getElementById("tabstrip")!;
 const contentEl = document.getElementById("content")!;
 const liveDot = document.getElementById("live-dot")!;
 const liveLabel = document.getElementById("live-label")!;
-const tokenInput = document.getElementById("token") as HTMLInputElement;
 
 document.getElementById("new-note")!.addEventListener("click", () => void newNote(""));
 document.getElementById("new-folder")!.addEventListener("click", () => void newFolder(""));
@@ -179,11 +171,6 @@ document.getElementById("new-folder")!.addEventListener("click", () => void newF
 document
   .getElementById("open-marketplace")!
   .addEventListener("click", () => tabs.openApp("marketplace"));
-
-// The bearer token is shared with the registry/marketplace UIs via the same
-// localStorage slot; mutating registry actions are gated on it host-side.
-tokenInput.value = authToken();
-tokenInput.addEventListener("change", () => setAuthToken(tokenInput.value));
 
 // Sidebar open/close toggle
 document.getElementById("sidebar-toggle")!.addEventListener("click", () => {

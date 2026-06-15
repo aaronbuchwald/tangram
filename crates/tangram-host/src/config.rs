@@ -1078,6 +1078,26 @@ impl TenantsConfig {
     }
 }
 
+/// `[auth]` — the deployment auth mode (docs/design/auth.md). Absent (the
+/// default) → self-hosted, loopback-trusted (no token required over loopback).
+#[derive(Debug, Clone, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthConfig {
+    pub mode: AuthMode,
+}
+
+/// The two deployment auth shapes (docs/design/auth.md §1).
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMode {
+    /// Self-hosted: one trusted user / trusted LAN, loopback-trusted. Default.
+    #[default]
+    SelfHosted,
+    /// Multi-tenant: per-user identity (OAuth/OIDC + hashed PATs). Identity
+    /// layer is C2–C6; today this preserves existing tenant/token behavior.
+    MultiTenant,
+}
+
 /// `[artifacts]` — host-side WASM blob upload + hosting (Phase S2b). When
 /// `upload_enabled` is true the host exposes `POST /artifacts` (store an
 /// uploaded component, computing its sha-256) and `GET /artifacts/<sha>.wasm`
@@ -1113,6 +1133,13 @@ pub struct HostConfig {
     /// `[artifacts]` — WASM blob upload + hosting (Phase S2b). DEFAULT OFF.
     #[serde(default)]
     pub artifacts: ArtifactsConfig,
+    /// `[auth]` — deployment auth mode (docs/design/auth.md). Absent (the
+    /// default) → self-hosted, loopback-trusted (no token required over
+    /// loopback). `multi-tenant` is the forward-looking mode whose identity
+    /// layer (OAuth/OIDC + hashed PATs) lands in checkpoints C2–C6; today it
+    /// preserves the existing tenant/token gating.
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl HostConfig {
@@ -1316,6 +1343,27 @@ mod tests {
         assert!(config.artifacts.upload_enabled);
         // Unknown keys in the section are rejected (deny_unknown_fields).
         assert!(HostConfig::parse("[artifacts]\nbogus = true").is_err());
+    }
+
+    #[test]
+    fn parses_auth_section_and_defaults_self_hosted() {
+        // No [auth] section → self-hosted (the loopback-trusted default).
+        let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
+        assert_eq!(config.auth.mode, AuthMode::SelfHosted);
+        // Explicit multi-tenant.
+        let config = HostConfig::parse(
+            "[auth]\nmode = \"multi-tenant\"\n[apps.a]\ncomponent = \"a\"\nui = \"u\"",
+        )
+        .unwrap();
+        assert_eq!(config.auth.mode, AuthMode::MultiTenant);
+        // Explicit self-hosted parses too.
+        let config = HostConfig::parse(
+            "[auth]\nmode = \"self-hosted\"\n[apps.a]\ncomponent = \"a\"\nui = \"u\"",
+        )
+        .unwrap();
+        assert_eq!(config.auth.mode, AuthMode::SelfHosted);
+        // An invalid mode value is a parse error (no silent fallback).
+        assert!(HostConfig::parse("[auth]\nmode = \"bogus\"").is_err());
     }
 
     #[test]

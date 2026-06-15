@@ -454,7 +454,8 @@ impl Host {
         if spec.registry && key.tenant.is_none() && self.auth_token.is_none() && !self.bind_loopback
         {
             let msg = "refusing to run a registry app on a non-loopback bind without \
-                       TANGRAM_AUTH_TOKEN (set the token or bind 127.0.0.1)"
+                       TANGRAM_AUTH_TOKEN — self-hosted mode is loopback-trusted (set the \
+                       token or bind 127.0.0.1)"
                 .to_string();
             tracing::error!("{key}: {msg}");
             apps.remove(key);
@@ -584,18 +585,41 @@ async fn main() -> anyhow::Result<()> {
     let auth_token = std::env::var("TANGRAM_AUTH_TOKEN")
         .ok()
         .filter(|t| !t.trim().is_empty());
-    if auth_token.is_none() {
-        tracing::warn!(
-            "TANGRAM_AUTH_TOKEN is not set — mutating routes are UNAUTHENTICATED; \
-             registry apps are limited to loopback binds (set the token in .env before \
-             exposing the host)"
+
+    // The deployment auth mode (docs/design/auth.md). Absent `[auth]` → the
+    // self-hosted, loopback-trusted default. `multi-tenant` preserves today's
+    // tenant/token machinery; its identity layer (PATs/sessions/OAuth) lands
+    // in checkpoints C2–C6.
+    let auth_mode = HostConfig::load(&config_path)
+        .map(|config| config.auth.mode)
+        .unwrap_or_default();
+    if auth_mode == config::AuthMode::MultiTenant {
+        tracing::info!(
+            "multi-tenant mode: per-tenant bearer tokens (identity layer C2–C6 forthcoming)"
         );
-        if !bind_loopback
-            && HostConfig::load(&config_path).is_ok_and(|config| config.has_registry())
-        {
+    }
+
+    if auth_token.is_none() {
+        if bind_loopback {
+            // The self-hosted happy path: loopback trust IS the model.
+            tracing::info!(
+                "self-hosted mode: loopback-trusted — local connections may use all routes; \
+                 no token required (docs/design/auth.md). Bind beyond loopback or set [auth] \
+                 mode=\"multi-tenant\" to require credentials."
+            );
+        } else if HostConfig::load(&config_path).is_ok_and(|config| config.has_registry()) {
+            // Non-loopback bind with no token: preserve the safety guarantee —
+            // refuse to expose a registry app's mutating surface unauthenticated.
             anyhow::bail!(
-                "refusing to bind {bind_addr}: apps.toml contains a registry app and \
-                 TANGRAM_AUTH_TOKEN is not set — set the token or bind 127.0.0.1"
+                "refusing to bind {bind_addr}: self-hosted mode is loopback-trusted, but \
+                 apps.toml contains a registry app and TANGRAM_AUTH_TOKEN is not set — bind \
+                 127.0.0.1 (loopback trust) or set the token to expose it"
+            );
+        } else {
+            tracing::warn!(
+                "binding beyond loopback with no TANGRAM_AUTH_TOKEN — mutating routes on any \
+                 require_auth app are UNAUTHENTICATED; bind 127.0.0.1 (self-hosted loopback \
+                 trust) or set the token before exposing the host"
             );
         }
     }

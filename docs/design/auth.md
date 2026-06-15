@@ -1,6 +1,6 @@
 # Design: Auth — two deployment modes, per-principal data, and IAM
 
-**Status:** proposed (design only — held for owner approval before any code)
+**Status:** APPROVED. Decisions in §11 resolved (see §11). Implementation underway: C0+C1 landed; C2–C7 follow as held-for-review checkpoints.
 **This is the canonical auth design.** It **supersedes**
 [`docs/design/iam-auth.md`](iam-auth.md) (PR #23) and the standalone per-user
 registry design, consolidating three issues filed separately for what is one
@@ -345,37 +345,28 @@ de-risk C2/C6 (porting, not designing from zero).
 
 ---
 
-## 11. Consolidated open decisions
+## 11. Resolved decisions
 
-Merged from #20's 8 and #31's key decisions, deduplicated (#30's three
-"recommendations" are folded as the resolved defaults — external-OAuth-first,
-fully-isolated-registries-first, per-device-sync-first — and are not re-opened
-here):
+The owner has approved the approach and locked the choices below (these replace
+the previously-open decisions; #30's three recommendations — external-OAuth-first,
+fully-isolated-registries-first, per-device-sync-first — are among them):
 
-1. **Local-admin password?** Username+password (argon2) for the no-IdP
-   bootstrap, or **PAT-only** (recommended — no reset/lockout surface)?
-2. **Reads gated or open?** Keep `list_apps` / state / fleet open (today) or
-   behind `registry:read`? Recommendation: open for self-hosted compat,
-   per-host `reads_gated` flag for multi-tenant fleets.
-3. **Credential store backend** — embedded sqlite (rusqlite, matches the CF
-   DO's SQLite, easy audit queries) vs a file-backed KV. Dependency-budget call.
-4. **PAT default expiry** — none (replica-friendly, ADR-0003) vs default TTL.
-   Recommendation: none, opt-in expiry.
-5. **Rate-limit threshold + scope** — per-principal mutation cap, and whether
-   it applies in self-hosted mode.
-6. **`TANGRAM_AUTH_TOKEN` deprecation window** — one minor version or two?
-7. **OIDC providers** — GitHub only first (mirrors ADR-0003) or generic OIDC
-   discovery from the start?
-8. **Host↔CF unification depth** — stop at "same model/format" (this design)
-   or pursue shared device-flow / host-validates-CF-PATs now (Phase 6 follow-up)?
-9. **Migration default user id** — fixed `default_user_id` config (recommended)
-   vs prompt-on-first-multi-tenant-boot; and whether the legacy shared-token
-   principal is auto-created or requires explicit opt-in.
-10. **Registry sharing model** — confirm fully-isolated-first (#30 default) is
-    the v1, with read-only cross-user sharing grants as the explicit-opt-in
-    follow-on (marketplace-style), not v1.
-
-**10 consolidated open decisions.**
+- **Default mode:** self-hosted, loopback-trusted, **NO token** — the default
+  when `[auth]` is omitted.
+- **No-IdP bootstrap (#1):** **PAT-only**, no password (no reset/lockout surface).
+- **Reads (#2):** **open** in self-hosted; per-host `reads_gated` flag for
+  multi-tenant fleets.
+- **Credential store (#3):** **embedded sqlite (rusqlite)**.
+- **PAT expiry (#4):** **none by default**, opt-in.
+- **OIDC providers (#7):** **GitHub first**, generic OIDC discovery a follow-on.
+- **Registry sharing (#10):** **fully isolated v1**; cross-user sharing later.
+- **UI creds:** **HttpOnly session cookie** for the UI; **hashed PATs** for
+  replicas/MCP/CLI; the `localStorage` token slot is **deleted** (done in C1
+  here, ahead of C5, since the box is being removed now).
+- **Legacy `TANGRAM_AUTH_TOKEN` (#6):** **NO deprecation window** — early
+  development, no external users. Clean cutover: in self-hosted mode the token
+  is simply not required over loopback; if set, it still gates the
+  non-loopback/exposed case until C5's login UX lands.
 
 ---
 
@@ -431,7 +422,42 @@ here):
 
 ---
 
-*Design only. No code in this PR. This doc is the single source of truth for
-Tangram auth; it supersedes `iam-auth.md` (PR #23) and the standalone per-user
-registry design. Blocked on owner approval of the approach and the open
-decisions in §11 before any checkpoint is implemented.*
+## 14. Per-mode UX (concrete)
+
+Three deployment shapes, three distinct UX contracts:
+
+- **A. Single-user self-host (the local-first default).** Zero auth UI: a
+  loopback connection is trusted and mints `LocalUser`, so the shell shows **no
+  token box** and asks for nothing. Owned replicas connect with a
+  device-minted PAT (C2+) — shown once, stored in the OS keychain — never
+  typed into a web box.
+- **B. Self-host exposed beyond loopback.** First run prints a local-admin PAT.
+  The UI shows a one-time "paste your access key" prompt that exchanges the PAT
+  for an **HttpOnly session cookie**; thereafter a principal chip and a
+  "Devices & Keys" view let the user mint and revoke PATs (C5). No shared
+  secret; revocation is per-device.
+- **C. Multi-tenant sync server.** "Sign in with GitHub/Google" (OIDC, C6)
+  yields a per-user **isolated** registry + data, a session cookie, and the
+  same Devices & Keys view. Cross-user isolation is structural — each user's
+  data path is derived from the authenticated principal, not from any request
+  parameter.
+
+---
+
+## 15. Sync-remote auth
+
+A replica/remote authenticates with a **minted, revocable PAT scoped to sync**
+— never a hand-shared secret, and never carried in the replicated Automerge
+document. "Connect to a remote" = the remote URL + a PAT the remote issued (or
+a device flow), stored host-local / in the keychain. One host can connect to
+many remotes; a multi-tenant remote issues each user their own PAT. This is the
+**same credential store** the UI uses — sync auth and UI auth converge on one
+account model. It replaces the current `remote_token` shared-bearer approach
+over time.
+
+---
+
+*This doc is the single source of truth for Tangram auth; it supersedes
+`iam-auth.md` (PR #23) and the standalone per-user registry design. The
+approach and the §11 decisions are APPROVED; implementation proceeds as the
+held-for-review checkpoints C0–C7 (C0+C1 landed).*
