@@ -5,6 +5,10 @@ import { defineConfig } from "vite";
 // `base: "./"` makes Vite emit `./assets/...` references instead of absolute
 // `/assets/...`. This is the build-time mirror of the app contract's
 // "relative fetch paths only" rule (AGENTS.md).
+//
+// Vitest config lives in `vitest.config.ts` (separate so this build config
+// stays free of the test-runner type augmentation and the app `tsconfig`
+// — `"types": []` — doesn't have to carry vitest's ambient types).
 export default defineConfig({
   base: "./",
   build: {

@@ -46,6 +46,17 @@ change under `ui/src`, rebuild and commit the result. CI (the `shell-frontend`
 job) rebuilds and fails if the committed `dist/` is stale. `npm run dev`
 serves a hot-reloading dev server (point its `api/` calls at a running host).
 
+```sh
+npm test        # vitest (jsdom) — fast unit/smoke tests
+```
+
+`src/editor.smoke.test.ts` mounts `MdEditor` the way `main.ts` does (both the
+`/` slash and `[[ ]]` wikilink autocomplete wired with live candidates) and
+asserts it constructs + renders without throwing. It guards the editor-mount
+path against the CodeMirror 6 "Config merge conflict for field override" class
+— e.g. configuring `autocompletion()` more than once, which would make the
+note editor fail to mount.
+
 ## Running it
 
 The component is registered in the repo's `apps.toml` as `[apps.tangram]`

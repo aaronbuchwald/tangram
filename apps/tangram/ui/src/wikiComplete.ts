@@ -19,11 +19,10 @@
 // so the resulting link is unambiguous (and resolves via links.ts, which keys
 // full paths authoritatively over basenames).
 
-import {
-  type Completion,
-  type CompletionContext,
-  type CompletionResult,
-  autocompletion,
+import type {
+  Completion,
+  CompletionContext,
+  CompletionResult,
 } from "@codemirror/autocomplete";
 
 /** One candidate vault note surfaced in the `[[ ]]` popup. */
@@ -163,20 +162,6 @@ export function wikiCompletionSource(
       filter: false,
     };
   };
-}
-
-/** Build the `[[ ]]` autocomplete extension wired to the live note provider. */
-export function wikiAutocomplete(
-  candidates: WikiCandidateProvider,
-  currentPath: () => string | null = () => null,
-) {
-  return autocompletion({
-    override: [wikiCompletionSource(candidates, currentPath)],
-    activateOnTyping: true,
-    icons: false,
-    maxRenderedOptions: 12,
-    aboveCursor: false,
-  });
 }
 
 /** Map vault files to `[[ ]]` candidates (path/basename sans `.md`). Excludes

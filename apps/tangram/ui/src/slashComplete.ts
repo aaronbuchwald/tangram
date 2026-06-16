@@ -15,11 +15,10 @@
 // rebuilt-on-vault-state index), so newly-created definitions appear without a
 // reload — the same pattern as the trigger's `resolveAgent`.
 
-import {
-  type Completion,
-  type CompletionContext,
-  type CompletionResult,
-  autocompletion,
+import type {
+  Completion,
+  CompletionContext,
+  CompletionResult,
 } from "@codemirror/autocomplete";
 
 /** One candidate slash-command surfaced in the popup. */
@@ -106,18 +105,4 @@ export function slashCompletionSource(
       filter: false,
     };
   };
-}
-
-/** Build the autocomplete extension wired to the live candidate provider. */
-export function slashAutocomplete(candidates: SlashCandidateProvider) {
-  return autocompletion({
-    override: [slashCompletionSource(candidates)],
-    // Keep it tight: open as soon as the source matches, single column.
-    activateOnTyping: true,
-    icons: false,
-    maxRenderedOptions: 12,
-    // `agent`/`/<name>` are short; an explicit `aboveCursor: false` keeps the
-    // popup below the caret, matching the shell's downward popups.
-    aboveCursor: false,
-  });
 }

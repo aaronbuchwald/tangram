@@ -26,6 +26,7 @@ import {
   highlightActiveLine,
   keymap,
 } from "@codemirror/view";
+import { autocompletion } from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
 import {
   type SlashResolver,
@@ -37,7 +38,7 @@ import {
 } from "./slashTrigger";
 import {
   type SlashCandidateProvider,
-  slashAutocomplete,
+  slashCompletionSource,
 } from "./slashComplete";
 import {
   type WikiLinkOpener,
@@ -47,7 +48,7 @@ import {
 } from "./wikiLink";
 import {
   type WikiCandidateProvider,
-  wikiAutocomplete,
+  wikiCompletionSource,
 } from "./wikiComplete";
 import { livePreview } from "./livePreview";
 
@@ -214,9 +215,6 @@ export class MdEditor {
           slashTrigger(onSlashTrigger, resolveAgent),
           slashClickToReopen(onSlashTrigger, resolveAgent),
           slashAutoOpen(onSlashTrigger, isPopupOpen),
-          // The `/<partial>` autocomplete popup. Completion only — accepting
-          // rewrites the token to `/<name>`; the trigger logic above then runs.
-          slashAutocomplete(slashCandidates),
         ]
       : [];
     const state = EditorState.create({
@@ -239,10 +237,25 @@ export class MdEditor {
         // default resolver every link is a harmless ghost and clicks are inert.
         wikiLinkHighlight(resolveWikiLink),
         wikiLinkClick(resolveWikiLink, onOpenWikiLink),
-        // The `[[<partial>` autocomplete popup. Completion only — accepting
-        // rewrites the open token to a closed `[[<name>]]`; the highlight/click
-        // above then apply. With empty candidates it's a harmless no-op.
-        wikiAutocomplete(wikiCandidates, currentNotePath),
+        // CM6 allows `autocompletion()` exactly ONCE — two configured instances
+        // throw "Config merge conflict for field override" and the editor never
+        // mounts (notes stop rendering). So the slash `/<partial>` popup and the
+        // `[[<partial>` wikilink popup share a SINGLE autocompletion extension,
+        // each contributing its own completion source. Each source self-gates on
+        // its own trigger (`/` token vs `[[` anchor) and is a harmless no-op when
+        // its candidate provider is empty, so both can always be present. (The
+        // slash source's create/run trigger logic still rides on slashTrigger
+        // above; this is completion only — accepting just rewrites the token.)
+        autocompletion({
+          override: [
+            slashCompletionSource(slashCandidates),
+            wikiCompletionSource(wikiCandidates, currentNotePath),
+          ],
+          activateOnTyping: true,
+          icons: false,
+          maxRenderedOptions: 12,
+          aboveCursor: false,
+        }),
         theme,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
