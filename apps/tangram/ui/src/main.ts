@@ -48,7 +48,7 @@ import { registry } from "./manage";
 import { confirmAction, promptName, showError } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
-import { mountChatPanel, setActiveApp } from "./chatPanel";
+import { mountChatPanel, setActiveContext } from "./chatPanel";
 
 // ── icons ────────────────────────────────────────────────────────────────────
 // Inline 16px stroke icons (Lucide-style, currentColor) so vault affordances
@@ -1503,6 +1503,10 @@ function onVaultState(state: VaultState) {
   // backlinks panel — which lives in that retained DOM — won't be rebuilt;
   // refresh it from the freshly-built link index here.
   refreshBacklinksPanel();
+  // Seed the vault copilot once the open note's file lands (the tab can open
+  // before the vault round-trip completes). Same-id re-drives are no-ops, so
+  // this won't reset an in-progress conversation on later edits.
+  driveChatContext();
 }
 
 async function refreshFleet() {
@@ -1533,12 +1537,30 @@ tabs.subscribe(() => {
   renderTree();
   renderApps();
   renderAgentsBadge();
-  // Drive the right-sidebar app chat: connect to the active app's MCP server
-  // (and reset the chat) when an app tab is active; hide on note/home/agents.
-  const a = tabs.active;
-  if (a?.kind === "app") setActiveApp(a.app, displayName(a.app));
-  else setActiveApp(null, "");
+  driveChatContext();
 });
+
+// Drive the right-sidebar copilot chat from the active tab. An app tab connects
+// to that app's own MCP server; a note tab connects to the shell's own
+// `../tangram/mcp` (the full vault toolset) and seeds the open note
+// (path/id/body) as context. Switching context resets the session + reconnects
+// to the right MCP target; re-driving with the same note id is a no-op (keeps
+// the conversation), so calling this on vault refresh is safe — it only re-seeds
+// when the note first loads after the tab opened. Home/agents tabs hide it.
+function driveChatContext(): void {
+  const a = tabs.active;
+  if (a?.kind === "app") {
+    setActiveContext({ kind: "app", app: a.app, label: displayName(a.app) });
+  } else if (a?.kind === "note") {
+    const file = filesById.get(a.fileId);
+    setActiveContext({
+      kind: "vault",
+      note: file ? { id: file.id, path: file.path, body: file.body } : null,
+    });
+  } else {
+    setActiveContext(null);
+  }
+}
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 

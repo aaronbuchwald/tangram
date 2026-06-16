@@ -131,6 +131,42 @@ export function systemPromptFor(appLabel: string, hasTools: boolean): string {
   );
 }
 
+/** The open vault note seeded into the vault copilot's system prompt. */
+export interface VaultNote {
+  id: string;
+  path: string;
+  body: string;
+}
+
+/**
+ * Build the system prompt for the vault copilot. The copilot is wired to the
+ * shell's own MCP server (`../tangram/mcp`), which exposes the full vault
+ * toolset, so the prompt makes clear it can READ AND MODIFY the vault. When a
+ * note is open it is seeded by path + id + body so "summarize/edit this note"
+ * resolves to the right file. With no tools (handshake failed) it degrades to a
+ * plain assistant that still knows the open note.
+ */
+export function vaultSystemPrompt(
+  note: VaultNote | null,
+  hasTools: boolean,
+): string {
+  let prompt = hasTools
+    ? `You are a copilot for this Obsidian-style vault inside Tangram. ` +
+      `Use your vault tools to read, search, create, edit, rename and delete ` +
+      `notes and folders. You can both READ and MODIFY the vault. Prefer ` +
+      `calling a tool over guessing, and answer concisely.`
+    : `You are a copilot for this Obsidian-style vault inside Tangram. No ` +
+      `vault tools are available right now, so answer as a helpful general ` +
+      `assistant.`;
+  if (note) {
+    prompt +=
+      `\n\nThe user is currently viewing the note \`${note.path}\` ` +
+      `(id \`${note.id}\`). When they say "this note" they mean that one. ` +
+      `Current note body:\n${note.body}`;
+  }
+  return prompt;
+}
+
 /**
  * Run one user turn through the tool-calling loop. `history` is the running
  * conversation (system + prior user/assistant turns). This mutates `history`
