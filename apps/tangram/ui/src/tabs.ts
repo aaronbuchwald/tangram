@@ -3,6 +3,8 @@
 // per Decision D it stays LOCAL (not replicated) — markdown files replicate,
 // workspace layout does not.
 
+import { focusInvocationRow } from "./agentsView";
+
 export interface NoteTab {
   kind: "note";
   id: string; // tab id
@@ -82,8 +84,11 @@ export class TabStore {
     );
   }
 
-  /** Open (or focus, if already open) the Agents view tab. */
-  openAgents() {
+  /** Open (or focus, if already open) the Agents view tab. When `focusInvocationId`
+   *  is given (the Trigger-popup "Open in Agents" deep-link), the Invocations
+   *  table scrolls to + briefly highlights that row on its next render (I3). */
+  openAgents(focusInvocationId?: string) {
+    if (focusInvocationId !== undefined) focusInvocationRow(focusInvocationId);
     this.openOrFocus(
       (t) => t.kind === "agents",
       (): AgentsTab => ({ kind: "agents", id: nextId() }),

@@ -686,7 +686,7 @@ body {
 
 .agents-view {
   flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
-  overflow: hidden; padding: 18px 22px; gap: 14px;
+  overflow: auto; padding: 18px 22px; gap: 14px;
 }
 .agents-head { display: flex; flex-direction: column; gap: 10px; }
 .agents-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -720,7 +720,7 @@ body {
 .agents-query:focus { outline: none; border-color: var(--blue); }
 .agents-count { white-space: nowrap; color: var(--dim); }
 
-.agents-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.agents-table-wrap { flex: 0 0 auto; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
 .agents-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .agents-th {
   position: sticky; top: 0; z-index: 1; text-align: left; user-select: none;
@@ -817,6 +817,41 @@ body {
 .agents-mcp-approve:hover { color: var(--green); border-color: var(--green); }
 .agents-mcp-deny:hover,
 .agents-mcp-revoke:hover { color: var(--red); border-color: var(--red); }
+
+/* ── Invocations table (I3) ──
+   The scheduled-invocation table under the agents list. Reuses the agents
+   table primitives (.agents-table/.agents-th/.agents-row/.agents-cell) and adds
+   only the section header, the host-note + status cells, the clickable-row
+   affordance, and the deep-link highlight flash. */
+.invocations-view { display: flex; flex-direction: column; gap: 14px; }
+.invocations-head { gap: 10px; }
+.invocations-title { margin: 0; font-size: 1.05rem; font-weight: 500; color: var(--text); }
+.invocations-row-clickable { cursor: pointer; }
+.invocations-cell-host { max-width: 280px; }
+.invocations-host { color: var(--text); }
+.invocations-host-missing {
+  color: var(--faint); font-style: italic; text-decoration: line-through;
+  text-decoration-color: var(--faint);
+}
+.invocations-status {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  border: 1px solid var(--line); color: var(--dim); background: var(--panel-2);
+  text-transform: capitalize;
+}
+.invocations-status-scheduled { color: var(--blue); border-color: rgba(0, 158, 238, 0.4); background: rgba(0, 158, 238, 0.08); }
+.invocations-status-ok,
+.invocations-status-ran,
+.invocations-status-done { color: var(--green); border-color: rgba(31, 210, 134, 0.4); background: rgba(31, 210, 134, 0.08); }
+.invocations-status-error,
+.invocations-status-failed { color: var(--red); border-color: rgba(255, 69, 84, 0.4); background: rgba(255, 69, 84, 0.08); }
+/* Deep-link from the Trigger popup's "Open in Agents": a brief highlight pulse
+   on the targeted row so the user sees where it landed. */
+.invocations-row-flash { animation: invocations-flash 1.6s ease-out; }
+@keyframes invocations-flash {
+  0% { background: rgba(0, 158, 238, 0.32); }
+  100% { background: transparent; }
+}
 
 /* ── `/<partial>` slash autocomplete dropdown (P2) ──
    The CodeMirror @codemirror/autocomplete tooltip, restyled into the shell's

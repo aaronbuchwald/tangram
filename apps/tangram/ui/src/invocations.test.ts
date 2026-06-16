@@ -8,6 +8,9 @@ import {
   agentLinkAt,
   buildAgentLink,
   buildInvocationIndex,
+  formatRelativeTime,
+  formatSchedule,
+  nextFireMs,
   parseAgentLinks,
 } from "./invocations";
 import type { Invocation } from "./api";
@@ -81,5 +84,83 @@ describe("buildInvocationIndex (replicated index)", () => {
 
   it("tolerates an empty/absent index", () => {
     expect(buildInvocationIndex([]).all.length).toBe(0);
+  });
+});
+
+// ── I3 invocations-table display helpers ─────────────────────────────────────
+
+describe("formatSchedule (human-readable trigger summary)", () => {
+  it("renders interval shorthands as 'every N <unit>'", () => {
+    expect(formatSchedule("2m")).toBe("every 2 minutes");
+    expect(formatSchedule("1h")).toBe("every 1 hour");
+    expect(formatSchedule("3d")).toBe("every 3 days");
+    expect(formatSchedule("every 2h")).toBe("every 2 hours");
+    expect(formatSchedule("@hourly")).toBe("every 1 hour");
+    expect(formatSchedule("@daily")).toBe("every 1 day");
+  });
+
+  it("renders calendar schedules with their time + zone", () => {
+    expect(formatSchedule("daily at 09:00 UTC")).toBe("Daily at 09:00 UTC");
+    expect(formatSchedule("weekly on mon,wed at 18:00 America/New_York")).toBe(
+      "Weekly on Mon, Wed at 18:00 America/New_York",
+    );
+  });
+
+  it("falls back to the raw string for an unparseable trigger", () => {
+    expect(formatSchedule("garbage")).toBe("garbage");
+    expect(formatSchedule("")).toBe("—");
+  });
+});
+
+describe("nextFireMs (display projection, not scheduling)", () => {
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+
+  it("projects interval from last_run (and null when never run)", () => {
+    const lastRun = 1_000_000;
+    expect(nextFireMs("2h", Date.now(), lastRun)).toBe(lastRun + 2 * HOUR);
+    expect(nextFireMs("2h", Date.now(), null)).toBeNull();
+  });
+
+  it("projects daily to the next occurrence of the wall-clock time (UTC)", () => {
+    // 2026-06-16T08:00:00Z → next "daily at 09:00 UTC" is +1h.
+    const now = Date.parse("2026-06-16T08:00:00Z");
+    expect(nextFireMs("daily at 09:00 UTC", now, null)).toBe(now + HOUR);
+    // After the time has passed today, it rolls to tomorrow (+23h from 10:00Z).
+    const after = Date.parse("2026-06-16T10:00:00Z");
+    expect(nextFireMs("daily at 09:00 UTC", after, null)).toBe(after + 23 * HOUR);
+  });
+
+  it("projects weekly to the next selected day at the time", () => {
+    // 2026-06-16 is a Tuesday (08:00Z). Next "weekly on wed at 09:00 UTC" is
+    // tomorrow (Wed) → +25h.
+    const now = Date.parse("2026-06-16T08:00:00Z");
+    expect(nextFireMs("weekly on wed at 09:00 UTC", now, null)).toBe(now + 25 * HOUR);
+  });
+
+  it("returns null for an unparseable schedule", () => {
+    expect(nextFireMs("nonsense", Date.now(), 123)).toBeNull();
+  });
+});
+
+describe("formatRelativeTime", () => {
+  const now = Date.parse("2026-06-16T12:00:00Z");
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+
+  it("renders null as an em dash", () => {
+    expect(formatRelativeTime(null, now)).toBe("—");
+  });
+
+  it("renders recent past as 'just now' / 'Nm ago' / 'Nh ago' / 'Nd ago'", () => {
+    expect(formatRelativeTime(now - 5 * 1000, now)).toBe("just now");
+    expect(formatRelativeTime(now - 5 * MIN, now)).toBe("5m ago");
+    expect(formatRelativeTime(now - 3 * HOUR, now)).toBe("3h ago");
+    expect(formatRelativeTime(now - 2 * DAY, now)).toBe("2d ago");
+  });
+
+  it("renders the future with an 'in ' prefix", () => {
+    expect(formatRelativeTime(now + 2 * HOUR, now)).toBe("in 2h");
   });
 });

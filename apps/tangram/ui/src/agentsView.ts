@@ -23,9 +23,15 @@
 // No triggers/tools/sandbox, no versioning UI (just shows `version`), no
 // provider routing.
 
-import { vault, type McpGrant, type MdFile } from "./api";
+import { vault, type Invocation, type McpGrant, type MdFile } from "./api";
 import { type AgentDef, type AgentIndex, mcpRequestHash } from "./agents";
 import { openAgentPopup } from "./agentPopup";
+import {
+  formatRelativeTime,
+  formatSchedule,
+  type InvocationIndex,
+  nextFireMs,
+} from "./invocations";
 import { showError } from "./modal";
 
 // ── sortable columns ─────────────────────────────────────────────────────────
@@ -241,6 +247,16 @@ export interface AgentsViewCallbacks {
    *  server that isn't present on this host (nice-to-have). May be empty before
    *  the first fleet poll. */
   fleetApps: () => string[];
+  /** I3: the live replicated invocation index (the scheduled-invocation source
+   *  of truth, rebuilt on each vault state alongside the agent index). */
+  invocations: () => InvocationIndex;
+  /** I3: the display title for a host note id (its first heading or path
+   *  basename) so the Host-note column reads naturally; null if the file is
+   *  gone (orphaned handle awaiting the component's next prune tick). */
+  hostNoteTitle: (fileId: string) => string | null;
+  /** I3: resolve an agent definition by name (case-insensitive) so the
+   *  Invocations table's Agent cell links to the def file. Null if unindexed. */
+  agentByName: (name: string) => AgentDef | null;
 }
 
 // ── Tools/MCP T1: effective per-agent MCP status ──────────────────────────────
@@ -287,6 +303,124 @@ function effectiveMcpStatus(def: AgentDef, grants: McpGrant[]): McpStatus {
 let sortKey: SortKey = "name";
 let sortAsc = true;
 let query = "";
+
+// ── I3: invocations table (row-model + sort/filter) ──────────────────────────
+
+/** A flattened, display-ready row for one scheduled invocation. Pure data
+ *  derived from the replicated index + the agent/file lookups, so the sort,
+ *  filter, and rendering can all work off the same precomputed strings. */
+export interface InvocationRow {
+  id: string;
+  agent: string;
+  /** The host note id where the `agent://<id>` link lives (row click opens it). */
+  hostFileId: string;
+  /** A human-readable label for the host note (heading/basename), or its id
+   *  when the file is gone (orphaned handle awaiting prune). */
+  hostNote: string;
+  /** Whether the host note still exists (a missing file dims + disables open). */
+  hostExists: boolean;
+  /** Human schedule summary (e.g. "Daily at 09:00 UTC"); never empty. */
+  trigger: string;
+  status: string;
+  lastRunMs: number | null;
+  /** Projected next fire (epoch ms), or null when it can't be computed. */
+  nextFireMs: number | null;
+}
+
+/** Build the display rows for the invocations table from the replicated index.
+ *  Pure (given the lookups + `nowMs`) so it can be unit-tested. */
+export function buildInvocationRows(
+  invocations: Invocation[],
+  nowMs: number,
+  hostNoteTitle: (fileId: string) => string | null,
+): InvocationRow[] {
+  return invocations.map((inv) => {
+    const title = hostNoteTitle(inv.host_file_id);
+    return {
+      id: inv.id,
+      agent: inv.agent,
+      hostFileId: inv.host_file_id,
+      hostNote: title ?? inv.host_file_id,
+      hostExists: title !== null,
+      trigger: formatSchedule(inv.trigger),
+      status: inv.status,
+      lastRunMs: inv.last_run_ms,
+      nextFireMs: nextFireMs(inv.trigger, nowMs, inv.last_run_ms),
+    };
+  });
+}
+
+type InvSortKey = "agent" | "trigger" | "hostNote" | "status" | "lastRun" | "nextFire";
+
+interface InvColumnDef {
+  key: InvSortKey;
+  label: string;
+  /** Sort comparator value: a string sorts lexically, a number numerically
+   *  (with null sorting last regardless of direction). */
+  sortValue: (r: InvocationRow) => string | number | null;
+}
+
+const INV_COLUMNS: InvColumnDef[] = [
+  { key: "agent", label: "Agent", sortValue: (r) => r.agent.toLowerCase() },
+  { key: "trigger", label: "Trigger", sortValue: (r) => r.trigger.toLowerCase() },
+  { key: "hostNote", label: "Host note", sortValue: (r) => r.hostNote.toLowerCase() },
+  { key: "status", label: "Status", sortValue: (r) => r.status.toLowerCase() },
+  { key: "lastRun", label: "Last run", sortValue: (r) => r.lastRunMs },
+  { key: "nextFire", label: "Next fire", sortValue: (r) => r.nextFireMs },
+];
+
+/** Sort invocation rows by the active column/direction. Nulls (e.g. a never-run
+ *  interval's next-fire) always sort last so the populated rows lead. Stable for
+ *  equal keys (preserves the replicated index order). */
+export function sortInvocationRows(
+  rows: InvocationRow[],
+  key: InvSortKey,
+  asc: boolean,
+): InvocationRow[] {
+  const col = INV_COLUMNS.find((c) => c.key === key)!;
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => {
+      const av = col.sortValue(a.r);
+      const bv = col.sortValue(b.r);
+      if (av === null && bv === null) return a.i - b.i;
+      if (av === null) return 1; // nulls last, both directions
+      if (bv === null) return -1;
+      let cmp: number;
+      if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
+      else cmp = String(av).localeCompare(String(bv));
+      if (cmp === 0) return a.i - b.i;
+      return asc ? cmp : -cmp;
+    })
+    .map((x) => x.r);
+}
+
+/** Filter invocation rows by a bare case-insensitive substring over the
+ *  agent / trigger / host-note / status fields (mirrors the agents table's bare
+ *  AND-tokens, simplified — no key: clauses for invocations). */
+export function filterInvocationRows(rows: InvocationRow[], raw: string): InvocationRow[] {
+  const terms = raw.toLowerCase().split(/\s+/).filter((t) => t.length > 0);
+  if (terms.length === 0) return rows;
+  return rows.filter((r) => {
+    const hay = `${r.agent} ${r.trigger} ${r.hostNote} ${r.status}`.toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  });
+}
+
+// Invocations table sort + filter state, module-local like the agents table's.
+let invSortKey: InvSortKey = "agent";
+let invSortAsc = true;
+let invQuery = "";
+
+// The invocation id to scroll-to + briefly highlight after the next render (set
+// by the Trigger popup's "Open in Agents" deep-link, consumed once).
+let pendingFocusInvocationId: string | null = null;
+
+/** Request that the invocations table scroll to + highlight the row for `id` on
+ *  its next render (the Trigger-popup → Agents-tab deep-link). Consumed once. */
+export function focusInvocationRow(id: string): void {
+  pendingFocusInvocationId = id;
+}
 
 // ── render ───────────────────────────────────────────────────────────────────
 
@@ -362,7 +496,26 @@ export function renderAgentsView(
   table.appendChild(tbody);
   tableWrap.appendChild(table);
   wrap.appendChild(tableWrap);
+
+  // I3: the Invocations section (scheduled-invocation table) under the agents
+  // list. Rendered from the live replicated index; re-rendered on each vault
+  // state along with the rest of the view.
+  renderInvocationsSection(wrap, cb, host, index);
+
   host.appendChild(wrap);
+
+  // After the view is in the DOM, honour a pending deep-link focus (the Trigger
+  // popup's "Open in Agents"): scroll to + briefly highlight the row.
+  if (pendingFocusInvocationId !== null) {
+    const id = pendingFocusInvocationId;
+    pendingFocusInvocationId = null;
+    const row = host.querySelector<HTMLElement>(`[data-invocation-id="${CSS.escape(id)}"]`);
+    if (row) {
+      row.scrollIntoView({ block: "center", behavior: "smooth" });
+      row.classList.add("invocations-row-flash");
+      setTimeout(() => row.classList.remove("invocations-row-flash"), 1600);
+    }
+  }
 
   const col = COLUMNS.find((c) => c.key === sortKey)!;
 
@@ -418,6 +571,169 @@ export function renderAgentsView(
   });
 
   paint();
+}
+
+/** Render the I3 "Invocations" section (header + query bar + sortable table)
+ *  into `wrap`. Mirrors the agents table's sort/filter UX. Row click opens the
+ *  host note; the Agent cell links to the agent definition. */
+function renderInvocationsSection(
+  wrap: HTMLElement,
+  cb: AgentsViewCallbacks,
+  host: HTMLElement,
+  index: AgentIndex,
+): void {
+  const section = el("section", "invocations-view");
+
+  const head = el("div", "agents-head invocations-head");
+  const titleRow = el("div", "agents-title-row");
+  titleRow.appendChild(el("h2", "invocations-title", "Invocations"));
+  head.appendChild(titleRow);
+
+  const bar = el("div", "agents-bar");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "agents-query";
+  input.placeholder = "Filter invocations… e.g. standup daily scheduled";
+  input.value = invQuery;
+  input.spellcheck = false;
+  bar.appendChild(input);
+  const count = el("div", "agents-count micro");
+  bar.appendChild(count);
+  head.appendChild(bar);
+  section.appendChild(head);
+
+  const tableWrap = el("div", "agents-table-wrap");
+  const table = el("table", "agents-table invocations-table");
+  const thead = el("thead");
+  const headRow = el("tr");
+  for (const col of INV_COLUMNS) {
+    const th = el("th", "agents-th", col.label);
+    th.dataset.key = col.key;
+    if (col.key === invSortKey) {
+      th.classList.add("sorted");
+      th.appendChild(el("span", "agents-sort-caret", invSortAsc ? " ▲" : " ▼"));
+    }
+    th.addEventListener("click", () => {
+      if (invSortKey === col.key) invSortAsc = !invSortAsc;
+      else {
+        invSortKey = col.key;
+        invSortAsc = true;
+      }
+      renderAgentsView(host, index, cb);
+    });
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  table.appendChild(tbody);
+  tableWrap.appendChild(table);
+  section.appendChild(tableWrap);
+  wrap.appendChild(section);
+
+  const now = Date.now();
+
+  const paint = () => {
+    const all = buildInvocationRows(cb.invocations().all, now, cb.hostNoteTitle);
+    const filtered = filterInvocationRows(all, invQuery);
+    const rows = sortInvocationRows(filtered, invSortKey, invSortAsc);
+    count.textContent = `${rows.length} ${rows.length === 1 ? "invocation" : "invocations"}`;
+    tbody.replaceChildren();
+    if (rows.length === 0) {
+      const tr = el("tr");
+      const td = el("td", "agents-empty") as HTMLTableCellElement;
+      td.colSpan = INV_COLUMNS.length;
+      td.textContent =
+        all.length === 0 ? "No scheduled invocations yet" : "No matches";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+    for (const row of rows) tbody.appendChild(renderInvocationRow(row, cb, now));
+  };
+
+  input.addEventListener("input", () => {
+    invQuery = input.value;
+    paint();
+  });
+
+  paint();
+}
+
+/** Render one invocations table row. The whole row opens the host note (the
+ *  same path quick-open/sidebar uses); the Agent cell additionally links to the
+ *  agent definition file. */
+function renderInvocationRow(
+  row: InvocationRow,
+  cb: AgentsViewCallbacks,
+  nowMs: number,
+): HTMLElement {
+  const tr = el("tr", "agents-row invocations-row");
+  tr.dataset.invocationId = row.id;
+  // Row click → open the host note (skip when the click was on the Agent link,
+  // which has its own target — the agent definition).
+  if (row.hostExists) {
+    tr.classList.add("invocations-row-clickable");
+    tr.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest(".agents-name-link")) return;
+      cb.openNote(row.hostFileId);
+    });
+  }
+
+  // Agent → links to the agent definition file (reuse the agents-list link
+  // styling). Disabled when no def with that name is indexed.
+  const agentTd = el("td", "agents-cell agents-cell-name");
+  const def = cb.agentByName(row.agent);
+  const link = el("button", "agents-name-link", row.agent) as HTMLButtonElement;
+  if (def?.fileId) {
+    link.title = `Open ${def.path}`;
+    link.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cb.openNote(def.fileId);
+    });
+  } else {
+    link.disabled = true;
+    link.title = `No agent definition named "${row.agent}"`;
+  }
+  agentTd.appendChild(link);
+  tr.appendChild(agentTd);
+
+  // Trigger (human schedule summary).
+  tr.appendChild(el("td", "agents-cell", row.trigger));
+
+  // Host note (the note carrying the agent:// link).
+  const hostTd = el("td", "agents-cell invocations-cell-host");
+  const hostSpan = el(
+    "span",
+    `invocations-host${row.hostExists ? "" : " invocations-host-missing"}`,
+    row.hostNote,
+  );
+  if (!row.hostExists) hostSpan.title = "Host note not found (orphaned handle)";
+  hostTd.appendChild(hostSpan);
+  tr.appendChild(hostTd);
+
+  // Status chip.
+  const statusTd = el("td", "agents-cell");
+  statusTd.appendChild(
+    el(
+      "span",
+      `invocations-status invocations-status-${row.status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      row.status,
+    ),
+  );
+  tr.appendChild(statusTd);
+
+  // Last run (relative).
+  const lastTd = el("td", "agents-cell agents-cell-mono", formatRelativeTime(row.lastRunMs, nowMs));
+  if (row.lastRunMs !== null) lastTd.title = new Date(row.lastRunMs).toLocaleString();
+  tr.appendChild(lastTd);
+
+  // Next fire (computed from the schedule grammar, or "—" when unprojectable).
+  const nextTd = el("td", "agents-cell agents-cell-mono", formatRelativeTime(row.nextFireMs, nowMs));
+  if (row.nextFireMs !== null) nextTd.title = new Date(row.nextFireMs).toLocaleString();
+  tr.appendChild(nextTd);
+
+  return tr;
 }
 
 function renderRow(

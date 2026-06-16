@@ -905,6 +905,11 @@ function renderContent() {
       // Tools/MCP T1: the live grants + fleet names drive the approval UI.
       mcpGrants: () => mcpGrants,
       fleetApps: () => fleet.map((a) => a.name),
+      // I3: the invocations table reads through the live replicated index and
+      // resolves host-note titles / agent defs from the live vault indexes.
+      invocations: () => invocationIndex,
+      hostNoteTitle: (fileId) => hostNoteTitle(fileId),
+      agentByName: (name) => agentIndex.findAgent(name),
     });
     return;
   }
@@ -963,6 +968,20 @@ function firstHeading(body: string): string | null {
   return null;
 }
 
+// I3: a display title for a host note (the Agents-tab invocations table's
+// "Host note" column). Prefers the note's first heading, falls back to its path
+// basename (sans `.md`). Returns null when the file is gone (an orphaned
+// `agent://` handle awaiting the component's next prune tick) so the table can
+// dim the cell and disable its row click.
+function hostNoteTitle(fileId: string): string | null {
+  const file = filesById.get(fileId);
+  if (!file) return null;
+  const heading = firstHeading(file.body);
+  if (heading) return heading;
+  const base = file.path.split("/").pop() ?? file.path;
+  return base.replace(/\.md$/i, "") || file.path;
+}
+
 // Convert heading text into a safe filename base (no extension, no slashes,
 // no path-hostile/invalid chars). Returns null if nothing usable remains.
 function headingToBaseName(heading: string): string | null {
@@ -993,7 +1012,7 @@ function openAgentLinkTrigger(id: string): void {
         .catch((e) => showError(String(e instanceof Error ? e.message : e)));
       activeEditor?.editor.focus();
     },
-    onOpenAgents: () => tabs.openAgents(),
+    onOpenAgents: () => tabs.openAgents(id),
     onDelete: () => {
       stripAgentLink(id);
       void vault

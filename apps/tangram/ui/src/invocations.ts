@@ -256,3 +256,146 @@ export function buildTrigger(rec: Recurrence): string {
     }
   }
 }
+
+// ── human-readable rendering for the Agents-tab invocations table ────────────
+
+/** Full weekday names for the schedule summary, keyed by canonical token. */
+const WEEKDAY_NAMES: Record<Weekday, string> = {
+  mon: "Mon",
+  tue: "Tue",
+  wed: "Wed",
+  thu: "Thu",
+  fri: "Fri",
+  sat: "Sat",
+  sun: "Sun",
+};
+
+/** Render an interval (ms) as a compact `every <n> <unit>` phrase. */
+function formatInterval(ms: number): string {
+  const DAY = 24 * 60 * 60 * 1000;
+  const HOUR = 60 * 60 * 1000;
+  const MIN = 60 * 1000;
+  const plural = (n: number, unit: string) => `every ${n} ${unit}${n === 1 ? "" : "s"}`;
+  if (ms % DAY === 0) return plural(ms / DAY, "day");
+  if (ms % HOUR === 0) return plural(ms / HOUR, "hour");
+  return plural(Math.max(1, Math.round(ms / MIN)), "minute");
+}
+
+/** Pad an hour/minute to two digits for an `HH:MM` time render. */
+function hhmm(hh: number, mm: number): string {
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+/**
+ * A human-readable summary of a `trigger` string for the invocations table
+ * (e.g. `every 2 hours`, `Daily at 09:00 UTC`, `Weekly on Mon, Wed at 18:00
+ * America/New_York`). Falls back to the raw string for an unparseable trigger
+ * (so nothing renders empty), mirroring the v2 grammar in `parseSchedule`.
+ */
+export function formatSchedule(trigger: string): string {
+  const s = parseSchedule(trigger);
+  if (!s) return trigger.trim() || "—";
+  switch (s.kind) {
+    case "interval":
+      return formatInterval(s.ms);
+    case "daily":
+      return `Daily at ${hhmm(s.hh, s.mm)} ${s.tz}`;
+    case "weekly": {
+      const days = s.days.map((d) => WEEKDAY_NAMES[d]).join(", ");
+      return `Weekly on ${days} at ${hhmm(s.hh, s.mm)} ${s.tz}`;
+    }
+  }
+}
+
+/**
+ * Compute the wall-clock hour/minute that `nowMs` maps to in IANA zone `tz`,
+ * plus the weekday index in WEEKDAYS order (mon=0 … sun=6). Returns null if the
+ * zone can't be formatted (matches `isValidTz` failing on both sides).
+ */
+function zonedNow(nowMs: number, tz: string): { hh: number; mm: number; dow: number } | null {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+    }).formatToParts(new Date(nowMs));
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    let hh = Number(get("hour"));
+    if (hh === 24) hh = 0; // some engines emit "24" for midnight
+    const mm = Number(get("minute"));
+    const map: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+    const dow = map[get("weekday")];
+    if (!Number.isFinite(hh) || !Number.isFinite(mm) || dow === undefined) return null;
+    return { hh, mm, dow };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute the next fire time (epoch ms) for a `trigger`, relative to `nowMs`,
+ * or null when it can't be projected (unknown schedule, unparseable zone, or an
+ * interval invocation that has never run — there's no anchor without a
+ * `last_run_ms`). This is a DISPLAY projection only — the component
+ * (`agents.rs`) remains the authority on actual due-ness; we never schedule.
+ *
+ *   - interval: `lastRunMs + ms` (null if it has never run — no anchor).
+ *   - daily:    the next occurrence of HH:MM in the trigger's zone.
+ *   - weekly:   the next occurrence of HH:MM on one of the selected days.
+ */
+export function nextFireMs(
+  trigger: string,
+  nowMs: number,
+  lastRunMs: number | null,
+): number | null {
+  const s = parseSchedule(trigger);
+  if (!s) return null;
+  if (s.kind === "interval") {
+    return lastRunMs === null ? null : lastRunMs + s.ms;
+  }
+  const z = zonedNow(nowMs, s.tz);
+  if (!z) return null;
+  const MIN = 60 * 1000;
+  const nowMins = z.hh * 60 + z.mm;
+  const targetMins = s.hh * 60 + s.mm;
+  if (s.kind === "daily") {
+    // Minutes until the target time today, or the same time tomorrow if passed.
+    const delta = targetMins > nowMins ? targetMins - nowMins : targetMins - nowMins + 24 * 60;
+    return nowMs + delta * MIN;
+  }
+  // weekly: find the smallest non-negative day offset whose (day, time) is in
+  // the future. Today counts only if the target time hasn't passed yet.
+  const selected = new Set(s.days.map((d) => WEEKDAYS.indexOf(d)));
+  for (let add = 0; add < 7; add++) {
+    const dow = (z.dow + add) % 7;
+    if (!selected.has(dow)) continue;
+    if (add === 0 && targetMins <= nowMins) continue; // already passed today
+    const delta = add * 24 * 60 + (targetMins - nowMins);
+    return nowMs + delta * MIN;
+  }
+  // Every selected day is "today, already passed" — wrap to the same weekday
+  // next week (7 days out at the target time).
+  return nowMs + (7 * 24 * 60 + (targetMins - nowMins)) * MIN;
+}
+
+/**
+ * Format an absolute epoch-ms instant as a short relative phrase ("just now",
+ * "5m ago", "3h ago", "2d ago") for the Last-run / Next-fire columns. Future
+ * instants render with an "in " prefix ("in 2h"). `null` renders "—".
+ */
+export function formatRelativeTime(ms: number | null, nowMs: number): string {
+  if (ms === null) return "—";
+  const diff = ms - nowMs;
+  const abs = Math.abs(diff);
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  if (abs < 45 * 1000) return "just now";
+  let phrase: string;
+  if (abs < HOUR) phrase = `${Math.round(abs / MIN)}m`;
+  else if (abs < DAY) phrase = `${Math.round(abs / HOUR)}h`;
+  else phrase = `${Math.round(abs / DAY)}d`;
+  return diff < 0 ? `${phrase} ago` : `in ${phrase}`;
+}
