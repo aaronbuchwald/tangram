@@ -27,7 +27,15 @@
 // stay trigger-agnostic.
 
 import { DEFAULT_MODEL, type AgentDef } from "./agents";
-import { buildInvocationBlock } from "./invocations";
+import {
+  buildInvocationBlock,
+  buildTrigger,
+  browserTz,
+  parseSchedule,
+  WEEKDAYS,
+  type Recurrence,
+  type Weekday,
+} from "./invocations";
 
 /** What the popup does with the exchange / the chosen trigger. */
 export interface AgentPopupCallbacks {
@@ -40,8 +48,9 @@ export interface AgentPopupCallbacks {
   onClose: () => void;
 }
 
-/** The trigger the user chose in the options pass. */
-type TriggerChoice = "one-time" | "cron";
+/** The trigger mode the user chose in the options pass. `event` is greyed
+ *  (future, #33); the recurring modes drive the calendar-style picker. */
+type TriggerMode = "one-time" | "interval" | "daily" | "weekly" | "event";
 
 // Only one popup at a time (like promptName/confirmAction). Re-opening while one
 // is up closes the previous instance first.
@@ -193,7 +202,7 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
   });
 
   // ── Prompt + options state (R1 OPTIONS PASS) ───────────────────────────────
-  function renderPrompt(initial = "", initialTrigger: TriggerChoice = "one-time", initialSchedule = "") {
+  function renderPrompt(initial = "") {
     dialog.replaceChildren();
 
     const title = document.createElement("div");
@@ -207,57 +216,34 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     input.value = initial;
     input.spellcheck = false;
 
-    // Options block: trigger selector + disabled placeholders.
+    // Options block: trigger/recurrence selector + disabled placeholders.
     const opts = document.createElement("div");
     opts.className = "agent-options";
 
-    // ── Trigger (active) ──
-    let trigger: TriggerChoice = initialTrigger;
+    // ── Trigger mode (active): One-time · Interval · Daily · Weekly · Event ──
+    let mode: TriggerMode = "one-time";
     const trigRow = optionRow("Trigger");
     const seg = document.createElement("div");
     seg.className = "agent-trigger-seg";
-    const oneTimeBtn = segButton("One-time");
-    const cronBtn = segButton("Cron");
+    const modeBtns: Record<Exclude<TriggerMode, "event">, HTMLButtonElement> = {
+      "one-time": segButton("One-time"),
+      interval: segButton("Interval"),
+      daily: segButton("Daily"),
+      weekly: segButton("Weekly"),
+    };
     const eventBtn = segButton("Event");
     eventBtn.disabled = true;
     eventBtn.classList.add("disabled");
     eventBtn.title =
       "Run when a vault event occurs — note created, label added, another agent's output. Future feature (#33).";
-    seg.append(oneTimeBtn, cronBtn, eventBtn);
+    seg.append(modeBtns["one-time"], modeBtns.interval, modeBtns.daily, modeBtns.weekly, eventBtn);
     trigRow.append(seg);
 
-    // Cron schedule input (revealed only for Cron).
-    const cronWrap = document.createElement("div");
-    cronWrap.className = "agent-cron-wrap";
-    const cronInput = document.createElement("input");
-    cronInput.type = "text";
-    cronInput.className = "modal-input agent-cron-input";
-    cronInput.placeholder = "every 15m · @hourly · @daily";
-    cronInput.value = initialSchedule;
-    cronInput.spellcheck = false;
-    const cronHint = document.createElement("div");
-    cronHint.className = "agent-cron-hint micro";
-    cronHint.textContent = "Schedule: every <N>m | every <N>h | @hourly | @daily";
-    cronWrap.append(cronInput, cronHint);
+    // The recurrence picker (revealed for the recurring modes). Owns its
+    // sub-controls and exposes the chosen trigger + validity via closures.
+    const picker = buildRecurrencePicker(() => refresh());
+    opts.append(trigRow, picker.el);
 
-    function applyTrigger() {
-      oneTimeBtn.classList.toggle("active", trigger === "one-time");
-      cronBtn.classList.toggle("active", trigger === "cron");
-      cronWrap.style.display = trigger === "cron" ? "" : "none";
-      refresh();
-    }
-    oneTimeBtn.addEventListener("click", () => {
-      trigger = "one-time";
-      applyTrigger();
-      input.focus();
-    });
-    cronBtn.addEventListener("click", () => {
-      trigger = "cron";
-      applyTrigger();
-      cronInput.focus();
-    });
-
-    opts.append(trigRow, cronWrap);
     // ── Disabled placeholders (future phases) ──
     opts.append(
       disabledRow("MCP / Tools", "Connect MCP servers/tools the agent may call. Coming in the Tools phase."),
@@ -275,51 +261,56 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
 
     dialog.append(title, input, opts, actions);
 
-    function scheduleValid(): boolean {
-      return parseScheduleMs(cronInput.value.trim()) !== null;
+    function applyMode() {
+      for (const [m, btn] of Object.entries(modeBtns)) {
+        btn.classList.toggle("active", m === mode);
+      }
+      const recurring =
+        mode === "interval" || mode === "daily" || mode === "weekly" ? mode : null;
+      picker.show(recurring);
+      refresh();
     }
+    for (const [m, btn] of Object.entries(modeBtns) as [
+      Exclude<TriggerMode, "event">,
+      HTMLButtonElement,
+    ][]) {
+      btn.addEventListener("click", () => {
+        mode = m;
+        applyMode();
+        if (mode === "one-time") input.focus();
+      });
+    }
+
     function refresh() {
       const hasPrompt = input.value.trim().length > 0;
-      const ok = trigger === "cron" ? hasPrompt && scheduleValid() : hasPrompt;
+      const ok = mode === "one-time" ? hasPrompt : hasPrompt && picker.isValid();
       submitBtn.disabled = !ok;
-      cronHint.classList.toggle(
-        "error",
-        trigger === "cron" && cronInput.value.trim().length > 0 && !scheduleValid(),
-      );
     }
     function submit() {
       const prompt = input.value.trim();
       if (!prompt) return;
-      if (trigger === "cron") {
-        const schedule = cronInput.value.trim();
-        if (parseScheduleMs(schedule) === null) return;
-        // Write the durable ```agent block; do NOT run now (the scheduler does).
-        teardown();
-        callbacks.onSave(buildInvocationBlock(def.name, `cron ${schedule}`, prompt));
+      if (mode === "one-time") {
+        void runPrompt(prompt);
         return;
       }
-      void runPrompt(prompt);
+      const trigger = picker.trigger();
+      if (!trigger) return;
+      // Write the durable ```agent block; do NOT run now (the scheduler does).
+      teardown();
+      callbacks.onSave(buildInvocationBlock(def.name, trigger, prompt));
     }
 
     input.addEventListener("input", refresh);
-    cronInput.addEventListener("input", refresh);
-    // Enter submits from the prompt (Shift+Enter inserts a newline). Enter in the
-    // cron input also submits.
+    // Enter submits from the prompt (Shift+Enter inserts a newline).
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         submit();
       }
     });
-    cronInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        submit();
-      }
-    });
     submitBtn.addEventListener("click", submit);
 
-    applyTrigger();
+    applyMode();
     input.focus();
   }
 
@@ -460,7 +451,7 @@ function optionRow(label: string): HTMLElement {
   return row;
 }
 
-/** A segmented-control button (One-time / Cron / Event). */
+/** A segmented-control button (One-time / Interval / Daily / Weekly / Event). */
 function segButton(text: string): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
@@ -482,17 +473,162 @@ function disabledRow(label: string, tooltip: string): HTMLElement {
   return row;
 }
 
-/** The popup-side mirror of the component's v1 schedule grammar
- *  (`agents.rs::parse_schedule_ms`): `@hourly`, `@daily`, `every <N>m`,
- *  `every <N>h`. Returns the interval in ms, or null for an unknown schedule
- *  (so the Cron submit can be gated until the schedule is valid). */
-export function parseScheduleMs(schedule: string): number | null {
-  const s = schedule.trim();
-  if (s === "@hourly") return 60 * 60 * 1000;
-  if (s === "@daily") return 24 * 60 * 60 * 1000;
-  const m = /^every\s+(\d+)\s*([mh])$/.exec(s);
-  if (!m) return null;
-  const n = Number(m[1]);
-  if (!Number.isInteger(n) || n <= 0) return null;
-  return m[2] === "m" ? n * 60 * 1000 : n * 60 * 60 * 1000;
+/** The recurring sub-modes the calendar-style picker handles. */
+type RecurringMode = "interval" | "daily" | "weekly";
+
+/** Day-of-week chip labels (single letters), aligned to `WEEKDAYS` order. */
+const DAY_LABELS: Record<Weekday, string> = {
+  mon: "M",
+  tue: "T",
+  wed: "W",
+  thu: "T",
+  fri: "F",
+  sat: "S",
+  sun: "S",
+};
+
+/**
+ * Build the calendar-style recurrence picker (Google-Calendar / Apple-Reminders
+ * feel). Returns the wrapper element plus:
+ *  - `show(mode)` — reveal the controls for the given recurring mode, or hide
+ *    all (mode `null`, i.e. the One-time trigger).
+ *  - `trigger()` — the emitted `trigger:` string for the current selection (via
+ *    the shared `buildTrigger`), or `null` if the selection is incomplete.
+ *  - `isValid()` — whether `trigger()` would round-trip through `parseSchedule`.
+ *
+ * Localised time: the tz defaults to the browser zone and is shown as a small
+ * "times in <tz>" label; the IANA name is baked into the emitted trigger so the
+ * component computes the occurrence in the right zone. Times are entered/shown
+ * in local 24h `HH:MM`.
+ */
+function buildRecurrencePicker(onChange: () => void): {
+  el: HTMLElement;
+  show: (mode: RecurringMode | null) => void;
+  trigger: () => string | null;
+  isValid: () => boolean;
+} {
+  const tz = browserTz();
+  let mode: RecurringMode | null = null;
+
+  const el = document.createElement("div");
+  el.className = "agent-recur";
+
+  // ── Interval row: "Every [N] [minutes/hours/days]" ──
+  const intervalRow = document.createElement("div");
+  intervalRow.className = "agent-recur-row";
+  const everyLabel = document.createElement("span");
+  everyLabel.className = "agent-recur-text micro";
+  everyLabel.textContent = "Every";
+  const nInput = document.createElement("input");
+  nInput.type = "number";
+  nInput.min = "1";
+  nInput.value = "2";
+  nInput.className = "modal-input agent-recur-n";
+  const unitSel = document.createElement("select");
+  unitSel.className = "modal-input agent-recur-unit";
+  for (const [val, label] of [
+    ["m", "minutes"],
+    ["h", "hours"],
+    ["d", "days"],
+  ] as const) {
+    const o = document.createElement("option");
+    o.value = val;
+    o.textContent = label;
+    unitSel.append(o);
+  }
+  unitSel.value = "h";
+  intervalRow.append(everyLabel, nInput, unitSel);
+
+  // ── Daily row: "Every day at [time]" ──
+  const dailyRow = document.createElement("div");
+  dailyRow.className = "agent-recur-row";
+  const dailyLabel = document.createElement("span");
+  dailyLabel.className = "agent-recur-text micro";
+  dailyLabel.textContent = "Every day at";
+  const dailyTime = document.createElement("input");
+  dailyTime.type = "time";
+  dailyTime.value = "09:00";
+  dailyTime.className = "modal-input agent-recur-time";
+  dailyRow.append(dailyLabel, dailyTime);
+
+  // ── Weekly row: day chips + "at [time]" ──
+  const weeklyRow = document.createElement("div");
+  weeklyRow.className = "agent-recur-row agent-recur-weekly";
+  const chips = document.createElement("div");
+  chips.className = "agent-day-chips";
+  const selectedDays = new Set<Weekday>();
+  for (const d of WEEKDAYS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "agent-day-chip";
+    chip.textContent = DAY_LABELS[d];
+    chip.title = d;
+    chip.addEventListener("click", () => {
+      if (selectedDays.has(d)) selectedDays.delete(d);
+      else selectedDays.add(d);
+      chip.classList.toggle("active", selectedDays.has(d));
+      onChange();
+    });
+    chips.append(chip);
+  }
+  const weeklyAt = document.createElement("span");
+  weeklyAt.className = "agent-recur-text micro";
+  weeklyAt.textContent = "at";
+  const weeklyTime = document.createElement("input");
+  weeklyTime.type = "time";
+  weeklyTime.value = "09:00";
+  weeklyTime.className = "modal-input agent-recur-time";
+  weeklyRow.append(chips, weeklyAt, weeklyTime);
+
+  // ── tz hint (shared) ──
+  const tzHint = document.createElement("div");
+  tzHint.className = "agent-recur-tz micro";
+  tzHint.textContent = `times in ${tz}`;
+
+  el.append(intervalRow, dailyRow, weeklyRow, tzHint);
+
+  for (const ctrl of [nInput, unitSel, dailyTime, weeklyTime]) {
+    ctrl.addEventListener("input", onChange);
+    ctrl.addEventListener("change", onChange);
+  }
+
+  function currentRecurrence(): Recurrence | null {
+    if (mode === "interval") {
+      const n = Number(nInput.value);
+      if (!Number.isInteger(n) || n <= 0) return null;
+      return { mode: "interval", n, unit: unitSel.value as "m" | "h" | "d" };
+    }
+    if (mode === "daily") {
+      if (!/^\d{2}:\d{2}$/.test(dailyTime.value)) return null;
+      return { mode: "daily", time: dailyTime.value, tz };
+    }
+    if (mode === "weekly") {
+      if (selectedDays.size === 0) return null;
+      if (!/^\d{2}:\d{2}$/.test(weeklyTime.value)) return null;
+      const days = WEEKDAYS.filter((d) => selectedDays.has(d));
+      return { mode: "weekly", days, time: weeklyTime.value, tz };
+    }
+    return null;
+  }
+
+  function trigger(): string | null {
+    const rec = currentRecurrence();
+    if (!rec) return null;
+    const t = buildTrigger(rec);
+    // Round-trip guard: only emit a trigger the component will actually parse.
+    return parseSchedule(t) ? t : null;
+  }
+
+  function show(next: RecurringMode | null) {
+    mode = next;
+    intervalRow.style.display = next === "interval" ? "" : "none";
+    dailyRow.style.display = next === "daily" ? "" : "none";
+    weeklyRow.style.display = next === "weekly" ? "" : "none";
+    tzHint.style.display = next === "daily" || next === "weekly" ? "" : "none";
+    el.style.display = next === null ? "none" : "";
+  }
+
+  show(null);
+  return { el, show, trigger, isValid: () => trigger() !== null };
 }
+

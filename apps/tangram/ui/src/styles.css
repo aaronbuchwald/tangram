@@ -417,6 +417,27 @@ body {
 .agent-cron-hint { color: var(--faint); }
 .agent-cron-hint.error { color: var(--red); }
 
+/* ── calendar-style recurrence picker (Interval / Daily / Weekly) ──
+   Revealed below the trigger segmented control. Aligned under the controls
+   (label gutter = 98px), with a row per mode and a shared tz hint. */
+.agent-recur { display: flex; flex-direction: column; gap: 8px; padding-left: 98px; }
+.agent-recur-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-recur-text { color: var(--dim); }
+.agent-recur-n { width: 56px; font: 13px/1.4 var(--mono); text-align: right; }
+.agent-recur-unit { font: 13px/1.4 var(--sans, inherit); padding: 3px 6px; }
+.agent-recur-time { font: 13px/1.4 var(--mono); padding: 3px 6px; }
+.agent-day-chips { display: inline-flex; gap: 4px; }
+.agent-day-chip {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 1px solid var(--line); background: var(--bg);
+  color: var(--dim); font: 12px/1 var(--sans, inherit); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; transition: background 0.1s ease, color 0.1s ease;
+}
+.agent-day-chip:hover:not(.active) { color: var(--text); border-color: var(--dim); }
+.agent-day-chip.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+.agent-recur-tz { color: var(--faint); letter-spacing: 0.02em; }
+
 /* ── `/agent` create/define popup (P1) ──
    A compact label/field grid in the same modal card language. The fields are
    name / kind / model / labels / instructions; Create writes a vault note. */
