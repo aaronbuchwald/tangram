@@ -20,6 +20,7 @@ import {
   type AgentDef,
   type AgentIndex,
 } from "./agents";
+import { renderAgentsView } from "./agentsView";
 import {
   type CreatedAgent,
   isCreateAgentPopupOpen,
@@ -166,6 +167,12 @@ root.innerHTML = `
             <div class="applist" id="applist"></div>
           </div>
         </section>
+        <section class="side-section">
+          <div class="side-head" id="agents-head" title="Open the Agents view">
+            <span class="micro">Agents</span>
+            <span class="agents-badge" id="agents-count-badge">0</span>
+          </div>
+        </section>
         <div class="sidebar-resizer" id="sidebar-resizer"></div>
       </aside>
       <main class="main">
@@ -211,6 +218,13 @@ document.getElementById("apps-head")!.addEventListener("click", (e) => {
   if (collapsedSections.has("apps")) collapsedSections.delete("apps");
   else collapsedSections.add("apps");
   applySectionState();
+});
+
+// The Agents section header is an entry point, not a collapsible list — clicking
+// it opens the Agents table tab (the sortable/filterable view; P2). The badge
+// shows the indexed count and updates on each vault state.
+document.getElementById("agents-head")!.addEventListener("click", () => {
+  tabs.openAgents();
 });
 
 // Drag-to-resize the sidebar
@@ -396,6 +410,16 @@ function renderApps() {
   }
 }
 
+// Reflect the indexed agent/skill count in the sidebar "Agents" header badge,
+// and mark the header active when the Agents tab is the active one (mirrors the
+// vault/app row active styling).
+function renderAgentsBadge() {
+  const badge = document.getElementById("agents-count-badge");
+  if (badge) badge.textContent = String(agentIndex.all.length);
+  const head = document.getElementById("agents-head");
+  if (head) head.classList.toggle("active", tabs.active?.kind === "agents");
+}
+
 // Run a registry mutation, then refresh the fleet so the change reflects in
 // the sidebar (and /api/fleet) without waiting for the 5s poll. Errors (most
 // commonly a missing/invalid token → 401) surface as an alert.
@@ -413,6 +437,7 @@ async function manageApp(action: () => Promise<unknown>) {
 
 function tabTitle(tab: Tab): string {
   if (tab.kind === "home") return "Tangram";
+  if (tab.kind === "agents") return "Agents";
   if (tab.kind === "app") return displayName(tab.app);
   const file = filesById.get(tab.fileId);
   if (!file) return "(Missing)";
@@ -511,6 +536,16 @@ function renderContent() {
   }
   if (tab.kind === "home") {
     renderHome();
+    return;
+  }
+  if (tab.kind === "agents") {
+    // The Agents view reads through the live index (rebuilt on each vault
+    // state); onVaultState re-renders it so new/edited agents appear without a
+    // manual refresh. Row actions open the source note / the bound run popup.
+    renderAgentsView(contentEl, agentIndex, {
+      openNote: (fileId) => tabs.openNote(fileId),
+      fileById: (fileId) => filesById.get(fileId),
+    });
     return;
   }
   if (tab.kind === "app") {
@@ -919,6 +954,7 @@ function onVaultState(state: VaultState) {
   agentIndex = buildAgentIndex(files);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
+  renderAgentsBadge();
   // A header-driven rename re-derives the active tab's title from the new path,
   // so refresh the tab strip too (otherwise it would go stale after a rename).
   renderTabs();
@@ -956,6 +992,7 @@ tabs.subscribe(() => {
   renderContent();
   renderTree();
   renderApps();
+  renderAgentsBadge();
 });
 
 // ── boot ─────────────────────────────────────────────────────────────────────
@@ -970,6 +1007,7 @@ function startShell() {
   renderContent();
   renderTree();
   renderApps();
+  renderAgentsBadge();
 
   subscribeVault(onVaultState);
   void refreshFleet();

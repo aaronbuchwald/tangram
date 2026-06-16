@@ -425,3 +425,94 @@ body {
 .keys-row-label { font-size: 13px; color: var(--text); }
 .keys-row-scopes { font-size: 11px; color: var(--faint); }
 .keys-revoke { padding: 4px 10px; font-size: 12px; }
+
+/* ── Agents view (P2) ──
+   A GitHub-issues-style sortable/filterable table of every indexed agent/skill,
+   rendered into the main content area as an "agents" tab. The sidebar "Agents"
+   section header is the entry point; its badge shows the indexed count. */
+.agents-badge {
+  margin-left: auto; min-width: 18px; padding: 0 6px; height: 17px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+  color: var(--dim); font-size: 11px; line-height: 1;
+}
+#agents-head { cursor: pointer; }
+#agents-head.active { background: #182634; }
+#agents-head.active .micro { color: #cfe9ff; }
+
+.agents-view {
+  flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+  overflow: hidden; padding: 18px 22px; gap: 14px;
+}
+.agents-head { display: flex; flex-direction: column; gap: 10px; }
+.agents-title { margin: 0; font-size: 1.3rem; font-weight: 400; }
+.agents-bar { display: flex; align-items: center; gap: 12px; }
+.agents-query {
+  flex: 1; background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+  color: var(--text); font: 13px/1.4 var(--mono); padding: 8px 11px;
+}
+.agents-query::placeholder { color: var(--faint); }
+.agents-query:focus { outline: none; border-color: var(--blue); }
+.agents-count { white-space: nowrap; color: var(--dim); }
+
+.agents-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.agents-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.agents-th {
+  position: sticky; top: 0; z-index: 1; text-align: left; user-select: none;
+  background: var(--panel); color: var(--dim); font-weight: 600; cursor: pointer;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.agents-th:hover { color: var(--text); }
+.agents-th.sorted { color: var(--text); }
+.agents-th-actions { cursor: default; width: 1%; }
+.agents-sort-caret { font-size: 9px; color: var(--blue); }
+.agents-row { border-bottom: 1px solid var(--line); }
+.agents-row:last-child { border-bottom: 0; }
+.agents-row:hover { background: var(--panel-2); }
+.agents-cell { padding: 8px 12px; vertical-align: middle; color: var(--text); }
+.agents-cell-mono { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+.agents-empty { padding: 22px 12px; text-align: center; color: var(--faint); }
+
+.agents-name-link {
+  background: transparent; border: 0; padding: 0; cursor: pointer;
+  color: var(--blue); font: inherit; font-weight: 500; text-align: left;
+}
+.agents-name-link:hover { text-decoration: underline; }
+.agents-name-link:disabled { color: var(--dim); cursor: default; text-decoration: none; }
+
+.agents-kind {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  border: 1px solid var(--line);
+}
+.agents-kind-agent { color: var(--blue); border-color: rgba(0, 158, 238, 0.4); background: rgba(0, 158, 238, 0.08); }
+.agents-kind-skill { color: var(--green); border-color: rgba(31, 210, 134, 0.4); background: rgba(31, 210, 134, 0.08); }
+
+.agents-cell-labels { min-width: 160px; }
+.agents-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.agents-chip {
+  display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--dim);
+}
+.agents-path { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+.agents-adder { display: inline-flex; margin-left: 6px; vertical-align: middle; }
+.agents-adder-btn {
+  background: transparent; border: 1px dashed var(--line); border-radius: 4px;
+  color: var(--faint); font-size: 11px; padding: 1px 6px; cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.agents-adder-btn:hover { color: var(--blue); border-color: var(--blue); }
+.agents-adder-input {
+  background: var(--bg); border: 1px solid var(--blue); border-radius: 4px;
+  color: var(--text); font: 11px/1.3 var(--mono); padding: 1px 6px; width: 130px;
+}
+.agents-adder-input:focus { outline: none; }
+
+.agents-cell-actions { width: 1%; white-space: nowrap; text-align: right; }
+.agents-run {
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--dim); font: inherit; font-size: 12px; padding: 4px 12px; cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.agents-run:hover { color: var(--text); border-color: var(--blue); }
