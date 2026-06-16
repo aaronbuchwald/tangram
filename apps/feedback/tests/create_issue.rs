@@ -89,17 +89,32 @@ async fn uploads_screenshot_then_embeds_it_in_the_issue() {
     // Two calls in order: upload via Contents API, then create the issue.
     assert_eq!(reqs.len(), 2, "upload + create: {reqs:?}");
     assert_eq!(reqs[0].method, "PUT");
+    // The screenshot uploads under a clean `assets/` path — NOT a
+    // `feedback-assets/` dir prefix (the branch is already named that), and
+    // never anything that implies a write to the default branch.
     assert!(
         reqs[0]
             .path
-            .starts_with("/repos/owner/repo/contents/feedback-assets/"),
-        "screenshot uploads under feedback-assets/: {}",
+            .starts_with("/repos/owner/repo/contents/assets/"),
+        "screenshot uploads under assets/: {}",
+        reqs[0].path
+    );
+    assert!(
+        !reqs[0].path.contains("/contents/feedback-assets/"),
+        "no feedback-assets/ dir prefix on the path: {}",
         reqs[0].path
     );
     assert!(
         reqs[0].path.ends_with(".png"),
         "png extension preserved: {}",
         reqs[0].path
+    );
+    // The upload commit is pinned to the dedicated feedback-assets branch, so
+    // the image binary never lands on the default branch (main).
+    assert_eq!(
+        reqs[0].body["branch"], "feedback-assets",
+        "PUT pins the feedback-assets branch: {:?}",
+        reqs[0].body
     );
     // The uploaded content is base64 (the Contents API shape), non-empty.
     assert!(reqs[0].body["content"].as_str().unwrap().len() > 10);
@@ -110,8 +125,13 @@ async fn uploads_screenshot_then_embeds_it_in_the_issue() {
     assert!(
         body.contains("See attached.")
             && body.contains("![screenshot](")
-            && body.contains("/raw/feedback-assets/shot.png"),
-        "issue body embeds the uploaded raw URL: {body:?}"
+            && body.contains("/raw/feedback-assets/assets/shot.png"),
+        "issue body embeds the uploaded raw URL on the feedback-assets ref: {body:?}"
+    );
+    // The embedded URL is on the feedback-assets ref, never main.
+    assert!(
+        body.contains("/feedback-assets/") && !body.contains("/main/"),
+        "embedded URL points at the feedback-assets ref, not main: {body:?}"
     );
 
     let submitted = ctx.state_json()["submitted"].as_array().unwrap().clone();

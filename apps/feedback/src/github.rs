@@ -12,7 +12,9 @@
 //!   1. (optional) `PUT /repos/{owner}/{repo}/contents/{path}` — upload the
 //!      image bytes via the Contents API to get a *raw* URL, because a
 //!      base64 data URI embedded in markdown does NOT render on GitHub. The
-//!      returned `content.download_url` is the raw link we embed.
+//!      returned `content.download_url` is the raw link we embed. The commit
+//!      is pinned to the dedicated `feedback-assets` branch (NEVER the default
+//!      branch) — a stopgap asset store; see tracking issue #37.
 //!   2. `POST /repos/{owner}/{repo}/issues` — create the issue with the title
 //!      and the (possibly image-augmented) body.
 //!
@@ -103,11 +105,17 @@ fn ext_for_mime(mime: &str) -> &'static str {
     }
 }
 
-/// The repository path the screenshot is uploaded to, under a dedicated
-/// `feedback-assets/` directory. The id keeps uploads unique so concurrent
-/// submissions don't collide.
+/// The dedicated branch screenshots are committed to — NEVER the repo's
+/// default branch. The branch is already named `feedback-assets`, so the asset
+/// path under it does NOT repeat that prefix (see [`asset_path`]).
+pub const ASSETS_BRANCH: &str = "feedback-assets";
+
+/// The path the screenshot is uploaded to ON the [`ASSETS_BRANCH`], under a
+/// clean `assets/` directory. The id keeps uploads unique so concurrent
+/// submissions don't collide. No `feedback-assets/` prefix — the branch is
+/// already named that.
 pub fn asset_path(id: &str, mime: &str) -> String {
-    format!("feedback-assets/{id}.{}", ext_for_mime(mime))
+    format!("assets/{id}.{}", ext_for_mime(mime))
 }
 
 /// Build the issue body, appending a GitHub-rendered image reference when an
@@ -135,9 +143,12 @@ pub fn issue_request_body(title: &str, body: &str) -> serde_json::Value {
 }
 
 /// The JSON body for `PUT /repos/{owner}/{repo}/contents/{path}`.
+///
+/// `branch` pins the commit to the dedicated [`ASSETS_BRANCH`] so the image
+/// binary NEVER lands on the repo's default branch (`main`).
 #[must_use]
-pub fn contents_request_body(message: &str, content_b64: &str) -> serde_json::Value {
-    json!({ "message": message, "content": content_b64 })
+pub fn contents_request_body(message: &str, content_b64: &str, branch: &str) -> serde_json::Value {
+    json!({ "message": message, "content": content_b64, "branch": branch })
 }
 
 /// Attach the standard GitHub REST headers (and, on the native path, the bearer
@@ -167,8 +178,22 @@ struct ContentsContent {
     download_url: Option<String>,
 }
 
-/// Upload an image to the repo via the Contents API and return its raw
-/// (`download_url`) link, suitable for embedding in issue markdown.
+/// Construct the raw URL for `path` on the [`ASSETS_BRANCH`] as a fallback when
+/// the Contents-API response omits `content.download_url`.
+fn raw_url(owner: &str, repo: &str, path: &str) -> String {
+    format!("https://raw.githubusercontent.com/{owner}/{repo}/{ASSETS_BRANCH}/{path}")
+}
+
+/// Upload an image to the repo via the Contents API and return its raw link,
+/// suitable for embedding in issue markdown.
+///
+/// STOPGAP (tracking issue #37): the binary is committed to the dedicated
+/// `feedback-assets` branch (`branch` in the request body), NEVER the default
+/// branch. GitHub has no public API for issue user-attachments, so this
+/// side-branch is the asset store; revisit (release assets / external store)
+/// per #37. The returned URL is the response `content.download_url` (already on
+/// the `feedback-assets` ref), or a constructed `raw.githubusercontent.com`
+/// URL on that ref as a fallback.
 pub async fn upload_image(
     owner: &str,
     repo: &str,
@@ -184,21 +209,25 @@ pub async fn upload_image(
         repo = repo,
         path = path,
     );
-    let req = with_github_headers(
-        http::Request::new("PUT", url).json(&contents_request_body(commit_message, &content_b64)),
-    );
+    let req = with_github_headers(http::Request::new("PUT", url).json(&contents_request_body(
+        commit_message,
+        &content_b64,
+        ASSETS_BRANCH,
+    )));
     let resp = http::fetch(req).await?;
     let parsed: serde_json::Value = resp.json()?;
     if !resp.is_success() {
         anyhow::bail!("GitHub asset upload failed ({}): {parsed}", resp.status);
     }
     let contents: ContentsResponse = serde_json::from_value(parsed)
-        .context("GitHub contents response did not include content.download_url")?;
-    contents
+        .context("GitHub contents response was not the expected shape")?;
+    // Prefer the response download_url (already points at feedback-assets); fall
+    // back to constructing the raw URL on that ref.
+    Ok(contents
         .content
         .download_url
         .filter(|u| !u.trim().is_empty())
-        .context("GitHub contents response had no download_url for the uploaded asset")
+        .unwrap_or_else(|| raw_url(owner, repo, path)))
 }
 
 /// The result of creating an issue.
@@ -302,11 +331,33 @@ mod tests {
 
     #[test]
     fn asset_path_uses_extension_for_mime() {
-        assert_eq!(asset_path("abc", "image/png"), "feedback-assets/abc.png");
-        assert_eq!(asset_path("abc", "image/jpeg"), "feedback-assets/abc.jpg");
+        assert_eq!(asset_path("abc", "image/png"), "assets/abc.png");
+        assert_eq!(asset_path("abc", "image/jpeg"), "assets/abc.jpg");
+        assert_eq!(asset_path("abc", "image/svg+xml"), "assets/abc.svg");
+    }
+
+    #[test]
+    fn asset_path_has_no_feedback_assets_prefix() {
+        // The branch is already named feedback-assets; the path under it must
+        // not repeat that, and must never imply a write to main.
+        let path = asset_path("abc", "image/png");
+        assert!(!path.starts_with("feedback-assets/"), "path: {path}");
+        assert!(path.starts_with("assets/"), "path: {path}");
+    }
+
+    #[test]
+    fn contents_body_pins_the_assets_branch() {
+        let v = contents_request_body("msg", "Yg==", ASSETS_BRANCH);
+        assert_eq!(v["message"], "msg");
+        assert_eq!(v["content"], "Yg==");
+        assert_eq!(v["branch"], "feedback-assets");
+    }
+
+    #[test]
+    fn raw_url_points_at_the_assets_branch() {
         assert_eq!(
-            asset_path("abc", "image/svg+xml"),
-            "feedback-assets/abc.svg"
+            raw_url("owner", "repo", "assets/abc.png"),
+            "https://raw.githubusercontent.com/owner/repo/feedback-assets/assets/abc.png"
         );
     }
 }

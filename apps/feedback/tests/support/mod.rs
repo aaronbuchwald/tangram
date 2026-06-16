@@ -137,7 +137,11 @@ impl GithubFixture {
                         "201 Created",
                         serde_json::json!({
                             "content": {
-                                "download_url": format!("{raw_base}/raw/feedback-assets/shot.png")
+                                // A download_url on the feedback-assets ref, the
+                                // shape GitHub returns for a branch-pinned PUT.
+                                "download_url": format!(
+                                    "{raw_base}/raw/feedback-assets/assets/shot.png"
+                                )
                             }
                         })
                         .to_string(),
