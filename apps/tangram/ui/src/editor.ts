@@ -27,6 +27,12 @@ import {
   keymap,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
+import {
+  type AgentTriggerHandler,
+  agentClickToReopen,
+  agentTagHighlight,
+  agentTrigger,
+} from "./agentTag";
 import { livePreview } from "./livePreview";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
@@ -96,6 +102,16 @@ const theme = EditorView.theme(
     ".cm-lp-link": { color: "var(--blue)", textDecoration: "underline" },
     // The `•` glyph that stands in for an unordered list marker off the line.
     ".cm-lp-bullet": { color: "var(--dim)" },
+    // The inline "@agent" trigger token — a subtle blue accent chip, so it
+    // reads as an actionable affordance (Enter / click reopens the popup).
+    ".cm-agent-tag": {
+      color: "var(--blue)",
+      backgroundColor: "rgba(0,158,238,0.12)",
+      borderRadius: "4px",
+      padding: "0.05em 0.25em",
+      fontWeight: "600",
+      cursor: "pointer",
+    },
     // Blockquote: a left bar + dim text, drawn on the line so it survives the
     // concealed `>` marker.
     ".cm-lp-quote": {
@@ -118,20 +134,37 @@ export class MdEditor {
     parent: HTMLElement,
     initialDoc: string,
     onChange: (doc: string) => void,
+    // Demo: fired when the inline "@agent" trigger fires (caret right after
+    // `@agent` + Enter, or a click on a highlighted token). `from`/`to` is the
+    // document range of the matched token so the popup can replace exactly it
+    // on Save (or keep it on Exit). Optional so non-agent editors are unchanged.
+    onAgentTrigger?: (from: number, to: number) => void,
   ) {
     this.lastWritten = initialDoc;
+    // The Enter trigger + click-to-reopen are only wired when a handler is
+    // supplied; the highlight is harmless and always on.
+    const agentExtensions = onAgentTrigger
+      ? [
+          agentTrigger(onAgentTrigger as AgentTriggerHandler),
+          agentClickToReopen(onAgentTrigger as AgentTriggerHandler),
+        ]
+      : [];
     const state = EditorState.create({
       doc: initialDoc,
       extensions: [
         history(),
         drawSelection(),
         highlightActiveLine(),
+        // High-precedence agent Enter handler must sit before the default
+        // keymap (which also binds Enter); agentTrigger wraps it in Prec.highest.
+        ...agentExtensions,
         keymap.of([...defaultKeymap, ...historyKeymap]),
         // Extended (GFM) dialect so strikethrough, task lists, tables, etc.
         // parse — the live-preview decorations key off their Lezer nodes.
         markdown({ base: markdownLanguage }),
         syntaxHighlighting(mdHighlight),
         livePreview,
+        agentTagHighlight,
         theme,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
@@ -140,6 +173,29 @@ export class MdEditor {
       ],
     });
     this.view = new EditorView({ state, parent });
+  }
+
+  /**
+   * Replace the document range [from, to) with `text`, put the caret right
+   * after the inserted text, and refocus. Used by the agent popup's Save to
+   * swap the triggering `@agent` token for the prompt+response block. The
+   * existing debounced onChange persists the new doc to the vault.
+   */
+  replaceRange(from: number, to: number, text: string): void {
+    const docLen = this.view.state.doc.length;
+    const clampedFrom = Math.min(from, docLen);
+    const clampedTo = Math.min(Math.max(to, clampedFrom), docLen);
+    const caret = clampedFrom + text.length;
+    this.view.dispatch({
+      changes: { from: clampedFrom, to: clampedTo, insert: text },
+      selection: { anchor: caret },
+    });
+    this.view.focus();
+  }
+
+  /** Refocus the editor (e.g. after the agent popup is dismissed). */
+  focus(): void {
+    this.view.focus();
   }
 
   /** The current editor contents. */

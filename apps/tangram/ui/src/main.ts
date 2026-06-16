@@ -13,6 +13,7 @@ import {
   type MdFile,
   type VaultState,
 } from "./api";
+import { openAgentPopup } from "./agentPopup";
 import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
 import { registry } from "./manage";
@@ -581,14 +582,28 @@ function renderNoteTab(fileId: string) {
     fileId,
     editor: undefined as unknown as MdEditor,
   };
-  const editor = new MdEditor(editorHost, file.body, (doc) => {
-    if (state.saveTimer) window.clearTimeout(state.saveTimer);
-    state.saveTimer = window.setTimeout(() => {
-      editor.markWritten(doc); // expect this body to echo back over SSE
-      void vault.writeFile(fileId, doc).catch((e) => console.error(e));
-      maybeRenameFromHeading(fileId, doc);
-    }, 400);
-  });
+  const editor = new MdEditor(
+    editorHost,
+    file.body,
+    (doc) => {
+      if (state.saveTimer) window.clearTimeout(state.saveTimer);
+      state.saveTimer = window.setTimeout(() => {
+        editor.markWritten(doc); // expect this body to echo back over SSE
+        void vault.writeFile(fileId, doc).catch((e) => console.error(e));
+        maybeRenameFromHeading(fileId, doc);
+      }, 400);
+    },
+    // Inline "@agent" trigger (demo): the editor hands us the matched token's
+    // [from, to). Open the popup; on Save, replace exactly that range with the
+    // prompt+response block (the debounced onChange above then persists it). On
+    // Exit/dismiss, just refocus — the @agent token is left untouched.
+    (from, to) => {
+      openAgentPopup({
+        onSave: (block) => editor.replaceRange(from, to, block),
+        onClose: () => editor.focus(),
+      });
+    },
+  );
   state.editor = editor;
 
   wrap.appendChild(editorHost);
