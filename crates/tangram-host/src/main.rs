@@ -747,33 +747,41 @@ async fn main() -> anyhow::Result<()> {
     // dev/demo capability: arbitrary-blob storage that MUST NOT face the
     // public internet until the MUST-FIX checklist (auth, per-upload size
     // cap, rate limiting, content/abuse controls, quota — see
-    // crates/tangram-host/README.md) is met. The wasm-validity check is the
-    // only checklist item already done. Mirror the registry posture: refuse a
-    // non-loopback bind without a token, and log a loud warning when on.
+    // crates/tangram-host/README.md) is met. The wasm-validity check + the
+    // mandatory bearer gate (M1, #29) are the checklist items already done.
+    // Mirror the registry posture: refuse a non-loopback bind without a token,
+    // and log a loud warning when on.
     let artifacts_upload_enabled = HostConfig::load(&config_path)
         .map(|config| config.artifacts.upload_enabled)
         .unwrap_or(false);
     if artifacts_upload_enabled {
         if !bind_loopback && auth_token.is_none() {
             anyhow::bail!(
-                "refusing to bind {bind_addr}: [artifacts] upload_enabled = true exposes open \
+                "refusing to bind {bind_addr}: [artifacts] upload_enabled = true exposes \
                  artifact upload (arbitrary blob storage) and TANGRAM_AUTH_TOKEN is not set — \
                  set the token or bind 127.0.0.1 (see the MUST-FIX checklist in \
                  crates/tangram-host/README.md before exposing this publicly)"
             );
         }
-        tracing::warn!(
-            "⚠️  OPEN ARTIFACT UPLOAD IS ENABLED (POST /artifacts) — DEV/DEMO ONLY. This is \
-             arbitrary-blob storage; do NOT expose it publicly until the MUST-FIX checklist is \
-             met (auth, per-upload size cap, rate limiting, content/abuse controls, quota — \
-             see crates/tangram-host/README.md). Uploads are validated as wasm components and \
-             {}.",
-            if auth_token.is_some() {
-                "require the bearer token"
-            } else {
-                "are UNAUTHENTICATED (loopback-only bind)"
-            }
-        );
+        if auth_token.is_none() {
+            // M1 (#29): the upload route ALWAYS requires the bearer. With no
+            // token configured there is no credential that can authorize an
+            // upload, so POST /artifacts will refuse every request (401) —
+            // enabling it without a token is inert. Say so loudly.
+            tracing::warn!(
+                "⚠️  [artifacts] upload_enabled = true but TANGRAM_AUTH_TOKEN is not set — \
+                 POST /artifacts requires the bearer token (M1, #29) and will refuse EVERY \
+                 upload with 401. Set the token to actually allow uploads."
+            );
+        } else {
+            tracing::warn!(
+                "⚠️  ARTIFACT UPLOAD IS ENABLED (POST /artifacts) — DEV/DEMO ONLY. This is \
+                 arbitrary-blob storage; do NOT expose it publicly until the MUST-FIX checklist \
+                 is met (per-upload size cap, rate limiting, content/abuse controls, quota — \
+                 see crates/tangram-host/README.md). Uploads are validated as wasm components \
+                 and require the bearer token."
+            );
+        }
     }
 
     // The MCP gateway (RUNTIME_PLAN D3): with `[gateway] enabled = true` and

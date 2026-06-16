@@ -697,6 +697,41 @@ pub fn validate_sha256(digest: &str) -> anyhow::Result<String> {
     Ok(digest)
 }
 
+/// M3 (issue #29): enforce HTTPS on `component_url`. An artifact URL fetches
+/// EXECUTABLE bytes off the network; plaintext `http://` lets a passive
+/// attacker learn what is installed and force-fail installs (the sha pin
+/// defeats tampering, not confidentiality/availability). Require `https://`,
+/// with a single narrow exception: `http://` to a LOOPBACK host
+/// (`127.0.0.1`, `[::1]`, `localhost`) is allowed for the self-hosted /
+/// dev / test posture (a local artifact server has no wire to sniff). Every
+/// other scheme is rejected.
+pub(crate) fn component_url_scheme_ok(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        // Authority ends at the first `/`, `?`, or `#`; strip any userinfo and
+        // a `:port` suffix to get the bare host.
+        let authority = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .rsplit('@')
+            .next()
+            .unwrap_or("");
+        let host = match authority.strip_prefix('[') {
+            // Bracketed IPv6 literal: take everything up to the closing `]`.
+            Some(after) => after.split(']').next().unwrap_or(""),
+            None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+        };
+        return matches!(host, "127.0.0.1" | "::1" | "localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+    }
+    false
+}
+
 impl AppSpec {
     /// Validate and classify the spec's component source: exactly one of
     /// `component` (local path) and `component_url` (+ a well-formed
@@ -718,8 +753,9 @@ impl AppSpec {
             }
             (None, Some(url)) => {
                 anyhow::ensure!(
-                    url.starts_with("https://") || url.starts_with("http://"),
-                    "component_url must be http(s), got {url:?}"
+                    component_url_scheme_ok(url),
+                    "component_url must be https:// (plaintext http:// is only \
+                     allowed to a loopback host for local dev/testing), got {url:?}"
                 );
                 let digest = self.component_sha256.as_deref().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1686,11 +1722,37 @@ mod tests {
                     "[apps.a]\ncomponent_url = \"ftp://x.test/a.wasm\"\n\
                      component_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
                 ),
-                "http(s)",
+                "https://",
+            ),
+            // M3 (#29): plaintext http:// to a NON-loopback host is rejected.
+            (
+                format!(
+                    "[apps.a]\ncomponent_url = \"http://x.test/a.wasm\"\n\
+                     component_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
+                ),
+                "https://",
             ),
         ] {
             let err = HostConfig::parse(&toml).unwrap_err();
             assert!(format!("{err:#}").contains(needle), "{toml}: {err:#}");
+        }
+
+        // M3 (#29): plaintext http:// to a LOOPBACK host is allowed (the
+        // self-hosted / dev / test posture — no wire to sniff).
+        for url in [
+            "http://127.0.0.1:8080/a.wasm",
+            "http://localhost:9000/a.wasm",
+            "http://[::1]:8080/a.wasm",
+        ] {
+            let config = HostConfig::parse(&format!(
+                "[apps.a]\ncomponent_url = \"{url}\"\n\
+                 component_sha256 = \"{GOOD_SHA}\"\nui = \"u\""
+            ))
+            .unwrap_or_else(|e| panic!("loopback http should parse ({url}): {e:#}"));
+            assert!(matches!(
+                config.apps["a"].component_source().unwrap(),
+                ComponentSource::Url { .. }
+            ));
         }
 
         // Tenant apps get the same validation.

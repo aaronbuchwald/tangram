@@ -106,6 +106,38 @@ pub struct InjectGrant {
     secret: String,
 }
 
+/// M3 (issue #29): enforce HTTPS on a listing's `component_url`. Require
+/// `https://`, with the same narrow loopback exception the host installer
+/// uses (`tangram-host::config::component_url_scheme_ok`): `http://` to a
+/// loopback host (`127.0.0.1`/`[::1]`/`localhost`/any loopback IP) is allowed
+/// for local dev/testing; every other scheme is rejected. Kept dependency-free
+/// so it stays wasm-clean.
+fn component_url_scheme_ok(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    // Authority ends at the first `/`, `?`, or `#`; strip userinfo and `:port`.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        // Bracketed IPv6 literal: everything up to the closing `]`.
+        Some(after) => after.split(']').next().unwrap_or(""),
+        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    };
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 fn validate_sha256(digest: &str) -> Result<(), String> {
     let digest = digest.trim();
     if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -165,9 +197,20 @@ impl Marketplace {
         import_audit: String,
     ) -> Result<(), String> {
         validate_name(&name)?;
-        if !component_url.starts_with("https://") && !component_url.starts_with("http://") {
+        // M3 (issue #29): a catalog listing pins an EXECUTABLE artifact that
+        // every install fetches off the network — plaintext `http://` lets a
+        // passive attacker learn what is installed and force-fail installs
+        // (the sha pin defeats tampering, not confidentiality/availability).
+        // Require `https://`, with one narrow exception that matches the host
+        // installer (`tangram-host` `component_url_scheme_ok`): `http://` to a
+        // LOOPBACK host (`127.0.0.1`/`[::1]`/`localhost`) is allowed for local
+        // dev/testing (a local artifact server has no wire to sniff). Every
+        // other scheme is rejected outright.
+        if !component_url_scheme_ok(&component_url) {
             return Err(format!(
-                "component_url must be http(s), got {component_url:?}"
+                "component_url must be https:// (plaintext http:// is only \
+                 allowed to a loopback host for local dev/testing; other schemes \
+                 are rejected), got {component_url:?}"
             ));
         }
         validate_sha256(&component_sha256)?;
@@ -470,6 +513,32 @@ mod tests {
         };
         assert!(add(&mut market, "bad name", "https://x.test/a.wasm", &sha, "1").is_err());
         assert!(add(&mut market, "x", "ftp://x.test/a.wasm", &sha, "1").is_err());
+        // M3 (#29): plaintext http:// to a NON-loopback host is rejected;
+        // https:// is accepted; http:// to a loopback host is allowed (local
+        // dev/test — no wire to sniff), matching the host installer.
+        assert!(
+            add(&mut market, "x", "http://x.test/a.wasm", &sha, "1").is_err(),
+            "plaintext http:// to a remote host must be rejected (M3)"
+        );
+        assert!(
+            add(&mut market, "x", "ws://x.test/a.wasm", &sha, "1").is_err(),
+            "non-http(s) schemes must be rejected (M3)"
+        );
+        assert!(
+            add(&mut market, "ok", "https://x.test/a.wasm", &sha, "1").is_ok(),
+            "https:// component_url must be accepted (M3)"
+        );
+        assert!(
+            add(
+                &mut market,
+                "loop",
+                "http://127.0.0.1:9000/a.wasm",
+                &sha,
+                "1"
+            )
+            .is_ok(),
+            "loopback http:// is allowed for local dev/test (M3)"
+        );
         assert!(add(&mut market, "x", "https://x.test/a.wasm", "feed", "1").is_err());
         assert!(add(&mut market, "x", "https://x.test/a.wasm", &sha, " ").is_err());
         let mut bad_caps = caps.clone();

@@ -29,19 +29,30 @@ audit).
 
 ### MUST-FIX list (before any public / untrusted marketplace exposure), severity-ranked
 
+> **Remediation status (issue #29 — branch `fix/marketplace-security`).** The two
+> public-exposure blockers in the marketplace's own scope — **M1** (auth the
+> artifact upload) and **M3** (enforce HTTPS on `component_url`) — are FIXED on
+> this branch and verified by tests (see the per-finding ✅ notes below). **M2,
+> M4, M5, M6 are NOT addressed here** — they are host-runtime hardening
+> (Wasmtime limits, the closed-world `wasi:filesystem` whitelist, the call-grain
+> verification arm, cache-dir perms) tracked as the separate public-marketplace
+> hardening epic in "Cross-cutting recommendations" below, and none is a defect
+> for the documented self-hosted / loopback posture.
+
 | # | Severity | Finding | Seam |
 |---|----------|---------|------|
-| M1 | **High** | `POST /artifacts` open upload has NO upload-time import audit, NO streaming size cap (buffers whole body), NO per-principal rate limit, NO storage quota, NO GC/blocklist. Default-off + startup gate mitigate, but it is arbitrary-blob storage when on. | E / A |
-| M2 | **High** | Wasmtime resource limits UNSET in `runtime.rs`: no fuel, no `StoreLimits` (memory/table/instance caps), no epoch interruption. A malicious/buggy component can OOM or spin the host (DoS). | E |
-| M3 | **Medium-High** | `component_url` accepts plaintext `http://` (HTTPS not enforced). The sha-256 pin defeats content tampering, but a passive network attacker learns which artifact is installed and can force-fail installs (availability). For a public marketplace, plaintext fetch of executable artifacts is unacceptable. | A |
+| M1 | **High** | ✅ **FIXED (auth arm).** `POST /artifacts` now ALWAYS requires the bearer (`TANGRAM_AUTH_TOKEN`); a host with no token refuses every upload with 401 — anonymous upload is gone (`routes.rs::upload_artifact`). The remaining hardening (upload-time import audit, streaming size cap, per-principal rate limit, storage quota, GC/blocklist) is NOT in scope for this fix and stays in the hardening epic; the route remains default-off + startup-gated. | E / A |
+| M2 | **High** | Wasmtime resource limits UNSET in `runtime.rs`: no fuel, no `StoreLimits` (memory/table/instance caps), no epoch interruption. A malicious/buggy component can OOM or spin the host (DoS). **NOT addressed in #29** (host-runtime hardening epic). | E |
+| M3 | **Medium-High** | ✅ **FIXED.** `component_url` now requires `https://` at both validation boundaries — the marketplace listing (`apps/marketplace/src/lib.rs::add_listing` → `component_url_scheme_ok`) and the host installer (`tangram-host` `config.rs::component_url_scheme_ok`). Plaintext `http://` is rejected for every non-loopback host; the only exception is `http://` to a LOOPBACK host (`127.0.0.1`/`[::1]`/`localhost`/any loopback IP) for the self-hosted / dev / test posture, where there is no wire to sniff. All other schemes are rejected. | A |
 | M4 | **Medium** | Closed-world import audit whitelists `wasi:filesystem/` (`verify.rs:56`). A component importing `wasi:filesystem` is NOT flagged as foreign, contradicting the documented invariant and the marketplace's displayed "no filesystem" claim. Not currently exploitable (empty WASI ctx grants no preopens), but it is a defense-in-depth + honesty gap that becomes load-bearing the moment any preopen is ever added. | E / A |
 | M5 | **Medium** | Manifest verification's **calls arm is a no-op** on the live converge path: `granted.calls` is hard-coded empty (`config.rs:970`), and `NetworkClaim::Calls` is never produced by a registry/marketplace install. Host-grained subset is enforced; call-grained is not. Also: a marketplace listing's `CapabilityManifest` / `import_audit` string is NEVER mechanically checked against the real component imports at any install/converge path — it is displayed metadata only. | E |
 | M6 | **Low-Medium** | Cache directory is created with `create_dir_all` (default umask perms, typically `0755`), not `0700`. On a shared host, world-readable component bytes + a predictable path. Low impact (artifacts are public-by-design content-addressed blobs) but worth tightening for multi-user hosts. | B |
 
-Items M1–M3 are the public-exposure blockers. M4–M5 are correctness/honesty gaps
-that matter most once untrusted *components* (not just untrusted operators) are in
-scope. None of M1–M6 is a defect for the documented **self-hosted, loopback /
-single-operator** deployment.
+Items M1–M3 are the public-exposure blockers (**M1 + M3 are now fixed on
+`fix/marketplace-security`, #29; M2 remains**). M4–M5 are correctness/honesty
+gaps that matter most once untrusted *components* (not just untrusted operators)
+are in scope. None of M1–M6 is a defect for the documented **self-hosted,
+loopback / single-operator** deployment.
 
 ### Top 3 most important findings
 
@@ -51,16 +62,18 @@ single-operator** deployment.
    sets only the compilation cache on the `Config` — no `consume_fuel`, no
    `epoch_interruption`, and `Store::new` (`runtime.rs:555`) installs no
    `ResourceLimiter`. Confirms prior finding (1).
-2. **M1 — open upload is unhardened.** The route is honestly documented as
-   dev/demo-only and is default-off with a non-loopback-without-token startup
-   refusal, but the body is buffered whole up to 64 MiB (`routes.rs:42,241`), there
-   is no per-host quota or rate limit, and crucially **no upload-time closed-world
-   import audit** — `store_artifact` validates *shape* (`Component::new`) but not
-   *imports* (`fetch.rs:111-132`). Confirms prior finding (2).
-3. **M3 — plaintext `http://` artifact fetch permitted.** `component_source()`
-   accepts `http://` (`config.rs:721`). The hash pin makes this integrity-safe but
-   not confidentiality- or availability-safe, and is the wrong default for an
-   executable-artifact pipeline meant to be public. New finding.
+2. **M1 — open upload is unhardened.** ✅ Auth arm FIXED (#29): the upload route
+   now ALWAYS requires the bearer (no anonymous upload, even on loopback). The
+   route is otherwise honestly documented as dev/demo-only and default-off, but the
+   body is still buffered whole up to 64 MiB (`routes.rs:42,241`), there is no
+   per-host quota or rate limit, and **no upload-time closed-world import audit** —
+   `store_artifact` validates *shape* (`Component::new`) but not *imports*
+   (`fetch.rs:111-132`). Those remain for the hardening epic.
+3. **M3 — plaintext `http://` artifact fetch permitted.** ✅ FIXED (#29).
+   `component_source()` (and `add_listing`) now require `https://` via
+   `component_url_scheme_ok`, with a loopback-only `http://` exception for local
+   dev/test. Plaintext fetch of executable artifacts over a sniffable wire is
+   rejected.
 
 ---
 
@@ -71,7 +84,7 @@ single-operator** deployment.
 
 | Check | Verdict | Evidence |
 |-------|---------|----------|
-| HTTPS enforced on `component_url` | ❌ gap | `config.rs:721` — `url.starts_with("https://") \|\| url.starts_with("http://")`. Plaintext is accepted. `fetch.rs:172` uses a plain `reqwest::Client::new()` (no https-only policy). **M3.** |
+| HTTPS enforced on `component_url` | ✅ FIXED (#29) | Was `config.rs:721` accepting any `http://`. Now `config::component_url_scheme_ok` requires `https://`, allowing `http://` only to a loopback host; `add_listing` applies the same rule at the catalog boundary. Plaintext fetch of an executable artifact over a sniffable wire is rejected. (`fetch.rs:172` still uses a plain `reqwest::Client::new()` — fine now that only https or loopback-http reaches it.) **M3 — done.** |
 | SHA-256 computed & checked BEFORE cache placement | ✅ holds | `fetch.rs:192-197` computes `Sha256::digest(&body)` and `ensure!(actual == sha256, …)` BEFORE the write at `204` and rename at `206`. Test `mismatched_digest_is_rejected_and_not_cached` (`fetch.rs:282`) proves nothing unverified reaches the cache. |
 | Write-then-rename atomicity (`.tmp` → final) | ✅ holds | `fetch.rs:203-207` writes `.<sha>.tmp` then `rename` to the content address. Upload path mirrors it with a distinct `.<sha>.upload` suffix to avoid racing the fetch tmp slot (`fetch.rs:128-130`). |
 | Cache immutability (write-once) | ✅ holds | `resolve` short-circuits on `path.exists()` (`fetch.rs:141`); `store_artifact` dedups on `path.exists()` (`fetch.rs:119`). A present `<sha>.wasm` is never rewritten. Content-addressing makes overwrite a no-op even if attempted. Test `fetch_verifies_caches_and_never_refetches` (`fetch.rs:256`). |
@@ -171,7 +184,7 @@ No plaintext-in-logs path was found.
 | Check | Verdict | Evidence |
 |-------|---------|----------|
 | Default-off | ✅ holds | `ArtifactsConfig.upload_enabled` defaults false (`config.rs:1163-1166`); both routes 404 when off (`routes.rs:279-281,313,331`). |
-| Auth-gated | ✅ holds (for the loopback posture) | When a token is set, upload requires the bearer (`routes.rs:286-290`); startup REFUSES a non-loopback bind with upload on and no token (`main.rs:755-763`). On loopback with no token it is intentionally anonymous (local-only). |
+| Auth-gated | ✅ FIXED (#29) | Upload now ALWAYS requires the bearer: `upload_artifact` returns 401 when no `TANGRAM_AUTH_TOKEN` is configured (no more anonymous-on-loopback) and 401 on a wrong/absent bearer otherwise (`routes.rs::upload_artifact`). Startup still REFUSES a non-loopback bind with upload on and no token, and now warns that a no-token host will 401 every upload. Test `upload_requires_a_token_even_on_loopback`. **M1 (auth arm) — done.** |
 | Size limit | ⚠️ partial | A coarse 64 MiB `DefaultBodyLimit` (`routes.rs:42,241`) — but the body is buffered WHOLE into `Bytes` (`routes.rs:277`), not streamed-and-rejected. No per-host aggregate cap. **M1.** |
 | Rate / frequency limit | ❌ gap | None on this route. **M1.** |
 | Storage quota | ❌ gap | None (see Seam B cleanup). **M1.** |
@@ -205,19 +218,23 @@ affects every component, not only uploaded/untrusted ones.
   marketplace listings carry `scheme://locator` references only
   (`secrets.rs:20-23`, `marketplace/src/lib.rs:104-106`); values resolved
   host-side at dispatch (`runtime.rs:242`).
-- [~] **No MITM (HTTPS + hash verify)** — ⚠️ PARTIAL. Hash verify is solid
-  (`fetch.rs:192-197`) and defeats tampering, but HTTPS is NOT enforced —
-  `http://` is accepted (`config.rs:721`). Integrity ✅, confidentiality/
-  availability ❌. **M3.**
+- [x] **No MITM (HTTPS + hash verify)** — ✅ FIXED (#29). Hash verify is solid
+  (`fetch.rs:192-197`) and HTTPS is now enforced at both boundaries
+  (`config::component_url_scheme_ok`, `add_listing`): `https://` required,
+  `http://` allowed only to a loopback host, all other schemes rejected.
+  Integrity ✅, confidentiality/availability ✅ (off-loopback). **M3 — done.**
 - [x] **No cache bypass** — ✅ Confirmed. Every instantiation path resolves through
   the hash-gated cache (`main.rs:504-539`); a present slot is post-verification
   only; verify-then-rename prevents a partial/wrong artifact at the address.
 - [x] **No federation desync** — ✅ Confirmed. Deterministic per-app remote
   derivation (`registry.rs:132`), clear non-portable-path fleet errors
   (`main.rs:513-525`), byte parity via the sha pin.
-- [ ] **No unvalidated upload** — ❌ GAP. Upload validates SHAPE but not imports/
-  size-streaming/rate/quota (`fetch.rs:116`, `routes.rs:42`). **M1.** (Default-off
-  + startup gate make this safe for the shipped posture, not for public exposure.)
+- [~] **No unvalidated upload** — ⚠️ PARTIAL (auth arm FIXED #29). Upload now
+  ALWAYS requires the bearer — no anonymous upload (`routes.rs::upload_artifact`,
+  **M1 auth arm done**). It still validates SHAPE but not imports/size-streaming/
+  rate/quota (`fetch.rs:116`, `routes.rs:42`) — those stay in the hardening epic.
+  Default-off + startup gate + mandatory auth make this safe for the shipped
+  posture; the remaining depth is needed before public exposure.
 - [ ] **Closed-world audit before public marketplace** — ❌ GAP. No import audit at
   fetch or upload; the install-time audit whitelists `wasi:filesystem`
   (`verify.rs:56`); listing manifests are never mechanically verified against
@@ -256,17 +273,23 @@ affects every component, not only uploaded/untrusted ones.
 
 ### Cross-cutting recommendations (for the public-marketplace hardening epic)
 
-1. **M3:** Default `component_url` to HTTPS-only; gate `http://` behind an explicit
-   `[artifacts] allow_insecure_url = true` dev flag (mirror the upload posture).
+1. ~~**M3:** Default `component_url` to HTTPS-only; gate `http://` behind an explicit
+   `[artifacts] allow_insecure_url = true` dev flag (mirror the upload posture).~~
+   ✅ DONE (#29) — implemented as HTTPS-required with a loopback-`http://`
+   exception (`component_url_scheme_ok` in both `tangram-host::config` and the
+   marketplace `add_listing`), rather than a config flag; loopback has no wire to
+   sniff so it covers the self-hosted/dev/test posture without a knob.
 2. **M2:** In `engine()`, enable `epoch_interruption` (or `consume_fuel`) and set a
    per-dispatch deadline; install a `StoreLimits` ResourceLimiter on every
    `Store::new` (memory + instance caps). Applies fleet-wide, low risk, high value.
 3. **M4:** Remove `wasi:filesystem/` from `is_known_safe_interface` so it is
    flagged `foreign` — aligns the audit with the documented invariant and the
    marketplace claim; harmless today (no preopens) and forward-safe.
-4. **M1:** Add to `store_artifact` a closed-world `AuditedImports` reject (hard, at
-   upload), a streaming size cap, a per-principal rate limit, and a per-host quota +
-   GC/delete + blocklist; stream the body rather than buffering whole.
+4. **M1:** ✅ Auth arm DONE (#29) — `POST /artifacts` always requires the bearer.
+   STILL TO DO for public exposure: add to `store_artifact` a closed-world
+   `AuditedImports` reject (hard, at upload), a streaming size cap, a per-principal
+   rate limit, and a per-host quota + GC/delete + blocklist; stream the body rather
+   than buffering whole.
 5. **M5:** Wire a marketplace `import_audit`/`CapabilityManifest` → `AuditedImports`
    mechanical check at `add_listing` (or at install in the registry), so a listing
    that lies about its imports is rejected, not merely displayed; activate the

@@ -258,8 +258,9 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
 /// and, when on, refuses a non-loopback bind without `TANGRAM_AUTH_TOKEN`
 /// (enforced at startup in `main`). The checklist that gates turning this on
 /// for a PUBLIC deployment (see `crates/tangram-host/README.md`):
-///   1. AuthN/AuthZ — behind the bearer gate (done here when a token is set);
-///      never anonymous on a non-loopback bind (done at startup).
+///   1. AuthN/AuthZ — ALWAYS behind the bearer gate (M1, #29): an upload
+///      requires `TANGRAM_AUTH_TOKEN` unconditionally, never anonymous (a host
+///      with no token refuses every upload with 401). — DONE.
 ///   2. Per-upload SIZE CAP (stream-and-reject, never buffer a whole blob)
 ///      + a per-host storage QUOTA.            — NOT YET DONE.
 ///   3. RATE / frequency limits per principal.  — NOT YET DONE.
@@ -280,12 +281,17 @@ async fn upload_artifact(
         // Off is indistinguishable from "no such route" — no capability oracle.
         return (StatusCode::NOT_FOUND, "no such app").into_response();
     }
-    // When the host has a token, the upload route requires it (the same
-    // bearer the registry's mutating routes use). Without a token the host is
-    // loopback-only (enforced at startup), so anonymous upload is local-only.
-    if let Some(token) = host.auth_token.as_deref()
-        && !auth::bearer_matches(&headers, token)
-    {
+    // M1 (issue #29): the upload route ALWAYS requires the bearer token (the
+    // same one the registry's mutating routes use). An anonymous caller can
+    // never store an artifact: with no `TANGRAM_AUTH_TOKEN` configured there
+    // is no credential that could authorize an upload, so the route refuses
+    // outright (401) rather than serving arbitrary-blob storage to anyone who
+    // can reach the bind. Previously this was anonymous on a loopback bind;
+    // that hole is closed.
+    let Some(token) = host.auth_token.as_deref() else {
+        return auth::artifact_unauthorized();
+    };
+    if !auth::bearer_matches(&headers, token) {
         return auth::artifact_unauthorized();
     }
     match host.fetcher.store_artifact(host.engine(), &body) {

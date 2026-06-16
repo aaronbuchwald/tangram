@@ -191,6 +191,59 @@ async fn upload_computes_sha_serves_and_installs_and_rejects_garbage() {
     drop(host);
 }
 
+/// M1 (#29): the upload route ALWAYS requires the bearer token. A host with
+/// upload enabled but NO `TANGRAM_AUTH_TOKEN` configured must refuse every
+/// upload with 401 — never anonymous, even on a loopback bind. (Previously a
+/// no-token loopback host accepted anonymous uploads.)
+#[tokio::test]
+async fn upload_requires_a_token_even_on_loopback() {
+    if !component("registry").exists() {
+        eprintln!("SKIPPING artifact_upload no-token: registry.wasm missing");
+        return;
+    }
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let apps_toml = write_apps_toml(home, true);
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    // Loopback bind, upload enabled, NO token.
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log, false);
+    let client = reqwest::Client::new();
+
+    wait_for("registry healthz", Duration::from_secs(120), || async {
+        status_of(&client, &format!("{base}/registry/healthz")).await
+            == Some(reqwest::StatusCode::OK)
+    })
+    .await;
+
+    // A well-formed wasm-component upload, no Authorization header → 401.
+    let registry_bytes = std::fs::read(component("registry")).expect("read registry.wasm");
+    let res = client
+        .post(format!("{base}/artifacts"))
+        .header("Content-Type", "application/wasm")
+        .body(registry_bytes.clone())
+        .send()
+        .await
+        .expect("anonymous upload");
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "upload must require a token even on loopback when none is configured (M1)"
+    );
+
+    // Even presenting *some* bearer cannot help — there is no token to match.
+    let res = client
+        .post(format!("{base}/artifacts"))
+        .bearer_auth("anything")
+        .header("Content-Type", "application/wasm")
+        .body(registry_bytes)
+        .send()
+        .await
+        .expect("bearer upload to no-token host");
+    assert_eq!(res.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn default_off_blocks_the_upload_route() {
     if !component("registry").exists() {
