@@ -96,8 +96,25 @@
 
     .status { margin-top: 14px; font-size: 13px; min-height: 20px; }
     .status.err { color: var(--red); }
-    .status.ok { color: var(--green); }
-    .status a { color: var(--green); }
+
+    /* Success feedback: a small toast that fades in top-right, then out. */
+    .toast {
+      position: fixed; top: 20px; right: 20px; z-index: 1000;
+      display: flex; align-items: center; gap: 8px;
+      background: var(--panel); border: 1px solid var(--green);
+      border-radius: 10px; padding: 10px 14px; color: var(--text);
+      font-size: 13px; font-weight: 600;
+      box-shadow: 0 6px 24px rgba(0,0,0,.45);
+      opacity: 0; transform: translateY(-6px);
+      transition: opacity .25s ease, transform .25s ease;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast .check {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--green); color: #04220f; font-size: 12px; font-weight: 800;
+    }
 
     /* history */
     .history { margin-top: 32px; }
@@ -151,7 +168,7 @@
       </div>
 
       <div class="actions">
-        <button type="button" class="primary" id="submit">Submit issue</button>
+        <button type="button" class="primary" id="submit">Submit Issue</button>
         <span class="micro" id="hint">Title required</span>
       </div>
       <div class="status" id="status"></div>
@@ -161,6 +178,11 @@
       <h2>Submitted</h2>
       <div id="list"><div class="empty">No issues filed from here yet.</div></div>
     </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span class="check">✓</span>
+    <span>Submitted</span>
   </div>
 
   <script>
@@ -181,13 +203,27 @@
         const msg = (data && (data.error || data.message)) || text || res.statusText;
         throw new Error(msg);
       }
-      return data;
+      // The SDK wraps every action result in a `{ "result": <value> }`
+      // envelope (native web, tangram-host, and the Cloudflare relay all do).
+      // Unwrap it so callers get the action's actual return value — otherwise
+      // a String return renders as "[object Object]" and an array return has
+      // no `.length`.
+      return data && typeof data === "object" && "result" in data ? data.result : data;
     }
 
     function setStatus(msg, cls) {
       const el = $("status");
       el.className = "status" + (cls ? " " + cls : "");
       el.innerHTML = msg;
+    }
+
+    // Small fading success toast in the top-right corner.
+    let toastTimer = null;
+    function showToast() {
+      const el = $("toast");
+      el.classList.add("show");
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove("show"), 3000);
     }
 
     function showPreview(dataUrl, name) {
@@ -241,12 +277,15 @@
       if (!title) { setStatus("Add a title first.", "err"); return; }
       const btn = $("submit");
       btn.disabled = true;
-      setStatus("Filing the issue…");
+      setStatus("");
       try {
         const args = { title, body };
         if (imageDataUrl) args.image_data_url = imageDataUrl;
-        const url = await callAction("create_issue", args);
-        setStatus(`Filed · <a href="${url}" target="_blank" rel="noopener">${url}</a>`, "ok");
+        // `create_issue` returns the new issue's html_url (a string); the
+        // toast is the success feedback, the new issue shows in the history
+        // list below with a working link.
+        await callAction("create_issue", args);
+        showToast();
         $("title").value = "";
         $("body").value = "";
         clearPreview();
