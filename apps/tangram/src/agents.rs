@@ -38,6 +38,14 @@ pub struct AgentDef {
     pub model: String,
     /// The note body after the closing `---` — the system prompt / task.
     pub instructions: String,
+    /// The MCP servers (apps, e.g. `nutrition`, `notes`) this definition
+    /// REQUESTS access to (Tools/MCP T1). This is a *request*, not a grant —
+    /// the user approves it (see the `mcp_grants` state + `approve_mcp` action
+    /// in `lib.rs`). **Only `kind: agent` declares this; on `kind: skill` the
+    /// `mcp_servers:` frontmatter is parsed-and-ignored** (skills do not get
+    /// the tools plane in this slice). Canonicalized (trimmed, lowercased,
+    /// de-duplicated, sorted) so the same set always hashes identically.
+    pub mcp_servers: Vec<String>,
 }
 
 /// A parsed ```` ```agent ```` invocation block: a durable instance inside a
@@ -147,12 +155,88 @@ pub fn parse_agent(body: &str) -> Option<AgentDef> {
         .to_string();
     let instructions = lines[close + 1..].join("\n").trim().to_string();
 
+    // Tools/MCP T1: only `kind: agent` declares an `mcp_servers:` request; a
+    // skill's value (if any) is parsed-and-ignored. Canonicalize so the request
+    // hashes identically regardless of source order/case/whitespace/dupes.
+    let mcp_servers = if kind == "agent" {
+        canonical_servers(parse_inline_array(
+            fm.get("mcp_servers").unwrap_or_default(),
+        ))
+    } else {
+        Vec::new()
+    };
+
     Some(AgentDef {
         kind,
         name,
         model,
         instructions,
+        mcp_servers,
     })
+}
+
+/// Parse an inline `[a, b, c]` YAML array value into its elements (unquoted,
+/// trimmed). A non-array scalar is treated as a single-element list; an empty
+/// or missing value yields no elements. Intentionally minimal (mirrors the
+/// frontmatter parser's altitude + the UI's `parseInlineArray`).
+fn parse_inline_array(value: &str) -> Vec<String> {
+    let s = value.trim();
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let inner = if let Some(stripped) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        stripped
+    } else {
+        // A bare scalar `mcp_servers: nutrition` is one element.
+        s
+    };
+    inner
+        .split(',')
+        .map(|p| unquote(p.trim()).trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Strip one layer of matching quotes from a scalar, if present.
+fn unquote(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let q = bytes[0];
+        if (q == b'"' || q == b'\'') && bytes[bytes.len() - 1] == q {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Canonicalize a list of requested MCP server names: trim, lowercase,
+/// de-duplicate, and sort. Canonicalization is what makes the request HASH
+/// (see [`mcp_request_hash`]) stable: `[Nutrition, notes]` and `[notes,
+/// nutrition]` are the same request and must approve/stale identically.
+#[must_use]
+pub fn canonical_servers(servers: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = servers
+        .into_iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A stable hash of a (canonical) requested-server set: a hex 64-bit FNV-1a
+/// over the canonical servers joined by NUL. Mirrors `mcpRequestHash` in
+/// `apps/tangram/ui/src/agents.ts` EXACTLY (same canonicalization, same NUL
+/// separator, same FNV-1a constants, same 16-hex output) so the UI and the
+/// component agree on the hash the user's approval binds to. The grant records
+/// this hash; if the definition later changes `mcp_servers` the hash no longer
+/// matches and the grant goes STALE → pending re-approval (the auto-todo
+/// plan-hash-bound-approval precedent).
+#[must_use]
+pub fn mcp_request_hash(servers: &[String]) -> String {
+    let canon = canonical_servers(servers.to_vec());
+    fnv1a_hex(&canon.join("\0"))
 }
 
 /// Parse the frontmatter block (lines between the fences) into a flat
@@ -654,6 +738,51 @@ mod tests {
             def.instructions,
             "Write a one-line status note for the team."
         );
+    }
+
+    #[test]
+    fn agent_declares_mcp_servers_canonicalized() {
+        // Only `kind: agent` reads `mcp_servers:`; the set is canonicalized
+        // (trim/lowercase/dedupe/sort) so source order/case never matters.
+        let body = "---\nkind: agent\nname: planner\n\
+                    mcp_servers: [Nutrition, notes, nutrition]\n---\nPlan it.";
+        let def = parse_agent(body).unwrap();
+        assert_eq!(def.mcp_servers, vec!["notes", "nutrition"]);
+    }
+
+    #[test]
+    fn skill_ignores_mcp_servers() {
+        // `kind: skill` parses-and-ignores `mcp_servers:` (no tools plane in T1).
+        let body = "---\nkind: skill\nname: summarize\n\
+                    mcp_servers: [nutrition, notes]\n---\nSummarize.";
+        let def = parse_agent(body).unwrap();
+        assert!(def.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn agent_without_mcp_servers_requests_nothing() {
+        let body = "---\nkind: agent\nname: plain\n---\nDo it.";
+        assert!(parse_agent(body).unwrap().mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn bare_scalar_mcp_servers_is_one_element() {
+        let body = "---\nkind: agent\nname: x\nmcp_servers: nutrition\n---\nb";
+        assert_eq!(parse_agent(body).unwrap().mcp_servers, vec!["nutrition"]);
+    }
+
+    #[test]
+    fn mcp_request_hash_is_order_insensitive_and_set_sensitive() {
+        // Same set, different source order/case ⇒ same hash.
+        let a = mcp_request_hash(&["nutrition".into(), "notes".into()]);
+        let b = mcp_request_hash(&["NOTES".into(), "Nutrition".into()]);
+        assert_eq!(a, b, "canonicalized set ⇒ same hash");
+        // Adding a server ⇒ a different hash (the request changed → would stale).
+        let c = mcp_request_hash(&["notes".into(), "nutrition".into(), "shell".into()]);
+        assert_ne!(a, c);
+        // The empty request hashes too (distinct, stable).
+        assert_eq!(mcp_request_hash(&[]), mcp_request_hash(&[]));
+        assert_ne!(mcp_request_hash(&[]), a);
     }
 
     #[test]

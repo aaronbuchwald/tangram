@@ -39,6 +39,16 @@ pub struct Vault {
     /// empty default).
     #[autosurgeon(missing = "Option::default")]
     agent_runs: Option<Vec<AgentRun>>,
+    /// Tools/MCP T1: the replicated record of the user's decision on each
+    /// `kind: agent` definition's `mcp_servers:` access REQUEST. The request is
+    /// the declaration (the def's `mcp_servers`); this records the user's grant
+    /// against a HASH of the requested set, so if the def later changes its
+    /// requested servers the grant goes stale → pending re-approval (the
+    /// auto-todo plan-hash-bound-approval precedent). A deterministic `Vec`
+    /// (not a `HashMap`), keyed by the def's `name`. Absent on documents written
+    /// by older binaries (the `missing` attribute hydrates the empty default).
+    #[autosurgeon(missing = "Option::default")]
+    mcp_grants: Option<Vec<McpGrant>>,
 }
 
 /// One invocation's last-run timestamp (the cron due-check reads this;
@@ -49,6 +59,63 @@ pub struct AgentRun {
     invocation_id: String,
     /// Wall-clock ms of the last run that completed.
     last_run_ms: i64,
+}
+
+/// The user's decision on one `kind: agent` definition's MCP-access request
+/// (Tools/MCP T1). The REQUEST is the definition's `mcp_servers:` declaration;
+/// this records the user's grant against a HASH of that requested set
+/// (`requested_hash`), so a later edit to the def's `mcp_servers` changes the
+/// hash and renders the grant STALE → pending re-approval. T1 is the
+/// access-control layer only — NO tool-calling loop and NO agentgateway curated
+/// route read this yet (that is T2; enforcement lands with the tool loop).
+#[model]
+pub struct McpGrant {
+    /// The definition's `name` this grant is for (case as stored; matched
+    /// case-insensitively against the live defs).
+    agent: String,
+    /// The canonical requested-server set at the time of the decision (the
+    /// def's `mcp_servers`, canonicalized).
+    requested: Vec<String>,
+    /// The hash of the requested set this decision binds to
+    /// (`agents::mcp_request_hash`). The staleness check compares this against
+    /// the live def's request hash.
+    requested_hash: String,
+    /// The servers actually approved (== `requested` on approval; empty on a
+    /// pending/denied/revoked grant).
+    approved: Vec<String>,
+    /// `"pending"` | `"approved"` | `"denied"`. A `"revoked"` decision is
+    /// modeled as `"denied"` with an empty `approved` set (so the UI offers
+    /// re-approval), keeping the status set small and deterministic.
+    status: String,
+    /// Wall-clock ms of the last decision.
+    updated_at_ms: i64,
+}
+
+/// Grant status values (string-typed in the model for forward-compatibility and
+/// trivial JSON shape; these are the only values written).
+const STATUS_PENDING: &str = "pending";
+const STATUS_APPROVED: &str = "approved";
+const STATUS_DENIED: &str = "denied";
+
+/// The effective MCP status of one agent, computed from the live def's request
+/// and the recorded grant (the [`Vault::mcp_status`] read returns these). This
+/// is what the Agents-view approval UI renders.
+#[model]
+pub struct McpStatus {
+    /// The agent definition's name.
+    agent: String,
+    /// The canonical servers this agent currently REQUESTS (the live def's
+    /// `mcp_servers`).
+    requested: Vec<String>,
+    /// The hash of the current request (what `approve_mcp` must be called with).
+    requested_hash: String,
+    /// The servers currently APPROVED (empty unless `status == "approved"`).
+    approved: Vec<String>,
+    /// One of `"pending"` | `"approved"` | `"denied"` | `"stale"`. `"stale"`
+    /// means a grant exists but the def's request changed since the decision —
+    /// treated by the UI exactly like `"pending"` (re-approval required), but
+    /// surfaced distinctly so the user sees the request moved.
+    status: String,
 }
 
 /// `Default` is the shared genesis commit, so it must be DETERMINISTIC and
@@ -66,6 +133,7 @@ impl Default for Vault {
                 updated_at_ms: None,
             }],
             agent_runs: Some(Vec::new()),
+            mcp_grants: Some(Vec::new()),
         }
     }
 }
@@ -329,9 +397,174 @@ impl Vault {
         .map_err(|e| e.to_string())?;
         Ok(output)
     }
+
+    // ── Tools/MCP T1: per-agent MCP access requests + user approval ───────────
+    //
+    // The REQUEST is the `kind: agent` definition's `mcp_servers:` declaration;
+    // these actions record the USER's decision against a hash of the requested
+    // set. They are user-approval gates (mirroring how auto-todo gates its
+    // risk-bearing transitions); `require_auth` in apps.toml decides whether
+    // they need a bearer like the other mutating actions.
+
+    /// The effective MCP status of every `kind: agent` definition in the vault
+    /// that requests servers, derived from the live defs + the recorded grants:
+    /// `pending` (requested, no decision), `approved [servers]`, `denied`, or
+    /// `stale` (a decision exists but the def's request changed since — the UI
+    /// treats `stale` like `pending`). The UI renders the approval affordance
+    /// from this. Agents that request no servers are omitted.
+    pub fn mcp_status(&self) -> Vec<McpStatus> {
+        let mut out: Vec<McpStatus> = Vec::new();
+        // Index defs by name (first wins, matching the UI index); only agents
+        // that actually request servers are surfaced.
+        let mut seen: Vec<String> = Vec::new();
+        for file in &self.files {
+            let Some(def) = agents::parse_agent(&file.body) else {
+                continue;
+            };
+            if def.kind != "agent" || def.mcp_servers.is_empty() {
+                continue;
+            }
+            let key = def.name.to_ascii_lowercase();
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+
+            let requested_hash = agents::mcp_request_hash(&def.mcp_servers);
+            let (status, approved) = match self.grant_for(&def.name) {
+                None => (STATUS_PENDING.to_string(), Vec::new()),
+                Some(g) if g.requested_hash != requested_hash => {
+                    // The def's request changed since the decision → stale,
+                    // re-approval required (auto-todo plan-hash precedent).
+                    ("stale".to_string(), Vec::new())
+                }
+                Some(g) if g.status == STATUS_APPROVED => {
+                    (STATUS_APPROVED.to_string(), g.approved.clone())
+                }
+                Some(g) if g.status == STATUS_DENIED => (STATUS_DENIED.to_string(), Vec::new()),
+                // Any other (pending) recorded grant on the current hash.
+                Some(_) => (STATUS_PENDING.to_string(), Vec::new()),
+            };
+            out.push(McpStatus {
+                agent: def.name,
+                requested: def.mcp_servers,
+                requested_hash,
+                approved,
+                status,
+            });
+        }
+        out.sort_by(|a, b| {
+            a.agent
+                .to_ascii_lowercase()
+                .cmp(&b.agent.to_ascii_lowercase())
+        });
+        out
+    }
+
+    /// Approve an agent's current MCP-server request (the user grant). Binds to
+    /// `requested_hash`: only succeeds when it matches the agent's CURRENT
+    /// request (guards approving a STALE set the user did not see). Sets the
+    /// grant to `approved` with `approved == requested`. Errors if the agent
+    /// has no MCP request, or the hash is stale.
+    pub fn approve_mcp(&mut self, agent: String, requested_hash: String) -> Result<(), String> {
+        let requested = self.live_request(&agent)?;
+        let current = agents::mcp_request_hash(&requested);
+        if current != requested_hash {
+            return Err(format!(
+                "stale request: {agent}'s requested MCP servers changed since you saw them \
+                 (approving {requested_hash}, current is {current}); re-review and approve again"
+            ));
+        }
+        self.upsert_grant(
+            &agent,
+            &requested,
+            &current,
+            STATUS_APPROVED,
+            requested.clone(),
+        );
+        Ok(())
+    }
+
+    /// Deny an agent's MCP-server request. Records a `denied` decision bound to
+    /// the current request hash (a later edit to the request re-opens it as
+    /// stale/pending). Errors if the agent has no MCP request.
+    pub fn deny_mcp(&mut self, agent: String) -> Result<(), String> {
+        let requested = self.live_request(&agent)?;
+        let hash = agents::mcp_request_hash(&requested);
+        self.upsert_grant(&agent, &requested, &hash, STATUS_DENIED, Vec::new());
+        Ok(())
+    }
+
+    /// Revoke a previously-approved (or any) MCP grant for an agent: modeled as
+    /// a `denied` decision with an empty approved set, so the UI offers
+    /// re-approval. Errors if the agent has no MCP request.
+    pub fn revoke_mcp(&mut self, agent: String) -> Result<(), String> {
+        self.deny_mcp(agent)
+    }
 }
 
 impl Vault {
+    /// The recorded grant for `agent` (case-insensitive on the name), if any.
+    fn grant_for(&self, agent: &str) -> Option<&McpGrant> {
+        let needle = agent.trim().to_ascii_lowercase();
+        self.mcp_grants
+            .as_ref()?
+            .iter()
+            .find(|g| g.agent.to_ascii_lowercase() == needle)
+    }
+
+    /// The live (canonical) MCP-server request for the `kind: agent` definition
+    /// named `agent`. Errors if there is no such agent OR it requests nothing
+    /// (the decision actions are meaningless without a request).
+    fn live_request(&self, agent: &str) -> Result<Vec<String>, String> {
+        let needle = agent.trim().to_ascii_lowercase();
+        let def = self
+            .files
+            .iter()
+            .filter_map(|f| agents::parse_agent(&f.body))
+            .find(|d| d.kind == "agent" && d.name.to_ascii_lowercase() == needle)
+            .ok_or_else(|| format!("no agent named {agent:?} in the vault"))?;
+        if def.mcp_servers.is_empty() {
+            return Err(format!("agent {agent:?} does not request any MCP servers"));
+        }
+        Ok(def.mcp_servers)
+    }
+
+    /// Upsert the grant for `agent` (keyed by name, case-insensitively),
+    /// recording the decision against `hash`. The replicated `mcp_grants` is a
+    /// deterministic `Vec` (not a `HashMap`).
+    fn upsert_grant(
+        &mut self,
+        agent: &str,
+        requested: &[String],
+        hash: &str,
+        status: &str,
+        approved: Vec<String>,
+    ) {
+        let grants = self.mcp_grants.get_or_insert_with(Vec::new);
+        let needle = agent.trim().to_ascii_lowercase();
+        let now = now_ms();
+        if let Some(g) = grants
+            .iter_mut()
+            .find(|g| g.agent.to_ascii_lowercase() == needle)
+        {
+            g.requested = requested.to_vec();
+            g.requested_hash = hash.to_string();
+            g.status = status.to_string();
+            g.approved = approved;
+            g.updated_at_ms = now;
+        } else {
+            grants.push(McpGrant {
+                agent: agent.to_string(),
+                requested: requested.to_vec(),
+                requested_hash: hash.to_string(),
+                approved,
+                status: status.to_string(),
+                updated_at_ms: now,
+            });
+        }
+    }
+
     /// The recorded last-run wall-clock for the invocation `id`, if any (the
     /// cron due-check reads this).
     fn last_run_ms(&self, id: &str) -> Option<i64> {
@@ -545,6 +778,7 @@ mod tests {
         Vault {
             files: Vec::new(),
             agent_runs: Some(Vec::new()),
+            mcp_grants: Some(Vec::new()),
         }
     }
 
@@ -628,6 +862,7 @@ mod tests {
             name: "standup".into(),
             model: "deepseek-chat".into(),
             instructions: "Write a status.".into(),
+            mcp_servers: Vec::new(),
         };
         assert_eq!(v.last_run_ms(&inv.invocation_id), None);
         v.append_invocation_output(&inv, &def, "all good", 1_234);
@@ -648,6 +883,127 @@ mod tests {
         let a = agents::invocation_id("f", "x", "cron @hourly", "p");
         let b = agents::invocation_id("f", "x", "cron @daily", "p");
         assert_ne!(a, b);
+    }
+
+    // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────
+
+    /// Seed a vault with one `kind: agent` def requesting `servers`.
+    fn vault_with_agent(name: &str, servers: &[&str]) -> Vault {
+        let mut v = empty();
+        let list = servers.join(", ");
+        let body = format!("---\nkind: agent\nname: {name}\nmcp_servers: [{list}]\n---\nDo it.");
+        v.create_file(format!("agents/{name}.md"), body).unwrap();
+        v
+    }
+
+    #[test]
+    fn request_starts_pending_then_approves_binding_to_hash() {
+        let mut v = vault_with_agent("planner", &["nutrition", "notes"]);
+        // A declared-but-undecided request is pending.
+        let st = v.mcp_status();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].agent, "planner");
+        assert_eq!(st[0].status, "pending");
+        assert_eq!(st[0].requested, vec!["notes", "nutrition"]); // canonicalized
+        assert!(st[0].approved.is_empty());
+
+        // Approve with the current hash → approved, approved == requested.
+        let hash = st[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+        let st = v.mcp_status();
+        assert_eq!(st[0].status, "approved");
+        assert_eq!(st[0].approved, vec!["notes", "nutrition"]);
+    }
+
+    #[test]
+    fn approve_rejects_a_stale_hash() {
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        // A hash the user never saw (some other request) must be refused.
+        let wrong = agents::mcp_request_hash(&["something-else".into()]);
+        let err = v.approve_mcp("planner".into(), wrong).unwrap_err();
+        assert!(err.contains("stale request"), "got: {err}");
+        // Nothing was recorded — still pending.
+        assert_eq!(v.mcp_status()[0].status, "pending");
+    }
+
+    #[test]
+    fn editing_the_request_invalidates_an_approval_to_stale() {
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        let hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+        assert_eq!(v.mcp_status()[0].status, "approved");
+
+        // Edit the def to request MORE servers → the recorded grant's hash no
+        // longer matches the live request → stale (re-approval required).
+        let file = v
+            .files
+            .iter()
+            .find(|f| f.path == "agents/planner.md")
+            .unwrap()
+            .clone();
+        let edited = file.body.replace(
+            "mcp_servers: [nutrition]",
+            "mcp_servers: [nutrition, notes]",
+        );
+        v.write_file(file.id, edited).unwrap();
+        let st = v.mcp_status();
+        assert_eq!(st[0].status, "stale");
+        assert!(
+            st[0].approved.is_empty(),
+            "stale clears the effective grant"
+        );
+
+        // Approving the NEW hash re-grants.
+        let new_hash = st[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), new_hash).unwrap();
+        let st = v.mcp_status();
+        assert_eq!(st[0].status, "approved");
+        assert_eq!(st[0].approved, vec!["notes", "nutrition"]);
+    }
+
+    #[test]
+    fn deny_then_reapprove_and_revoke() {
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        v.deny_mcp("planner".into()).unwrap();
+        assert_eq!(v.mcp_status()[0].status, "denied");
+
+        // Reconsider: approve the (unchanged) request.
+        let hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+        assert_eq!(v.mcp_status()[0].status, "approved");
+
+        // Revoke → back to denied with no approved servers.
+        v.revoke_mcp("planner".into()).unwrap();
+        let st = v.mcp_status();
+        assert_eq!(st[0].status, "denied");
+        assert!(st[0].approved.is_empty());
+    }
+
+    #[test]
+    fn skill_requests_are_not_surfaced_and_actions_refuse() {
+        let mut v = empty();
+        v.create_file(
+            "agents/sum.md".into(),
+            "---\nkind: skill\nname: sum\nmcp_servers: [nutrition]\n---\nb".into(),
+        )
+        .unwrap();
+        // A skill never appears in the MCP status (parse-and-ignore).
+        assert!(v.mcp_status().is_empty());
+        // And the decision actions refuse (no such *agent* requesting servers).
+        assert!(v.approve_mcp("sum".into(), "x".into()).is_err());
+        assert!(v.deny_mcp("sum".into()).is_err());
+    }
+
+    #[test]
+    fn agent_requesting_nothing_is_omitted_and_actions_refuse() {
+        let mut v = empty();
+        v.create_file(
+            "agents/plain.md".into(),
+            "---\nkind: agent\nname: plain\n---\nbody".into(),
+        )
+        .unwrap();
+        assert!(v.mcp_status().is_empty());
+        assert!(v.approve_mcp("plain".into(), "x".into()).is_err());
     }
 
     #[test]

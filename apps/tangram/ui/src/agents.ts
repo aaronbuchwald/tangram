@@ -27,6 +27,14 @@ export interface AgentDef {
   labels: string[];
   meta: Record<string, unknown>;
   version: string | null;
+  /** Tools/MCP T1: the MCP servers (apps, e.g. `nutrition`, `notes`) this
+   *  definition REQUESTS access to. A *request*, not a grant — the user
+   *  approves it (see the `mcp_grants` state + the Agents-view approval UI).
+   *  Only `kind: agent` declares this; on `kind: skill` the `mcp_servers:`
+   *  frontmatter is parsed-and-ignored. Canonicalized (trimmed, lowercased,
+   *  de-duplicated, sorted) to match `AgentDef.mcp_servers` in
+   *  `apps/tangram/src/agents.rs`. */
+  mcpServers: string[];
   /** The body after the closing `---` — the system prompt / task. */
   instructions: string;
   /** The source file's id and path (so the UI can locate/open the def). */
@@ -180,6 +188,11 @@ export function parseAgent(file: MdFile): AgentDef | null {
   const version =
     fm.version == null || fm.version === "" ? null : String(fm.version);
   const instructions = lines.slice(close + 1).join("\n").trim();
+  // Tools/MCP T1: only `kind: agent` declares an `mcp_servers:` request; a
+  // skill's value is parsed-and-ignored. Canonicalize so it matches the Rust
+  // side and hashes identically.
+  const mcpServers =
+    kindRaw === "agent" ? canonicalServers(toStringArray(fm.mcp_servers)) : [];
 
   return {
     kind: kindRaw,
@@ -188,10 +201,54 @@ export function parseAgent(file: MdFile): AgentDef | null {
     labels: toStringArray(fm.labels),
     meta,
     version,
+    mcpServers,
     instructions,
     fileId: file.id,
     path: file.path,
   };
+}
+
+/** Canonicalize a list of requested MCP server names: trim, lowercase,
+ *  de-duplicate, and sort. Mirrors `canonical_servers` in
+ *  `apps/tangram/src/agents.rs` so both sides hash the SAME request. */
+export function canonicalServers(servers: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of servers) {
+    const s = raw.trim().toLowerCase();
+    if (s.length === 0 || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  out.sort();
+  return out;
+}
+
+/** A stable hash of a requested-server set: a hex 64-bit FNV-1a over the
+ *  canonical servers joined by NUL. Mirrors `mcp_request_hash` in
+ *  `apps/tangram/src/agents.rs` EXACTLY (same canonicalization, same NUL
+ *  separator, same FNV-1a constants, same 16-hex output), so the hash the
+ *  user's approval binds to matches what the component computes. The
+ *  `approve_mcp(agent, requested_hash)` action is called with this. */
+export function mcpRequestHash(servers: string[]): string {
+  const canon = canonicalServers(servers);
+  return fnv1aHex(canon.join("\0"));
+}
+
+// 64-bit FNV-1a over the UTF-8 bytes, lowercase hex (16 digits, zero-padded).
+// Identical to the helper in invocations.ts; kept self-contained here so the
+// agents module has no cross-module dependency for its hash.
+function fnv1aHex(s: string): string {
+  const OFFSET = 0xcbf29ce484222325n;
+  const PRIME = 0x00000100000001b3n;
+  const MASK = 0xffffffffffffffffn;
+  const bytes = new TextEncoder().encode(s);
+  let hash = OFFSET;
+  for (const b of bytes) {
+    hash ^= BigInt(b);
+    hash = (hash * PRIME) & MASK;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
 
 /** A read-only index of the agent/skill definitions found across the vault. */

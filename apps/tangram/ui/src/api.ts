@@ -13,8 +13,26 @@ export interface MdFile {
   updated_at_ms: number | null;
 }
 
+/** Tools/MCP T1: the user's recorded decision on one `kind: agent`
+ *  definition's `mcp_servers:` access request. Mirrors `McpGrant` in
+ *  `apps/tangram/src/lib.rs`; carried on the vault state frame (the SSE
+ *  `state` event serializes the full model). `status` is `"pending" |
+ *  "approved" | "denied"` as stored; the UI derives a `"stale"` view when the
+ *  def's request hash no longer matches `requested_hash`. */
+export interface McpGrant {
+  agent: string;
+  requested: string[];
+  requested_hash: string;
+  approved: string[];
+  status: string;
+  updated_at_ms: number;
+}
+
 export interface VaultState {
   files: MdFile[];
+  /** Present on documents written by this binary or newer; absent (treat as
+   *  []) on older docs. */
+  mcp_grants?: McpGrant[] | null;
 }
 
 // The shell's own app name on the host. The shell is the outer container and
@@ -70,6 +88,14 @@ export const vault = {
     postAction("rename_folder", { path, new_path }) as Promise<null>,
   deleteFolder: (path: string) =>
     postAction("delete_folder", { path }) as Promise<null>,
+  // Tools/MCP T1: the user-approval actions on a `kind: agent`'s `mcp_servers`
+  // request. `approve_mcp` binds to the hash the user saw (a stale hash is
+  // refused by the component).
+  approveMcp: (agent: string, requested_hash: string) =>
+    postAction("approve_mcp", { agent, requested_hash }) as Promise<null>,
+  denyMcp: (agent: string) => postAction("deny_mcp", { agent }) as Promise<null>,
+  revokeMcp: (agent: string) =>
+    postAction("revoke_mcp", { agent }) as Promise<null>,
 };
 
 /** Subscribe to the vault's live state over SSE. Returns an unsubscribe fn. */

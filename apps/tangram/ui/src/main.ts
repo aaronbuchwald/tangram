@@ -10,6 +10,7 @@ import {
   subscribeVault,
   vault,
   type FleetApp,
+  type McpGrant,
   type MdFile,
   type VaultState,
 } from "./api";
@@ -86,6 +87,9 @@ function displayFileName(name: string): string {
 let files: MdFile[] = [];
 const filesById = new Map<string, MdFile>();
 let fleet: FleetApp[] = [];
+// Tools/MCP T1: the live MCP-access grant records from the vault state frame,
+// read by the Agents view to derive each agent's effective grant status.
+let mcpGrants: McpGrant[] = [];
 // The agent/skill index, rebuilt over the vault on every state frame. The
 // editor's `/<name>` resolver reads through this live reference (a stable
 // closure), so a freshly-created definition becomes invocable on the next
@@ -889,6 +893,9 @@ function renderContent() {
       openNote: (fileId) => tabs.openNote(fileId),
       fileById: (fileId) => filesById.get(fileId),
       newAgent: () => createAgentStandalone(),
+      // Tools/MCP T1: the live grants + fleet names drive the approval UI.
+      mcpGrants: () => mcpGrants,
+      fleetApps: () => fleet.map((a) => a.name),
     });
     return;
   }
@@ -1022,6 +1029,9 @@ function renderNoteTab(fileId: string) {
               labels: created.labels,
               meta: {},
               version: null,
+              // A freshly-created def requests no MCP servers (Tools/MCP T1); the
+              // user adds `mcp_servers:` by editing the frontmatter later.
+              mcpServers: [],
               instructions: created.instructions,
               fileId: "",
               path: created.path,
@@ -1366,6 +1376,10 @@ function setLive(on: boolean) {
 function onVaultState(state: VaultState) {
   setLive(true);
   files = state.files ?? [];
+  // Tools/MCP T1: the grant records ride on the same state frame (the SSE
+  // `state` event serializes the full model); refresh them so the Agents view's
+  // grant status reflects an approve/deny/revoke without a manual reload.
+  mcpGrants = state.mcp_grants ?? [];
   filesById.clear();
   for (const f of files) filesById.set(f.id, f);
   // Rebuild the agent/skill index so `/<name>` resolution reflects the current

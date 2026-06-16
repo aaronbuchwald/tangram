@@ -748,6 +748,42 @@ body {
 }
 .agents-run:hover { color: var(--text); border-color: var(--blue); }
 
+/* ── Tools / MCP access requests + grant approval (Tools/MCP T1) ──
+   Per-agent column: a status pill, the requested/approved server chips (unknown
+   server names dimmed/flagged), and the Approve / Deny / Revoke affordances. */
+.agents-th-mcp { cursor: default; min-width: 220px; }
+.agents-cell-mcp { min-width: 220px; }
+.agents-mcp-none { color: var(--faint); }
+.agents-mcp { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.agents-mcp-pill {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  border: 1px solid var(--line); color: var(--dim);
+}
+.agents-mcp-pill-pending,
+.agents-mcp-pill-stale { color: var(--amber); border-color: rgba(232, 161, 58, 0.4); background: rgba(232, 161, 58, 0.08); }
+.agents-mcp-pill-approved { color: var(--green); border-color: rgba(31, 210, 134, 0.4); background: rgba(31, 210, 134, 0.08); }
+.agents-mcp-pill-denied { color: var(--red); border-color: rgba(255, 69, 84, 0.4); background: rgba(255, 69, 84, 0.08); }
+.agents-mcp-chips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.agents-mcp-server {
+  display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px;
+  font-family: var(--mono);
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--dim);
+}
+.agents-mcp-server-unknown {
+  color: var(--faint); border-style: dashed; opacity: 0.7;
+  text-decoration: line-through; text-decoration-color: var(--faint);
+}
+.agents-mcp-actions { display: inline-flex; gap: 6px; }
+.agents-mcp-btn {
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--dim); font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.agents-mcp-approve:hover { color: var(--green); border-color: var(--green); }
+.agents-mcp-deny:hover,
+.agents-mcp-revoke:hover { color: var(--red); border-color: var(--red); }
+
 /* ── `/<partial>` slash autocomplete dropdown (P2) ──
    The CodeMirror @codemirror/autocomplete tooltip, restyled into the shell's
    panel/popup idiom (panel-2 card, hairline border, soft shadow). Small and

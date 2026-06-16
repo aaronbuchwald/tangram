@@ -23,8 +23,8 @@
 // No triggers/tools/sandbox, no versioning UI (just shows `version`), no
 // provider routing.
 
-import { vault, type MdFile } from "./api";
-import { type AgentDef, type AgentIndex } from "./agents";
+import { vault, type McpGrant, type MdFile } from "./api";
+import { type AgentDef, type AgentIndex, mcpRequestHash } from "./agents";
 import { openAgentPopup } from "./agentPopup";
 import { showError } from "./modal";
 
@@ -234,6 +234,52 @@ export interface AgentsViewCallbacks {
    *  to the shared create popup so the Agents view is a discoverable on-ramp
    *  (#9/#10) — not just a passive table of what already exists. */
   newAgent: () => void;
+  /** Tools/MCP T1: the live grant records from the vault state frame (keyed by
+   *  agent name). Used to derive each agent's effective MCP status. */
+  mcpGrants: () => McpGrant[];
+  /** Tools/MCP T1: the live fleet app names, so the view can dim a requested
+   *  server that isn't present on this host (nice-to-have). May be empty before
+   *  the first fleet poll. */
+  fleetApps: () => string[];
+}
+
+// ── Tools/MCP T1: effective per-agent MCP status ──────────────────────────────
+
+/** The UI-side effective status of an agent's MCP request — mirrors
+ *  `Vault::mcp_status` in `apps/tangram/src/lib.rs`. `stale` means a decision
+ *  exists but the def's request changed since (re-approval required; treated
+ *  like `pending`). */
+type McpEffectiveStatus = "pending" | "approved" | "denied" | "stale";
+
+interface McpStatus {
+  status: McpEffectiveStatus;
+  /** The canonical servers currently REQUESTED (the live def's `mcp_servers`). */
+  requested: string[];
+  /** The hash of the current request (what `approve_mcp` is called with). */
+  requestedHash: string;
+  /** The servers currently APPROVED (empty unless `status === "approved"`). */
+  approved: string[];
+}
+
+/** Derive an agent's effective MCP status from the live def request + the
+ *  recorded grant, exactly as the component's `mcp_status` read does. */
+function effectiveMcpStatus(def: AgentDef, grants: McpGrant[]): McpStatus {
+  const requested = def.mcpServers;
+  const requestedHash = mcpRequestHash(requested);
+  const grant = grants.find(
+    (g) => g.agent.trim().toLowerCase() === def.name.trim().toLowerCase(),
+  );
+  if (!grant) return { status: "pending", requested, requestedHash, approved: [] };
+  if (grant.requested_hash !== requestedHash) {
+    return { status: "stale", requested, requestedHash, approved: [] };
+  }
+  if (grant.status === "approved") {
+    return { status: "approved", requested, requestedHash, approved: grant.approved };
+  }
+  if (grant.status === "denied") {
+    return { status: "denied", requested, requestedHash, approved: [] };
+  }
+  return { status: "pending", requested, requestedHash, approved: [] };
 }
 
 // Sort + query state is module-local so it survives re-renders driven by vault
@@ -307,6 +353,7 @@ export function renderAgentsView(
     });
     headRow.appendChild(th);
   }
+  headRow.appendChild(el("th", "agents-th agents-th-mcp", "Tools / MCP")); // T1
   headRow.appendChild(el("th", "agents-th agents-th-actions", "")); // row actions
   thead.appendChild(headRow);
   table.appendChild(thead);
@@ -334,7 +381,7 @@ export function renderAgentsView(
     if (rows.length === 0) {
       const tr = el("tr");
       const td = el("td", "agents-empty") as HTMLTableCellElement;
-      td.colSpan = COLUMNS.length + 1;
+      td.colSpan = COLUMNS.length + 2;
       if (index.all.length === 0) {
         // First-run CTA (#9/#10): turn the passive "nothing here" into an
         // on-ramp — a primary action plus the one-line hint that teaches the
@@ -437,6 +484,11 @@ function renderRow(
   }
   tr.appendChild(pathTd);
 
+  // Tools / MCP (T1): the access request + the user's grant decision.
+  const mcpTd = el("td", "agents-cell agents-cell-mcp");
+  mcpTd.appendChild(renderMcpCell(def, cb, host, index));
+  tr.appendChild(mcpTd);
+
   // Row actions: Run.
   const actTd = el("td", "agents-cell agents-cell-actions");
   const run = el("button", "agents-run", "Run");
@@ -448,6 +500,113 @@ function renderRow(
   tr.appendChild(actTd);
 
   return tr;
+}
+
+/** Render the Tools / MCP cell for one agent (T1). Skills and agents that
+ *  request no servers show a muted "—". Otherwise show the requested servers as
+ *  chips (unknown servers dimmed) plus the grant status and the matching
+ *  Approve / Deny / Revoke affordance. */
+function renderMcpCell(
+  def: AgentDef,
+  cb: AgentsViewCallbacks,
+  host: HTMLElement,
+  index: AgentIndex,
+): HTMLElement {
+  // Only `kind: agent` with a non-empty request participates (skills ignore it).
+  if (def.kind !== "agent" || def.mcpServers.length === 0) {
+    return el("span", "agents-mcp-none micro", "—");
+  }
+
+  const wrap = el("div", "agents-mcp");
+  const st = effectiveMcpStatus(def, cb.mcpGrants());
+  const fleet = new Set(cb.fleetApps().map((n) => n.toLowerCase()));
+
+  // Status pill.
+  const pillText: Record<McpEffectiveStatus, string> = {
+    pending: "requests access",
+    stale: "request changed — re-approve",
+    approved: "approved",
+    denied: "denied",
+  };
+  const pill = el(
+    "span",
+    `agents-mcp-pill agents-mcp-pill-${st.status}`,
+    pillText[st.status],
+  );
+  wrap.appendChild(pill);
+
+  // The server chips: for approved, show the approved set; otherwise the
+  // requested set. Dim any server name not present in the live fleet.
+  const shown = st.status === "approved" ? st.approved : st.requested;
+  const chips = el("div", "agents-mcp-chips");
+  for (const s of shown) {
+    const known = fleet.size === 0 || fleet.has(s.toLowerCase());
+    const chip = el(
+      "span",
+      `agents-mcp-server${known ? "" : " agents-mcp-server-unknown"}`,
+      s,
+    );
+    if (!known) chip.title = `No app named "${s}" on this host`;
+    chips.appendChild(chip);
+  }
+  wrap.appendChild(chips);
+
+  // Decision affordances per status (pending/stale → Approve+Deny; approved →
+  // Revoke; denied → Approve to reconsider).
+  const actions = el("div", "agents-mcp-actions");
+  const approveBtn = (label: string) => {
+    const b = el("button", "agents-mcp-btn agents-mcp-approve", label) as HTMLButtonElement;
+    b.type = "button";
+    b.addEventListener("click", () =>
+      runMcp(host, cb, index, () => vault.approveMcp(def.name, st.requestedHash)),
+    );
+    return b;
+  };
+  const denyBtn = (label: string) => {
+    const b = el("button", "agents-mcp-btn agents-mcp-deny", label) as HTMLButtonElement;
+    b.type = "button";
+    b.addEventListener("click", () =>
+      runMcp(host, cb, index, () => vault.denyMcp(def.name)),
+    );
+    return b;
+  };
+  const revokeBtn = () => {
+    const b = el("button", "agents-mcp-btn agents-mcp-revoke", "Revoke") as HTMLButtonElement;
+    b.type = "button";
+    b.addEventListener("click", () =>
+      runMcp(host, cb, index, () => vault.revokeMcp(def.name)),
+    );
+    return b;
+  };
+
+  if (st.status === "pending" || st.status === "stale") {
+    actions.append(approveBtn("Approve"), denyBtn("Deny"));
+  } else if (st.status === "approved") {
+    actions.append(revokeBtn());
+  } else {
+    // denied — offer reconsidering.
+    actions.append(approveBtn("Approve"));
+  }
+  wrap.appendChild(actions);
+
+  return wrap;
+}
+
+/** Run an MCP grant action; on success the vault state frame re-renders the
+ *  view (the grants change there), and on failure route the error through the
+ *  themed toast and re-render from the current index. */
+async function runMcp(
+  host: HTMLElement,
+  cb: AgentsViewCallbacks,
+  index: AgentIndex,
+  action: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (e) {
+    showError(String(e instanceof Error ? e.message : e));
+    renderAgentsView(host, index, cb);
+  }
 }
 
 /** A compact toggle button that swaps for a small inline input on click. The
