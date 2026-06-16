@@ -48,7 +48,12 @@ import { registry } from "./manage";
 import { confirmAction, promptName, showError } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
-import { mountChatPanel, setActiveContext } from "./chatPanel";
+import {
+  forgetContext,
+  mountChatPanel,
+  setActiveContext,
+  type ChatContext,
+} from "./chatPanel";
 
 // ── icons ────────────────────────────────────────────────────────────────────
 // Inline 16px stroke icons (Lucide-style, currentColor) so vault affordances
@@ -1548,19 +1553,30 @@ tabs.subscribe(() => {
 // the conversation), so calling this on vault refresh is safe — it only re-seeds
 // when the note first loads after the tab opened. Home/agents tabs hide it.
 function driveChatContext(): void {
-  const a = tabs.active;
-  if (a?.kind === "app") {
-    setActiveContext({ kind: "app", app: a.app, label: displayName(a.app) });
-  } else if (a?.kind === "note") {
-    const file = filesById.get(a.fileId);
-    setActiveContext({
+  setActiveContext(chatContextForTab(tabs.active));
+}
+
+// Map a tab to the chat context it drives: an app tab → that app's MCP; a note
+// tab → the vault copilot seeded with the open note; anything else → null (no
+// chat). Shared by `driveChatContext` (active-tab → chat) and the tab-close hook
+// (closed tab → which context's persisted conversation to wipe, #35).
+function chatContextForTab(tab: typeof tabs.active): ChatContext | null {
+  if (tab?.kind === "app") {
+    return { kind: "app", app: tab.app, label: displayName(tab.app) };
+  }
+  if (tab?.kind === "note") {
+    const file = filesById.get(tab.fileId);
+    return {
       kind: "vault",
       note: file ? { id: file.id, path: file.path, body: file.body } : null,
-    });
-  } else {
-    setActiveContext(null);
+    };
   }
+  return null;
 }
+
+// Closing a tab discards that tab's persisted copilot conversation (#35): the
+// log sticks around across context switches, but a closed tab is gone for good.
+tabs.subscribeClose((tab) => forgetContext(chatContextForTab(tab)));
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 

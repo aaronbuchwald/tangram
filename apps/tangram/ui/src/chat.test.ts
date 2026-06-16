@@ -3,7 +3,7 @@
 // response parser (mcpClient), which must handle BOTH a single JSON body and
 // an SSE `data:`-framed stream (the live nutrition server answers with SSE).
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   mcpToolsToOpenAi,
   renderToolResult,
@@ -12,10 +12,16 @@ import {
 } from "./llmChat";
 import { McpClient, __test } from "./mcpClient";
 import {
+  contextKey,
+  forgetContext,
   mcpTargetFor,
+  mountChatPanel,
+  newChat,
   resetSessionState,
   sameContext,
+  setActiveContext,
   titleFor,
+  __test as chatInternals,
   type ChatContext,
   type PanelState,
 } from "./chatPanel";
@@ -135,6 +141,152 @@ describe("sameContext (when to reset vs keep the conversation)", () => {
     expect(sameContext(null, null)).toBe(true);
     expect(sameContext(null, appA)).toBe(false);
     expect(sameContext(note1, null)).toBe(false);
+  });
+});
+
+describe("contextKey (per-context persistence key, #35)", () => {
+  it("keys an app by its name and matches sameContext's grouping", () => {
+    const a: ChatContext = { kind: "app", app: "notes", label: "Notes" };
+    const b: ChatContext = { kind: "app", app: "nutrition", label: "Nutrition" };
+    expect(contextKey(a)).toBe("app:notes");
+    // Same key iff sameContext considers them the same session.
+    expect(contextKey(a) === contextKey({ ...a })).toBe(sameContext(a, { ...a }));
+    expect(contextKey(a) === contextKey(b)).toBe(sameContext(a, b));
+  });
+
+  it("keys a vault context by note id; the general copilot gets a stable empty key", () => {
+    const note: ChatContext = {
+      kind: "vault",
+      note: { id: "f1", path: "a.md", body: "x" },
+    };
+    const noteEdited: ChatContext = {
+      kind: "vault",
+      note: { id: "f1", path: "a.md", body: "EDITED" },
+    };
+    expect(contextKey(note)).toBe("vault:f1");
+    // The body changing does NOT change the key (no reset on edit).
+    expect(contextKey(note)).toBe(contextKey(noteEdited));
+    expect(contextKey({ kind: "vault", note: null })).toBe("vault:");
+  });
+
+  it("the null/home/agents context has no key (nothing to persist)", () => {
+    expect(contextKey(null)).toBeNull();
+  });
+});
+
+describe("conversation persistence across context switches (#35)", () => {
+  const { conversations, state } = chatInternals;
+  const appA: ChatContext = { kind: "app", app: "notes", label: "Notes" };
+  const appB: ChatContext = { kind: "app", app: "nutrition", label: "Nutrition" };
+
+  // Mount the panel once (it owns the chat-log DOM the persistence reads/writes)
+  // and reset all shared state before each test for isolation.
+  beforeAll(() => {
+    document.body.innerHTML = '<div id="slot"></div>';
+    mountChatPanel(document.getElementById("slot")!);
+    // The async, fire-and-forget MCP connect can't reach a server under jsdom
+    // and degrades to plain chat (logged via console.warn). The persistence we
+    // exercise here is synchronous, so silence that expected background noise.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  beforeEach(() => {
+    conversations.clear();
+    state.ctx = null;
+    state.history = [];
+    state.mcp = null;
+    state.tools = [];
+    state.noTools = false;
+    state.sending = false;
+    const log = document.getElementById("chat-log")!;
+    log.replaceChildren();
+  });
+
+  // Simulate "the user had a conversation in the active context": a seeded
+  // system prompt + a user/assistant exchange rendered into the log.
+  function seedConversation(user: string, assistant: string): void {
+    state.history.push(
+      { role: "system", content: "sys" },
+      { role: "user", content: user },
+      { role: "assistant", content: assistant },
+    );
+    const log = document.getElementById("chat-log")!;
+    log.innerHTML =
+      `<div class="chat-msg chat-user">${user}</div>` +
+      `<div class="chat-msg chat-assistant">${assistant}</div>`;
+  }
+
+  it("switching away and back PRESERVES the message history and the rendered log", () => {
+    setActiveContext(appA);
+    seedConversation("hello A", "hi from A");
+
+    // Switch to B — A's conversation must be saved, not wiped.
+    setActiveContext(appB);
+    expect(conversations.get("app:notes")).toBeDefined();
+    expect(conversations.get("app:notes")!.history).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: "hello A" },
+      { role: "assistant", content: "hi from A" },
+    ]);
+
+    // Switch back to A — history restored, log re-rendered (the bug: it used to
+    // be wiped on switch).
+    setActiveContext(appA);
+    expect(state.history).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: "hello A" },
+      { role: "assistant", content: "hi from A" },
+    ]);
+    const log = document.getElementById("chat-log")!;
+    expect(log.textContent).toContain("hello A");
+    expect(log.textContent).toContain("hi from A");
+  });
+
+  it("an untouched session (system prompt only) is not persisted", () => {
+    setActiveContext(appA);
+    state.history.push({ role: "system", content: "sys" });
+    setActiveContext(appB);
+    expect(conversations.has("app:notes")).toBe(false);
+  });
+
+  it("tab close WIPES that context's stored conversation", () => {
+    setActiveContext(appA);
+    seedConversation("hello A", "hi from A");
+    setActiveContext(appB); // persist A
+    expect(conversations.has("app:notes")).toBe(true);
+
+    // Closing A's tab forgets it; switching back finds nothing and starts fresh.
+    forgetContext(appA);
+    expect(conversations.has("app:notes")).toBe(false);
+  });
+
+  it("closing the ACTIVE tab does not re-persist it on the follow-up switch", () => {
+    setActiveContext(appA);
+    seedConversation("hello A", "hi from A");
+
+    // Close the active tab, then the close→re-render drives a switch to B.
+    forgetContext(appA);
+    setActiveContext(appB);
+    expect(conversations.has("app:notes")).toBe(false);
+
+    // Reopening A starts a clean session (no restored history beyond the fresh
+    // connect, which is async/offline here so history is left empty).
+    setActiveContext(appA);
+    const log = document.getElementById("chat-log")!;
+    expect(log.textContent).not.toContain("hello A");
+  });
+
+  it("New-chat wipes the CURRENT context's stored conversation and clears the log", () => {
+    setActiveContext(appA);
+    seedConversation("hello A", "hi from A");
+    setActiveContext(appB);
+    setActiveContext(appA); // restored
+    expect(conversations.has("app:notes")).toBe(true);
+
+    newChat();
+    // New-chat flushes both the live log and the persisted entry for this ctx.
+    expect(conversations.has("app:notes")).toBe(false);
+    const log = document.getElementById("chat-log")!;
+    expect(log.textContent).not.toContain("hello A");
   });
 });
 

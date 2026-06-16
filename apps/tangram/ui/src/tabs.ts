@@ -38,14 +38,27 @@ export class TabStore {
   tabs: Tab[] = [];
   activeId: string | null = null;
   private listeners = new Set<() => void>();
+  private closeListeners = new Set<(tab: Tab) => void>();
 
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
+  /** Notified with the closed tab whenever any close path removes it (the chip
+   *  ✕, middle-click, the overflow menu, or pruneNotes). The chat panel uses
+   *  this to wipe a closed tab's persisted conversation (#35). */
+  subscribeClose(fn: (tab: Tab) => void): () => void {
+    this.closeListeners.add(fn);
+    return () => this.closeListeners.delete(fn);
+  }
+
   private emit() {
     for (const fn of this.listeners) fn();
+  }
+
+  private emitClose(tab: Tab) {
+    for (const fn of this.closeListeners) fn(tab);
   }
 
   get active(): Tab | null {
@@ -126,11 +139,12 @@ export class TabStore {
   close(id: string) {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx < 0) return;
-    this.tabs.splice(idx, 1);
+    const [closed] = this.tabs.splice(idx, 1);
     if (this.activeId === id) {
       const fallback = this.tabs[idx] ?? this.tabs[idx - 1] ?? null;
       this.activeId = fallback ? fallback.id : null;
     }
+    this.emitClose(closed);
     this.emit();
   }
 

@@ -51,6 +51,19 @@ export function mcpTargetFor(ctx: ChatContext): string {
   return ctx.kind === "app" ? ctx.app : VAULT_APP;
 }
 
+/**
+ * The stable key under which a context's conversation is persisted (#35). Two
+ * contexts share a key exactly when `sameContext` considers them the same
+ * session: an app by its name, a vault context by its open note id (the general
+ * copilot — no note — gets a stable empty-id key). Returns null for the
+ * null/home/agents context (no conversation to persist). Pure — testable.
+ */
+export function contextKey(ctx: ChatContext | null): string | null {
+  if (ctx === null) return null;
+  if (ctx.kind === "app") return `app:${ctx.app}`;
+  return `vault:${ctx.note?.id ?? ""}`;
+}
+
 /** The chat-head title for a context. */
 export function titleFor(ctx: ChatContext): string {
   if (ctx.kind === "app") return `${ctx.label} · chat`;
@@ -75,6 +88,20 @@ export interface PanelState {
   epoch: number;
 }
 
+/**
+ * A persisted conversation for one context (#35). We keep both the message
+ * `history` (drives the next LLM turn) and the rendered `logHtml` (the visible
+ * transcript, including tool steps and status lines, which is NOT reconstructable
+ * from `history` alone). `noTools` rides along so a restored session shows the
+ * right degraded-vs-tools state. The live MCP session is intentionally NOT
+ * stored — it can expire, so it is re-initialized on restore.
+ */
+export interface StoredConversation {
+  history: ChatMessage[];
+  logHtml: string;
+  noTools: boolean;
+}
+
 let open = localStorage.getItem(OPEN_KEY) !== "false";
 let width = parseInt(localStorage.getItem(WIDTH_KEY) ?? "340", 10);
 
@@ -86,6 +113,54 @@ const state: PanelState = {
   noTools: false,
   sending: false,
   epoch: 0,
+};
+
+// Per-context conversation store, keyed by `contextKey` (#35). Switching tabs/
+// contexts saves the outgoing context here and restores the incoming one, so a
+// conversation survives a context switch and is wiped only on tab close (or the
+// New-chat ＋). In-memory only — survives switches within the session, not a
+// full page reload (per the issue, reload persistence is out of scope).
+const conversations = new Map<string, StoredConversation>();
+
+/** True once a conversation carries at least one real (non-system) message —
+ *  i.e. the user has actually started talking. An untouched session (just the
+ *  seeded system prompt, or empty) is not worth persisting. */
+function hasConversation(history: ChatMessage[]): boolean {
+  return history.some((m) => m.role !== "system");
+}
+
+/** Snapshot the CURRENT context's conversation into the store (#35). No-op when
+ *  there is no keyed context, the panel DOM isn't mounted, or nothing has been
+ *  said yet (an untouched session needn't be persisted, and skipping it lets a
+ *  just-wiped active context stay wiped on the close→switch sequence). Exported
+ *  for tests. */
+export function saveCurrentConversation(): void {
+  const key = contextKey(state.ctx);
+  if (key === null) return;
+  if (!hasConversation(state.history)) return;
+  conversations.set(key, {
+    // Clone the history so later in-place mutations don't bleed into the store.
+    history: state.history.map((m) => ({ ...m })),
+    logHtml: logEl ? logEl.innerHTML : "",
+    noTools: state.noTools,
+  });
+}
+
+/** Wipe the stored conversation for a context key (#35). Called on tab close and
+ *  by New-chat. No-op for null/unknown keys. Exported for wiring + tests. */
+export function wipeConversation(key: string | null): void {
+  if (key === null) return;
+  conversations.delete(key);
+}
+
+/** Test-only access to the per-context conversation store + live panel state.
+ *  Exposed so the persist/restore/wipe lifecycle (#35) is unit-testable without
+ *  a live MCP server (the async `connect` is fire-and-forget and degrades to
+ *  plain chat when it can't reach the network — the persistence is synchronous). */
+export const __test = {
+  conversations,
+  saveCurrentConversation,
+  state,
 };
 
 // DOM handles, populated by mount().
@@ -249,12 +324,29 @@ export function setActiveContext(ctx: ChatContext | null): void {
     applyLayout();
     return;
   }
+  // Persist the OUTGOING conversation so switching away never loses it (#35).
+  saveCurrentConversation();
+
   state.ctx = ctx;
   const epoch = resetSessionState(state);
   if (titleEl) titleEl.textContent = ctx ? titleFor(ctx) : "Chat";
   if (logEl) logEl.replaceChildren();
   applyLayout();
-  if (ctx) void connect(ctx, epoch);
+  if (!ctx) return;
+
+  // If we have a stored conversation for the INCOMING context, restore its
+  // history + rendered log and re-init only the MCP session (it may have
+  // expired). Otherwise start a fresh session that seeds the system prompt.
+  const stored = conversations.get(contextKey(ctx) ?? "");
+  if (stored) {
+    state.history = stored.history.map((m) => ({ ...m }));
+    state.noTools = stored.noTools;
+    if (logEl) logEl.innerHTML = stored.logHtml;
+    scrollToEnd();
+    void connect(ctx, epoch, { restore: true });
+  } else {
+    void connect(ctx, epoch);
+  }
 }
 
 /**
@@ -265,6 +357,9 @@ export function setActiveContext(ctx: ChatContext | null): void {
  */
 export function newChat(): void {
   if (state.ctx === null) return;
+  // Drop the persisted conversation for this context — New-chat is an explicit
+  // flush, same as closing the tab (#35).
+  wipeConversation(contextKey(state.ctx));
   const epoch = resetSessionState(state);
   if (logEl) logEl.replaceChildren();
   if (inputEl) inputEl.value = "";
@@ -272,17 +367,46 @@ export function newChat(): void {
   void connect(state.ctx, epoch);
 }
 
+/**
+ * Wipe the persisted conversation for a closed tab's context (#35). main.ts
+ * wires this to `TabStore.subscribeClose`. Closing the tab is the one moment it
+ * is OK to discard the chat history; if the closed tab was the active one, the
+ * subsequent `setActiveContext` switch finds nothing stored and starts fresh.
+ */
+export function forgetContext(ctx: ChatContext | null): void {
+  const key = contextKey(ctx);
+  if (key === null) return;
+  wipeConversation(key);
+  // If the closed tab was the ACTIVE one, also drop the live transcript so the
+  // follow-up `setActiveContext` (driven by the same close → re-render) doesn't
+  // re-persist what we just wiped. The fresh tab then starts clean.
+  if (key === contextKey(state.ctx)) {
+    state.history = [];
+    if (logEl) logEl.replaceChildren();
+  }
+}
+
 // Initialize the MCP client + tools for a context, degrading to plain chat if
 // the handshake fails (the chat still works; we show a small "no tools" note).
 // App contexts target their own MCP server; the vault copilot targets the
 // shell's own `tangram` MCP server (the full vault toolset).
-async function connect(ctx: ChatContext, epoch: number): Promise<void> {
+async function connect(
+  ctx: ChatContext,
+  epoch: number,
+  opts: { restore?: boolean } = {},
+): Promise<void> {
+  const restore = opts.restore === true;
   const target = mcpTargetFor(ctx);
-  appendStatus(
-    ctx.kind === "vault"
-      ? "Connecting to the vault tools…"
-      : "Connecting to the app's tools…",
-  );
+  // On a fresh session we own the (empty) log and show a connecting line. On a
+  // restore the prior transcript is already on screen, so we leave it untouched
+  // and only re-init the MCP session in the background.
+  if (!restore) {
+    appendStatus(
+      ctx.kind === "vault"
+        ? "Connecting to the vault tools…"
+        : "Connecting to the app's tools…",
+    );
+  }
   let toolsLabel = "";
   try {
     const mcp = new McpClient(target);
@@ -303,6 +427,12 @@ async function connect(ctx: ChatContext, epoch: number): Promise<void> {
     console.warn("MCP connect failed for", target, e);
     toolsLabel = "No tools available — plain chat.";
   }
+  if (epoch !== state.epoch) return;
+  if (restore) {
+    // The restored history (including its original system prompt) is kept as-is
+    // — only the live MCP session/tools were refreshed. Leave the transcript be.
+    return;
+  }
   // Seed the system prompt scoped to this context: the vault copilot gets the
   // read+modify vault prompt with the open note seeded; an app context keeps
   // the existing per-app prompt.
@@ -315,7 +445,6 @@ async function connect(ctx: ChatContext, epoch: number): Promise<void> {
           : systemPromptFor(ctx.label, state.tools.length > 0),
     },
   ];
-  if (epoch !== state.epoch) return;
   clearLog();
   appendStatus(toolsLabel);
 }
