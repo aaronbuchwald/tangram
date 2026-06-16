@@ -1,6 +1,7 @@
 //! Agent/skill execution support for the vault: the definition frontmatter
-//! parser, the ```agent``` invocation-block parser, and the v1 cron/interval
-//! schedule grammar.
+//! parser, the ```agent``` invocation-block parser, and the v2 schedule grammar
+//! (interval shorthand `2m`/`2h`/`2d` + calendar daily/weekly-at-a-time with a
+//! DST-aware IANA timezone, plus the `@hourly`/`@daily` back-compat aliases).
 //!
 //! R1 — the trigger belongs to the INVOCATION, not the definition:
 //!
@@ -47,8 +48,9 @@ pub struct Invocation {
     /// The definition this invocation runs (the `use:` field — a definition
     /// `name`).
     pub use_name: String,
-    /// The raw `trigger:` text, e.g. `cron every 1h`, `cron @daily`, or
-    /// `one-time`.
+    /// The raw `trigger:` text, e.g. `2h`, `daily at 09:00 America/New_York`,
+    /// `weekly on mon,wed,fri at 14:00 America/New_York`, `@daily`, or
+    /// `one-time`. A legacy `cron ` prefix is accepted (back-compat).
     pub trigger: String,
     /// The `prompt:` text (may span multiple lines until the closing fence).
     pub prompt: String,
@@ -63,31 +65,45 @@ pub struct Invocation {
 }
 
 impl Invocation {
-    /// The cron schedule this invocation declares, if its trigger is
-    /// `cron <schedule>`. `None` for `one-time` (or any non-cron trigger).
+    /// The schedule portion of the trigger, stripped of the optional back-compat
+    /// `cron ` prefix. `daily at …`/`weekly on …`/`2m`/`@hourly` (with or
+    /// without the legacy `cron ` prefix) all return the bare schedule text;
+    /// `one-time` returns `None`.
+    ///
+    /// v2: the trigger no longer REQUIRES a `cron ` prefix — bare schedules
+    /// (`2m`, `daily at 09:00 America/New_York`, …) are first-class. The prefix
+    /// is still accepted so existing `cron @hourly` blocks keep parsing.
     #[must_use]
-    pub fn cron_schedule(&self) -> Option<&str> {
+    pub fn schedule_str(&self) -> Option<&str> {
         let t = self.trigger.trim();
-        let rest = t.strip_prefix("cron")?;
-        // Require a separator after `cron` (so `cronish` is not matched).
-        if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
+        if t.is_empty() || t == "one-time" {
             return None;
         }
-        Some(rest.trim())
+        // Strip an optional leading `cron` token (back-compat with v1 blocks).
+        if let Some(rest) = t.strip_prefix("cron") {
+            if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
+                // `cronish …` is NOT a cron prefix; fall through and let the
+                // grammar reject it (it won't parse), i.e. disabled.
+                return Some(t);
+            }
+            return Some(rest.trim());
+        }
+        Some(t)
     }
 
-    /// Whether this invocation is cron-triggered (the only kind v1 schedules).
+    /// The parsed [`Schedule`], if this invocation declares one the grammar
+    /// understands. `None` ⇒ disabled (`one-time`, or an unknown/unparseable
+    /// schedule — the caller skips it).
     #[must_use]
-    pub fn is_cron(&self) -> bool {
-        self.cron_schedule().is_some()
+    pub fn schedule(&self) -> Option<Schedule> {
+        self.schedule_str().and_then(parse_schedule)
     }
 
-    /// The parsed schedule interval, if this is a cron invocation with a
-    /// schedule v1 understands. `None` ⇒ disabled (unknown schedule, or not
-    /// cron).
+    /// Whether this invocation declares a schedule the grammar understands
+    /// (i.e. the host scheduler should consider it).
     #[must_use]
-    pub fn interval_ms(&self) -> Option<i64> {
-        self.cron_schedule().and_then(parse_schedule_ms)
+    pub fn is_scheduled(&self) -> bool {
+        self.schedule().is_some()
     }
 }
 
@@ -184,7 +200,7 @@ impl Lookup for Vec<(String, String)> {
 /// ```text
 /// ```agent
 /// use: <definition-name>
-/// trigger: cron every 1h          # or "one-time"
+/// trigger: 1h                     # or "daily at 09:00 America/New_York", "one-time"
 /// prompt: <prompt text, may span
 /// multiple lines until the fence>
 /// ```
@@ -331,57 +347,224 @@ fn fnv1a_hex(s: &str) -> String {
     format!("{hash:016x}")
 }
 
-// ── the v1 schedule grammar ───────────────────────────────────────────────────
+// ── the v2 schedule grammar ───────────────────────────────────────────────────
+
+use chrono::{Datelike, TimeZone, Weekday};
+use chrono_tz::Tz;
 
 const MINUTE_MS: i64 = 60 * 1000;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
-/// Parse a v1 schedule string into an interval in milliseconds, or `None` for
-/// an unknown/disabled schedule (the caller logs/skips). Supported forms:
+/// A parsed agent schedule. Built by [`parse_schedule`]; evaluated for
+/// due-ness by [`is_due`]. Mirrors the picker output in the UI
+/// (`apps/tangram/ui/src/invocations.ts` `parseScheduleMs` + the picker
+/// builder) — both sides parse the SAME trigger grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Schedule {
+    /// Fire every `n` milliseconds since the last run (`2m`/`2h`/`2d`,
+    /// `every 2m`, the `@hourly`/`@daily` back-compat aliases).
+    Interval(i64),
+    /// Fire once per day at local `hh:mm` in IANA timezone `tz`.
+    Daily { hh: u32, mm: u32, tz: Tz },
+    /// Fire on the selected `days` of the week at local `hh:mm` in IANA
+    /// timezone `tz`. `days` is the de-duplicated set of selected weekdays.
+    Weekly {
+        days: Vec<Weekday>,
+        hh: u32,
+        mm: u32,
+        tz: Tz,
+    },
+}
+
+/// Parse a v2 schedule string into a [`Schedule`], or `None` for an
+/// unknown/disabled schedule (the caller skips it). The accepted forms — kept
+/// byte-identical to the UI parser:
 ///
-/// - `@hourly` → 1 hour
-/// - `@daily`  → 24 hours
-/// - `every <N>m` → N minutes
-/// - `every <N>h` → N hours
+/// - **Interval shorthand**: `2m` / `2h` / `2d` (minutes / hours / DAYS), plus
+///   `every 2m` / `every 2h` / `every 2d` synonyms.
+/// - **Back-compat aliases**: `@hourly` (1h), `@daily` (24h interval).
+/// - **Daily at a time**: `daily at HH:MM <IANA-tz>` — e.g.
+///   `daily at 09:00 America/New_York`.
+/// - **Custom weekly**: `weekly on <days> at HH:MM <IANA-tz>` — `<days>` a comma
+///   list of `mon,tue,wed,thu,fri,sat,sun` — e.g.
+///   `weekly on mon,wed,fri at 14:00 America/New_York`.
 ///
-/// A full 5-field cron is intentionally NOT supported in v1.
+/// `HH:MM` is 24-hour; the tz must be a known IANA name (else `None`).
 #[must_use]
-pub fn parse_schedule_ms(schedule: &str) -> Option<i64> {
+pub fn parse_schedule(schedule: &str) -> Option<Schedule> {
     let s = schedule.trim();
+
+    // Back-compat aliases.
     match s {
-        "@hourly" => return Some(HOUR_MS),
-        "@daily" => return Some(DAY_MS),
+        "@hourly" => return Some(Schedule::Interval(HOUR_MS)),
+        "@daily" => return Some(Schedule::Interval(DAY_MS)),
         _ => {}
     }
-    // `every <N>m` / `every <N>h`
-    if let Some(rest) = s.strip_prefix("every ") {
-        let rest = rest.trim();
-        let (num, unit) = rest.split_at(rest.len().checked_sub(1)?);
-        let n: i64 = num.trim().parse().ok()?;
-        if n <= 0 {
-            return None;
-        }
-        return match unit {
-            "m" => n.checked_mul(MINUTE_MS),
-            "h" => n.checked_mul(HOUR_MS),
-            _ => None,
+
+    // Calendar forms.
+    if let Some(rest) = s.strip_prefix("daily at ") {
+        let (hh, mm, tz) = parse_time_tz(rest.trim())?;
+        return Some(Schedule::Daily { hh, mm, tz });
+    }
+    if let Some(rest) = s.strip_prefix("weekly on ") {
+        // `<days> at HH:MM <tz>`
+        let (days_part, time_part) = rest.split_once(" at ")?;
+        let days = parse_days(days_part.trim())?;
+        let (hh, mm, tz) = parse_time_tz(time_part.trim())?;
+        return Some(Schedule::Weekly { days, hh, mm, tz });
+    }
+
+    // Interval shorthand: `2m`/`2h`/`2d`, optionally with an `every ` prefix.
+    let interval = s.strip_prefix("every ").map_or(s, str::trim);
+    parse_interval_ms(interval).map(Schedule::Interval)
+}
+
+/// Parse an interval shorthand (`<N>m` / `<N>h` / `<N>d`) into milliseconds.
+fn parse_interval_ms(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: i64 = num.trim().parse().ok()?;
+    if n <= 0 {
+        return None;
+    }
+    match unit {
+        "m" => n.checked_mul(MINUTE_MS),
+        "h" => n.checked_mul(HOUR_MS),
+        "d" => n.checked_mul(DAY_MS),
+        _ => None,
+    }
+}
+
+/// Parse a `HH:MM <IANA-tz>` tail (24-hour clock) into `(hh, mm, tz)`.
+fn parse_time_tz(s: &str) -> Option<(u32, u32, Tz)> {
+    let (time, tz_name) = s.split_once(char::is_whitespace)?;
+    let (hh, mm) = parse_hh_mm(time.trim())?;
+    let tz: Tz = tz_name.trim().parse().ok()?;
+    Some((hh, mm, tz))
+}
+
+/// Parse a strict `HH:MM` 24-hour time (00:00..=23:59).
+fn parse_hh_mm(s: &str) -> Option<(u32, u32)> {
+    let (h, m) = s.split_once(':')?;
+    let hh: u32 = h.parse().ok()?;
+    let mm: u32 = m.parse().ok()?;
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    Some((hh, mm))
+}
+
+/// Parse a comma list of weekday abbreviations into a de-duplicated, ordered
+/// `Vec<Weekday>`. Empty / any unknown token ⇒ `None`.
+fn parse_days(s: &str) -> Option<Vec<Weekday>> {
+    let mut out: Vec<Weekday> = Vec::new();
+    for tok in s.split(',') {
+        let day = match tok.trim().to_ascii_lowercase().as_str() {
+            "mon" => Weekday::Mon,
+            "tue" => Weekday::Tue,
+            "wed" => Weekday::Wed,
+            "thu" => Weekday::Thu,
+            "fri" => Weekday::Fri,
+            "sat" => Weekday::Sat,
+            "sun" => Weekday::Sun,
+            _ => return None,
         };
+        if !out.contains(&day) {
+            out.push(day);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// The epoch-ms of the most-recent scheduled occurrence at or before `now_ms`
+/// for a calendar (daily/weekly) schedule, computed in `tz` so it is DST-aware
+/// (chrono-tz resolves the wall-clock `hh:mm` to the correct UTC instant for
+/// the day, including across spring-forward / fall-back). `None` only if the
+/// clock can't be represented.
+///
+/// Strategy: walk back day-by-day from "today in `tz`" (at most 8 days — a full
+/// week plus one for the daily case / DST slack); for each candidate day that
+/// matches the schedule's weekday set, resolve its `hh:mm` wall-clock to an
+/// instant and return the first one `<= now`. Walking days (not a fixed
+/// interval) is what makes it DST-correct: each day's `hh:mm` is resolved
+/// independently in the zone.
+fn last_calendar_occurrence_ms(
+    days: Option<&[Weekday]>,
+    hh: u32,
+    mm: u32,
+    tz: Tz,
+    now_ms: i64,
+) -> Option<i64> {
+    let now_utc = chrono::DateTime::from_timestamp_millis(now_ms)?;
+    let now_local = now_utc.with_timezone(&tz);
+    let today = now_local.date_naive();
+    // Look back over a full week (+1 day of slack for time-of-day / DST).
+    for back in 0..8 {
+        let day = today - chrono::Duration::days(back);
+        if let Some(allowed) = days
+            && !allowed.contains(&day.weekday())
+        {
+            continue;
+        }
+        // Resolve this day's wall-clock hh:mm in the zone (DST-aware). On a
+        // spring-forward gap the slot may not exist; `single()` yields None, so
+        // we fall through to the previous day (the missed slot fires late, on
+        // the next valid occurrence — acceptable at minute granularity).
+        let Some(occ) = tz
+            .with_ymd_and_hms(day.year(), day.month(), day.day(), hh, mm, 0)
+            .single()
+        else {
+            continue;
+        };
+        let occ_ms = occ.timestamp_millis();
+        if occ_ms <= now_ms {
+            return Some(occ_ms);
+        }
     }
     None
 }
 
-/// Whether a cron invocation is DUE: it has never run (`last_run_ms` is `None`),
-/// or at least its interval has elapsed since the last run. A schedule v1 does
-/// not understand returns `false` (disabled).
+/// Whether a scheduled invocation is DUE at `now_ms` given its last run.
+///
+/// - **Interval** (`2m`/`2h`/`2d`/`@hourly`/`@daily`): due iff never run, or at
+///   least the interval has elapsed since the last run.
+/// - **Daily / Weekly**: due iff the most-recent scheduled occurrence `<= now`
+///   (computed in the schedule's timezone, DST-aware) is strictly AFTER the
+///   last run. This fires exactly once per occurrence (a second tick within the
+///   same slot sees the same occurrence ≤ last_run and is NOT due), and a missed
+///   occurrence fires on the next tick (the occurrence is still > last_run).
+///   Never run ⇒ due as soon as an occurrence exists at or before now.
+///
+/// A trigger the grammar does not understand (or `one-time`) returns `false`.
 #[must_use]
 pub fn is_due(inv: &Invocation, last_run_ms: Option<i64>, now_ms: i64) -> bool {
-    let Some(interval) = inv.interval_ms() else {
+    let Some(schedule) = inv.schedule() else {
         return false;
     };
-    match last_run_ms {
-        None => true,
-        Some(last) => now_ms.saturating_sub(last) >= interval,
+    schedule_is_due(&schedule, last_run_ms, now_ms)
+}
+
+/// [`is_due`] over an already-parsed [`Schedule`] (the testable core).
+#[must_use]
+pub fn schedule_is_due(schedule: &Schedule, last_run_ms: Option<i64>, now_ms: i64) -> bool {
+    match schedule {
+        Schedule::Interval(interval) => match last_run_ms {
+            None => true,
+            Some(last) => now_ms.saturating_sub(last) >= *interval,
+        },
+        Schedule::Daily { hh, mm, tz } => {
+            match last_calendar_occurrence_ms(None, *hh, *mm, *tz, now_ms) {
+                None => false,
+                Some(occ) => last_run_ms.is_none_or(|last| occ > last),
+            }
+        }
+        Schedule::Weekly { days, hh, mm, tz } => {
+            match last_calendar_occurrence_ms(Some(days), *hh, *mm, *tz, now_ms) {
+                None => false,
+                Some(occ) => last_run_ms.is_none_or(|last| occ > last),
+            }
+        }
     }
 }
 
@@ -389,21 +572,72 @@ pub fn is_due(inv: &Invocation, last_run_ms: Option<i64>, now_ms: i64) -> bool {
 mod tests {
     use super::*;
 
+    /// An interval `Schedule` for `ms`, for terse assertions.
+    fn interval(ms: i64) -> Schedule {
+        Schedule::Interval(ms)
+    }
+
     #[test]
-    fn parse_schedule_forms() {
-        assert_eq!(parse_schedule_ms("@hourly"), Some(HOUR_MS));
-        assert_eq!(parse_schedule_ms("@daily"), Some(DAY_MS));
-        assert_eq!(parse_schedule_ms("every 1m"), Some(MINUTE_MS));
-        assert_eq!(parse_schedule_ms("every 15m"), Some(15 * MINUTE_MS));
-        assert_eq!(parse_schedule_ms("every 2h"), Some(2 * HOUR_MS));
-        assert_eq!(parse_schedule_ms("  @hourly  "), Some(HOUR_MS));
+    fn parse_interval_forms() {
+        // Bare shorthand (v2): m / h / d.
+        assert_eq!(parse_schedule("2m"), Some(interval(2 * MINUTE_MS)));
+        assert_eq!(parse_schedule("2h"), Some(interval(2 * HOUR_MS)));
+        assert_eq!(parse_schedule("2d"), Some(interval(2 * DAY_MS)));
+        assert_eq!(parse_schedule("15m"), Some(interval(15 * MINUTE_MS)));
+        // `every <N><unit>` synonyms.
+        assert_eq!(parse_schedule("every 1m"), Some(interval(MINUTE_MS)));
+        assert_eq!(parse_schedule("every 2h"), Some(interval(2 * HOUR_MS)));
+        assert_eq!(parse_schedule("every 3d"), Some(interval(3 * DAY_MS)));
+        // Back-compat aliases.
+        assert_eq!(parse_schedule("@hourly"), Some(interval(HOUR_MS)));
+        assert_eq!(parse_schedule("@daily"), Some(interval(DAY_MS)));
+        assert_eq!(parse_schedule("  @hourly  "), Some(interval(HOUR_MS)));
         // Unknown / unsupported → disabled.
-        assert_eq!(parse_schedule_ms("* * * * *"), None);
-        assert_eq!(parse_schedule_ms("@weekly"), None);
-        assert_eq!(parse_schedule_ms("every 0m"), None);
-        assert_eq!(parse_schedule_ms("every -3m"), None);
-        assert_eq!(parse_schedule_ms("every 5s"), None);
-        assert_eq!(parse_schedule_ms("everything"), None);
+        assert_eq!(parse_schedule("* * * * *"), None);
+        assert_eq!(parse_schedule("@weekly"), None);
+        assert_eq!(parse_schedule("0m"), None);
+        assert_eq!(parse_schedule("-3m"), None);
+        assert_eq!(parse_schedule("5s"), None);
+        assert_eq!(parse_schedule("everything"), None);
+    }
+
+    #[test]
+    fn parse_calendar_forms() {
+        let ny: Tz = "America/New_York".parse().unwrap();
+        assert_eq!(
+            parse_schedule("daily at 09:00 America/New_York"),
+            Some(Schedule::Daily {
+                hh: 9,
+                mm: 0,
+                tz: ny,
+            })
+        );
+        assert_eq!(
+            parse_schedule("weekly on mon,wed,fri at 14:00 America/New_York"),
+            Some(Schedule::Weekly {
+                days: vec![Weekday::Mon, Weekday::Wed, Weekday::Fri],
+                hh: 14,
+                mm: 0,
+                tz: ny,
+            })
+        );
+        // Day order/dupes are de-duplicated, original order preserved.
+        assert_eq!(
+            parse_schedule("weekly on fri,mon,fri at 00:30 UTC"),
+            Some(Schedule::Weekly {
+                days: vec![Weekday::Fri, Weekday::Mon],
+                hh: 0,
+                mm: 30,
+                tz: "UTC".parse().unwrap(),
+            })
+        );
+        // Unparseable → disabled.
+        assert_eq!(parse_schedule("daily at 9 America/New_York"), None);
+        assert_eq!(parse_schedule("daily at 25:00 UTC"), None);
+        assert_eq!(parse_schedule("daily at 09:60 UTC"), None);
+        assert_eq!(parse_schedule("daily at 09:00 Not/AZone"), None);
+        assert_eq!(parse_schedule("weekly on funday at 09:00 UTC"), None);
+        assert_eq!(parse_schedule("weekly on mon at 09:00"), None); // no tz
     }
 
     #[test]
@@ -450,9 +684,9 @@ mod tests {
         assert_eq!(inv.use_name, "standup");
         assert_eq!(inv.trigger, "cron @hourly");
         assert_eq!(inv.prompt, "Summarize today.");
-        assert!(inv.is_cron());
-        assert_eq!(inv.cron_schedule(), Some("@hourly"));
-        assert_eq!(inv.interval_ms(), Some(HOUR_MS));
+        assert!(inv.is_scheduled());
+        assert_eq!(inv.schedule_str(), Some("@hourly"));
+        assert_eq!(inv.schedule(), Some(Schedule::Interval(HOUR_MS)));
         // block_end points right after the closing fence line.
         assert_eq!(&body[inv.block_end..], "\nMore text.");
     }
@@ -462,9 +696,9 @@ mod tests {
         let body = "```agent\nuse: foo\ntrigger: one-time\nprompt: Hi.\n```";
         let invs = parse_invocations("f", body);
         assert_eq!(invs.len(), 1);
-        assert!(!invs[0].is_cron());
-        assert_eq!(invs[0].cron_schedule(), None);
-        assert_eq!(invs[0].interval_ms(), None);
+        assert!(!invs[0].is_scheduled());
+        assert_eq!(invs[0].schedule_str(), None);
+        assert_eq!(invs[0].schedule(), None);
     }
 
     #[test]
@@ -473,7 +707,7 @@ mod tests {
         let invs = parse_invocations("f", body);
         assert_eq!(invs.len(), 1);
         assert_eq!(invs[0].trigger, "one-time");
-        assert!(!invs[0].is_cron());
+        assert!(!invs[0].is_scheduled());
     }
 
     #[test]
@@ -482,7 +716,7 @@ mod tests {
         let invs = parse_invocations("f", body);
         assert_eq!(invs.len(), 1);
         assert_eq!(invs[0].prompt, "line one\nline two\nline three");
-        assert_eq!(invs[0].interval_ms(), Some(MINUTE_MS));
+        assert_eq!(invs[0].schedule(), Some(Schedule::Interval(MINUTE_MS)));
     }
 
     #[test]
@@ -499,7 +733,7 @@ mod tests {
         assert_eq!(invs.len(), 2);
         assert_eq!(invs[0].use_name, "a");
         assert_eq!(invs[1].use_name, "b");
-        assert_eq!(invs[1].interval_ms(), Some(DAY_MS));
+        assert_eq!(invs[1].schedule(), Some(Schedule::Interval(DAY_MS)));
     }
 
     #[test]
@@ -515,8 +749,9 @@ mod tests {
     }
 
     #[test]
-    fn cron_schedule_requires_separator() {
-        // `cronish` must NOT be read as a cron trigger.
+    fn cronish_prefix_is_not_a_schedule() {
+        // `cronish whatever` must NOT be read as a schedule (the `cron` prefix
+        // requires a whitespace separator; the whole string fails the grammar).
         let inv = Invocation {
             use_name: "x".into(),
             trigger: "cronish whatever".into(),
@@ -524,24 +759,32 @@ mod tests {
             invocation_id: "id".into(),
             block_end: 0,
         };
-        assert!(!inv.is_cron());
+        assert!(!inv.is_scheduled());
+        assert_eq!(inv.schedule(), None);
+    }
+
+    #[test]
+    fn bare_interval_trigger_without_cron_prefix() {
+        // v2: a bare `2d` trigger (no `cron ` prefix) is a first-class schedule.
+        let body = "```agent\nuse: x\ntrigger: 2d\nprompt: p\n```";
+        let inv = &parse_invocations("f", body)[0];
+        assert!(inv.is_scheduled());
+        assert_eq!(inv.schedule(), Some(Schedule::Interval(2 * DAY_MS)));
     }
 
     #[test]
     fn unknown_schedule_is_disabled() {
         let body = "```agent\nuse: x\ntrigger: cron @weekly\nprompt: p\n```";
         let inv = &parse_invocations("f", body)[0];
-        assert!(inv.is_cron(), "trigger is cron…");
-        assert_eq!(
-            inv.interval_ms(),
-            None,
-            "…but @weekly is an unknown schedule"
-        );
+        // @weekly is not in the grammar → not scheduled.
+        assert!(!inv.is_scheduled(), "@weekly is an unknown schedule");
+        assert_eq!(inv.schedule(), None);
         assert!(!is_due(inv, None, 1_000_000));
     }
 
     #[test]
-    fn due_logic() {
+    fn interval_due_logic() {
+        // Back-compat block (legacy `cron ` prefix, but new `1m` is fine too).
         let body = "```agent\nuse: x\ntrigger: cron every 1m\nprompt: p\n```";
         let inv = &parse_invocations("f", body)[0];
         // Never run → due.
@@ -552,5 +795,93 @@ mod tests {
         assert!(is_due(inv, Some(1_000_000), 1_000_000 + MINUTE_MS));
         // Run 59s ago → not yet.
         assert!(!is_due(inv, Some(1_000_000), 1_000_000 + MINUTE_MS - 1));
+    }
+
+    #[test]
+    fn back_compat_hourly_block_still_fires() {
+        // An old `cron @hourly` block keeps working under v2.
+        let body = "```agent\nuse: x\ntrigger: cron @hourly\nprompt: p\n```";
+        let inv = &parse_invocations("f", body)[0];
+        assert_eq!(inv.schedule(), Some(Schedule::Interval(HOUR_MS)));
+        assert!(is_due(inv, None, 0));
+        assert!(!is_due(inv, Some(1_000_000), 1_000_000 + HOUR_MS - 1));
+        assert!(is_due(inv, Some(1_000_000), 1_000_000 + HOUR_MS));
+    }
+
+    // ── calendar (daily/weekly) due-computation, DST-aware via chrono-tz ──────
+
+    /// epoch-ms for a wall-clock instant in a named zone (test helper).
+    fn ms_at(tz_name: &str, y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        let tz: Tz = tz_name.parse().unwrap();
+        tz.with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn daily_fires_once_per_occurrence_across_day_boundary() {
+        let sched = parse_schedule("daily at 09:00 America/New_York").unwrap();
+        // "now" = 2026-03-10 10:00 ET — the 09:00 slot today has passed.
+        let now = ms_at("America/New_York", 2026, 3, 10, 10, 0);
+        // Never run → due (the 09:00 occurrence is ≤ now).
+        assert!(schedule_is_due(&sched, None, now));
+        // Last run right at today's 09:00 occurrence → not due again today.
+        let today_9 = ms_at("America/New_York", 2026, 3, 10, 9, 0);
+        assert!(!schedule_is_due(&sched, Some(today_9), now));
+        // Last run was yesterday's 09:00 → today's occurrence is newer → due.
+        let yesterday_9 = ms_at("America/New_York", 2026, 3, 9, 9, 0);
+        assert!(schedule_is_due(&sched, Some(yesterday_9), now));
+        // Before today's 09:00 (08:00 now), last run yesterday → the most-recent
+        // occurrence ≤ now is yesterday's, == last_run → NOT due yet.
+        let now_8am = ms_at("America/New_York", 2026, 3, 10, 8, 0);
+        assert!(!schedule_is_due(&sched, Some(yesterday_9), now_8am));
+    }
+
+    #[test]
+    fn weekly_fires_only_on_selected_days() {
+        // Mon/Wed/Fri at 14:00 ET. 2026-06-15 is a Monday.
+        let sched = parse_schedule("weekly on mon,wed,fri at 14:00 America/New_York").unwrap();
+        // Monday 15:00 → Monday's 14:00 occurrence passed, never run → due.
+        let mon_3pm = ms_at("America/New_York", 2026, 6, 15, 15, 0);
+        assert!(schedule_is_due(&sched, None, mon_3pm));
+        // Fired at Monday 14:00 → not due again until the next selected day.
+        let mon_2pm = ms_at("America/New_York", 2026, 6, 15, 14, 0);
+        assert!(!schedule_is_due(&sched, Some(mon_2pm), mon_3pm));
+        // Tuesday (not selected) all day → most-recent occurrence is still
+        // Monday 14:00 == last_run → NOT due.
+        let tue_4pm = ms_at("America/New_York", 2026, 6, 16, 16, 0);
+        assert!(!schedule_is_due(&sched, Some(mon_2pm), tue_4pm));
+        // Wednesday 14:30 → Wednesday's occurrence is newer than Mon → due.
+        let wed_230pm = ms_at("America/New_York", 2026, 6, 17, 14, 30);
+        assert!(schedule_is_due(&sched, Some(mon_2pm), wed_230pm));
+    }
+
+    #[test]
+    fn missed_occurrence_fires_on_next_tick() {
+        // Daily at 09:00 UTC; the host was down and missed several days. Last
+        // run was 3 days ago; "now" is past today's 09:00 → still due (the most-
+        // recent occurrence is newer than last_run, fires once, catching up).
+        let sched = parse_schedule("daily at 09:00 UTC").unwrap();
+        let now = ms_at("UTC", 2026, 6, 15, 10, 0);
+        let three_days_ago_9 = ms_at("UTC", 2026, 6, 12, 9, 0);
+        assert!(schedule_is_due(&sched, Some(three_days_ago_9), now));
+    }
+
+    #[test]
+    fn daily_is_dst_aware_spring_forward() {
+        // US spring-forward 2026 is 2026-03-08 (clocks jump 02:00→03:00 ET).
+        // A 09:00 ET daily slot is well clear of the gap, but the UTC offset
+        // changes that day (EST→EDT). Verify the occurrence resolves to the
+        // correct EDT wall-clock instant (13:00 UTC, not 14:00).
+        let sched = parse_schedule("daily at 09:00 America/New_York").unwrap();
+        let now = ms_at("America/New_York", 2026, 3, 9, 10, 0); // day after DST
+        // The occurrence used by is_due must equal 09:00 EDT on 2026-03-09,
+        // i.e. 13:00 UTC. A naive fixed-offset scheduler would be an hour off.
+        let occ_edt = ms_at("UTC", 2026, 3, 9, 13, 0);
+        // Last-run exactly at the correct EDT occurrence ⇒ not due; one ms
+        // before ⇒ due. This pins the occurrence instant.
+        assert!(!schedule_is_due(&sched, Some(occ_edt), now));
+        assert!(schedule_is_due(&sched, Some(occ_edt - 1), now));
     }
 }

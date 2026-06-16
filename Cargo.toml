@@ -34,6 +34,10 @@ automerge = "0.10"
 autosurgeon = "0.12"
 axum = "0.8"
 base64 = "0.22"
+# DST-aware calendar scheduling in the `tangram` app component (must compile to
+# wasm32-wasip2 — both with default-features off; see apps/tangram/src/agents.rs).
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+chrono-tz = { version = "0.10", default-features = false }
 dotenvy = "0.15"
 futures-util = "0.3"
 notify = "8"

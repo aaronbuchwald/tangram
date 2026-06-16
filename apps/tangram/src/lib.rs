@@ -278,7 +278,7 @@ impl Vault {
             .files
             .iter()
             .flat_map(|f| agents::parse_invocations(&f.id, &f.body))
-            .filter(|inv| inv.is_cron())
+            .filter(|inv| inv.is_scheduled())
             .filter(|inv| agents::is_due(inv, state.last_run_ms(&inv.invocation_id), now))
             .filter_map(|inv| resolve(&inv.use_name).map(|def| (inv, def)))
             .collect();
