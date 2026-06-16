@@ -1,19 +1,21 @@
 //! Agent/skill execution support for the vault: the definition frontmatter
-//! parser, the ```agent``` invocation-block parser, and the v2 schedule grammar
-//! (interval shorthand `2m`/`2h`/`2d` + calendar daily/weekly-at-a-time with a
-//! DST-aware IANA timezone, plus the `@hourly`/`@daily` back-compat aliases).
+//! parser, the inline `agent://<id>` link parser (the scheduled-invocation
+//! handle), and the v2 schedule grammar (interval shorthand `2m`/`2h`/`2d` +
+//! calendar daily/weekly-at-a-time with a DST-aware IANA timezone, plus the
+//! `@hourly`/`@daily` back-compat aliases).
 //!
-//! R1 — the trigger belongs to the INVOCATION, not the definition:
+//! The trigger belongs to the INVOCATION, not the definition:
 //!
 //! - A **definition** (`agents/…` note) is a pure capability: `kind`, `name`,
 //!   `model`, instructions, labels. It carries NO trigger. This mirrors the
 //!   fields `apps/tangram/ui/src/agents.ts` parses (any stray `trigger:` left in
 //!   an old definition is parsed-and-ignored).
-//! - An **invocation** is a durable instance — a fenced ```` ```agent ```` block
-//!   inside any note — that owns the `trigger` + `prompt` and links to a
-//!   definition via `use:`. It is derived from the file text (so editing or
-//!   removing the block self-cleans, stray-ref-safe), keyed by a stable
-//!   `invocation_id`. This mirrors `apps/tangram/ui/src/invocations.ts` EXACTLY.
+//! - A **scheduled invocation** is an entry in the replicated `invocations`
+//!   index in `lib.rs` (the source of truth for trigger/prompt/last-run), keyed
+//!   by a stable UUID that is also embedded in a note as an inline
+//!   `[⚡ <agent>](agent://<id>)` link (the HANDLE). This module parses those
+//!   links (`parse_agent_links`) and evaluates a trigger's due-ness
+//!   (`trigger_is_due`); it mirrors `apps/tangram/ui/src/invocations.ts`.
 //!
 //! Everything here is pure (no I/O, no clock), so it is straightforward to
 //! unit-test; the action layer in `lib.rs` supplies the wall clock and the LLM
@@ -48,71 +50,37 @@ pub struct AgentDef {
     pub mcp_servers: Vec<String>,
 }
 
-/// A parsed ```` ```agent ```` invocation block: a durable instance inside a
-/// note that links to a definition (`use:`) and owns the `trigger` + `prompt`.
-/// The source of truth for whether/how an agent runs (R1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invocation {
-    /// The definition this invocation runs (the `use:` field — a definition
-    /// `name`).
-    pub use_name: String,
-    /// The raw `trigger:` text, e.g. `2h`, `daily at 09:00 America/New_York`,
-    /// `weekly on mon,wed,fri at 14:00 America/New_York`, `@daily`, or
-    /// `one-time`. A legacy `cron ` prefix is accepted (back-compat).
-    pub trigger: String,
-    /// The `prompt:` text (may span multiple lines until the closing fence).
-    pub prompt: String,
-    /// A stable hash of `{host_file_id + use + trigger + prompt}` — unchanged
-    /// while the block is unedited, new on any edit, gone when removed
-    /// (stray-ref-safe). Mirrors `invocationId` in the UI's `invocations.ts`.
-    pub invocation_id: String,
-    /// The byte offset just past the closing ```` ``` ```` fence in the source
-    /// body (where the run output is appended), or the source body length when
-    /// the block runs to EOF without a closing fence.
-    pub block_end: usize,
+/// The schedule portion of a raw trigger string, stripped of the optional
+/// back-compat `cron ` prefix. `daily at …`/`weekly on …`/`2m`/`@hourly` (with
+/// or without the legacy `cron ` prefix) all return the bare schedule text;
+/// `one-time`/empty returns `None`.
+///
+/// v2: the trigger no longer REQUIRES a `cron ` prefix — bare schedules (`2m`,
+/// `daily at 09:00 America/New_York`, …) are first-class. The prefix is still
+/// accepted so existing `cron @hourly` triggers keep parsing.
+#[must_use]
+pub fn schedule_str(trigger: &str) -> Option<&str> {
+    let t = trigger.trim();
+    if t.is_empty() || t == "one-time" {
+        return None;
+    }
+    // Strip an optional leading `cron` token (back-compat with v1 triggers).
+    if let Some(rest) = t.strip_prefix("cron") {
+        if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
+            // `cronish …` is NOT a cron prefix; fall through and let the grammar
+            // reject it (it won't parse), i.e. disabled.
+            return Some(t);
+        }
+        return Some(rest.trim());
+    }
+    Some(t)
 }
 
-impl Invocation {
-    /// The schedule portion of the trigger, stripped of the optional back-compat
-    /// `cron ` prefix. `daily at …`/`weekly on …`/`2m`/`@hourly` (with or
-    /// without the legacy `cron ` prefix) all return the bare schedule text;
-    /// `one-time` returns `None`.
-    ///
-    /// v2: the trigger no longer REQUIRES a `cron ` prefix — bare schedules
-    /// (`2m`, `daily at 09:00 America/New_York`, …) are first-class. The prefix
-    /// is still accepted so existing `cron @hourly` blocks keep parsing.
-    #[must_use]
-    pub fn schedule_str(&self) -> Option<&str> {
-        let t = self.trigger.trim();
-        if t.is_empty() || t == "one-time" {
-            return None;
-        }
-        // Strip an optional leading `cron` token (back-compat with v1 blocks).
-        if let Some(rest) = t.strip_prefix("cron") {
-            if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
-                // `cronish …` is NOT a cron prefix; fall through and let the
-                // grammar reject it (it won't parse), i.e. disabled.
-                return Some(t);
-            }
-            return Some(rest.trim());
-        }
-        Some(t)
-    }
-
-    /// The parsed [`Schedule`], if this invocation declares one the grammar
-    /// understands. `None` ⇒ disabled (`one-time`, or an unknown/unparseable
-    /// schedule — the caller skips it).
-    #[must_use]
-    pub fn schedule(&self) -> Option<Schedule> {
-        self.schedule_str().and_then(parse_schedule)
-    }
-
-    /// Whether this invocation declares a schedule the grammar understands
-    /// (i.e. the host scheduler should consider it).
-    #[must_use]
-    pub fn is_scheduled(&self) -> bool {
-        self.schedule().is_some()
-    }
+/// The parsed [`Schedule`] for a raw trigger string, if it declares one the
+/// grammar understands. `None` ⇒ disabled (`one-time`, or an unknown schedule).
+#[must_use]
+pub fn schedule_of(trigger: &str) -> Option<Schedule> {
+    schedule_str(trigger).and_then(parse_schedule)
 }
 
 // ── frontmatter parsing (a flat-scalar subset) ────────────────────────────────
@@ -274,148 +242,6 @@ impl Lookup for Vec<(String, String)> {
     fn get(&self, key: &str) -> Option<&str> {
         self.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
-}
-
-// ── invocation-block parsing (the ```agent fenced block) ─────────────────────
-
-/// Parse every ```` ```agent ```` invocation block in `body`, in document
-/// order. Each block has the shape:
-///
-/// ```text
-/// ```agent
-/// use: <definition-name>
-/// trigger: 1h                     # or "daily at 09:00 America/New_York", "one-time"
-/// prompt: <prompt text, may span
-/// multiple lines until the fence>
-/// ```
-/// ```
-///
-/// `use`/`trigger`/`prompt` are flat `key: value` lines at the top of the
-/// block; everything after the `prompt:` line (until the closing fence) is part
-/// of the prompt (so it may span multiple lines). A block missing `use` is
-/// skipped (it cannot resolve a definition). Mirrors `parseInvocations` in
-/// `ui/src/invocations.ts` EXACTLY so the UI and component agree on the format.
-///
-/// `host_file_id` is folded into each block's `invocation_id` so the same block
-/// text in two different notes gets distinct ids.
-#[must_use]
-pub fn parse_invocations(host_file_id: &str, body: &str) -> Vec<Invocation> {
-    let mut out = Vec::new();
-    let lines: Vec<&str> = body.split('\n').collect();
-    // Byte offset of the start of each line, so we can report `block_end`.
-    let mut line_start = Vec::with_capacity(lines.len() + 1);
-    {
-        let mut acc = 0usize;
-        for l in &lines {
-            line_start.push(acc);
-            acc += l.len() + 1; // +1 for the '\n' that split removed
-        }
-        line_start.push(acc); // sentinel = body.len() + 1
-    }
-
-    let mut i = 0usize;
-    while i < lines.len() {
-        if lines[i].trim() != "```agent" {
-            i += 1;
-            continue;
-        }
-        // Collect block lines until the closing fence.
-        let mut j = i + 1;
-        let mut block: Vec<&str> = Vec::new();
-        let mut closed = false;
-        while j < lines.len() {
-            if lines[j].trim() == "```" {
-                closed = true;
-                break;
-            }
-            block.push(lines[j]);
-            j += 1;
-        }
-        // `block_end`: the offset just past the closing fence line's newline,
-        // or the body length when the block ran to EOF without a fence.
-        let block_end = if closed {
-            // line `j` is the closing fence; the next line starts after it.
-            line_start
-                .get(j + 1)
-                .copied()
-                .map_or(body.len(), |s| s.min(body.len()))
-        } else {
-            body.len()
-        };
-
-        if let Some(inv) = parse_invocation_block(host_file_id, &block, block_end) {
-            out.push(inv);
-        }
-        // Resume scanning after the closing fence (or at EOF).
-        i = if closed { j + 1 } else { j };
-    }
-    out
-}
-
-/// Parse the inner lines of one ```` ```agent ```` block into an [`Invocation`].
-/// Returns `None` when `use` is missing/empty (an unresolvable block).
-fn parse_invocation_block(
-    host_file_id: &str,
-    block: &[&str],
-    block_end: usize,
-) -> Option<Invocation> {
-    let mut use_name: Option<String> = None;
-    let mut trigger: Option<String> = None;
-    let mut prompt: Option<String> = None;
-
-    let mut k = 0usize;
-    while k < block.len() {
-        let line = block[k];
-        let Some(idx) = line.find(':') else {
-            k += 1;
-            continue;
-        };
-        let key = line[..idx].trim().to_ascii_lowercase();
-        let val = line[idx + 1..].trim();
-        match key.as_str() {
-            "use" if use_name.is_none() => use_name = Some(val.to_string()),
-            "trigger" if trigger.is_none() => trigger = Some(val.to_string()),
-            "prompt" if prompt.is_none() => {
-                // The prompt runs from this line's value to the end of the
-                // block (multi-line). The first line is the inline value; any
-                // following block lines are appended verbatim.
-                let mut parts: Vec<String> = vec![val.to_string()];
-                for rest in &block[k + 1..] {
-                    parts.push((*rest).to_string());
-                }
-                let joined = parts.join("\n");
-                prompt = Some(joined.trim().to_string());
-                break;
-            }
-            _ => {}
-        }
-        k += 1;
-    }
-
-    let use_name = use_name
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    let trigger = trigger.unwrap_or_else(|| "one-time".to_string());
-    let prompt = prompt.unwrap_or_default();
-    let invocation_id = invocation_id(host_file_id, &use_name, &trigger, &prompt);
-
-    Some(Invocation {
-        use_name,
-        trigger,
-        prompt,
-        invocation_id,
-        block_end,
-    })
-}
-
-/// A stable id for an invocation: a hex FNV-1a hash of
-/// `host_file_id\0use\0trigger\0prompt`. Mirrors `invocationId` in the UI's
-/// `invocations.ts` byte-for-byte (same fields, same separator, same FNV-1a)
-/// so the UI and the component derive identical ids for the same block.
-#[must_use]
-pub fn invocation_id(host_file_id: &str, use_name: &str, trigger: &str, prompt: &str) -> String {
-    let key = format!("{host_file_id}\0{use_name}\0{trigger}\0{prompt}");
-    fnv1a_hex(&key)
 }
 
 /// 64-bit FNV-1a over the UTF-8 bytes, lowercase hex. Tiny, dependency-free,
@@ -609,7 +435,67 @@ fn last_calendar_occurrence_ms(
     None
 }
 
-/// Whether a scheduled invocation is DUE at `now_ms` given its last run.
+// ── inline `agent://<id>` links (the scheduled-invocation handle) ─────────────
+
+/// One inline `[<label>](agent://<id>)` link found in a note body: the stable
+/// invocation `id` it references plus the byte offset just past the link (where
+/// the scheduler appends the run output). Mirrors `parseAgentLinks` in the UI's
+/// `invocations.ts`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLink {
+    /// The invocation id embedded in the link target (`agent://<id>`).
+    pub id: String,
+    /// The byte offset just past the closing `)` of the markdown link (where the
+    /// run output is appended).
+    pub link_end: usize,
+}
+
+/// Parse every inline `[<label>](agent://<id>)` link in `body`, in document
+/// order. The label may contain anything but `]`; the id is the non-`)` run
+/// after the `agent://` scheme. Mirrors the UI's `parseAgentLinks` so both sides
+/// agree on the handle format.
+#[must_use]
+pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
+    let mut out = Vec::new();
+    let bytes = body.as_bytes();
+    let needle = b"](agent://";
+    let mut i = 0usize;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] != needle {
+            i += 1;
+            continue;
+        }
+        // The link must open with a `[` somewhere before the `]` on this run; a
+        // bare `](agent://…)` without an opening bracket is not a markdown link.
+        // Find the matching `[` by scanning back to the nearest unbalanced `[`.
+        let label_close = i; // index of `]`
+        let Some(open) = body[..label_close].rfind('[') else {
+            i += needle.len();
+            continue;
+        };
+        let _ = open; // presence of `[` is all we require for the handle
+        // The id runs from just after `agent://` to the closing `)`.
+        let id_start = i + needle.len();
+        let Some(rel_close) = body[id_start..].find(')') else {
+            break; // no closing paren — malformed; stop scanning
+        };
+        let id_end = id_start + rel_close;
+        let id = body[id_start..id_end].trim().to_string();
+        if !id.is_empty() {
+            out.push(AgentLink {
+                id,
+                link_end: id_end + 1, // just past the `)`
+            });
+        }
+        i = id_end + 1;
+    }
+    out
+}
+
+/// Whether a recurring schedule described by the raw `trigger` text is DUE at
+/// `now_ms` given its last run. A `one-time`/unknown trigger returns `false`
+/// (the scheduler skips it). The index-keyed entry point: the trigger lives on
+/// the `Invocation` index entry, not in a block.
 ///
 /// - **Interval** (`2m`/`2h`/`2d`/`@hourly`/`@daily`): due iff never run, or at
 ///   least the interval has elapsed since the last run.
@@ -619,17 +505,22 @@ fn last_calendar_occurrence_ms(
 ///   same slot sees the same occurrence ≤ last_run and is NOT due), and a missed
 ///   occurrence fires on the next tick (the occurrence is still > last_run).
 ///   Never run ⇒ due as soon as an occurrence exists at or before now.
-///
-/// A trigger the grammar does not understand (or `one-time`) returns `false`.
 #[must_use]
-pub fn is_due(inv: &Invocation, last_run_ms: Option<i64>, now_ms: i64) -> bool {
-    let Some(schedule) = inv.schedule() else {
-        return false;
-    };
-    schedule_is_due(&schedule, last_run_ms, now_ms)
+pub fn trigger_is_due(trigger: &str, last_run_ms: Option<i64>, now_ms: i64) -> bool {
+    match schedule_of(trigger) {
+        Some(schedule) => schedule_is_due(&schedule, last_run_ms, now_ms),
+        None => false,
+    }
 }
 
-/// [`is_due`] over an already-parsed [`Schedule`] (the testable core).
+/// Whether the raw `trigger` text names a recurring schedule the grammar
+/// understands (the host scheduler should consider it).
+#[must_use]
+pub fn trigger_is_scheduled(trigger: &str) -> bool {
+    schedule_of(trigger).is_some()
+}
+
+/// [`trigger_is_due`] over an already-parsed [`Schedule`] (the testable core).
 #[must_use]
 pub fn schedule_is_due(schedule: &Schedule, last_run_ms: Option<i64>, now_ms: i64) -> bool {
     match schedule {
@@ -804,137 +695,70 @@ mod tests {
     }
 
     #[test]
-    fn parse_one_cron_invocation() {
-        let body = "Some note.\n\n```agent\nuse: standup\ntrigger: cron @hourly\n\
-                    prompt: Summarize today.\n```\n\nMore text.";
-        let invs = parse_invocations("file-1", body);
-        assert_eq!(invs.len(), 1);
-        let inv = &invs[0];
-        assert_eq!(inv.use_name, "standup");
-        assert_eq!(inv.trigger, "cron @hourly");
-        assert_eq!(inv.prompt, "Summarize today.");
-        assert!(inv.is_scheduled());
-        assert_eq!(inv.schedule_str(), Some("@hourly"));
-        assert_eq!(inv.schedule(), Some(Schedule::Interval(HOUR_MS)));
-        // block_end points right after the closing fence line.
-        assert_eq!(&body[inv.block_end..], "\nMore text.");
-    }
-
-    #[test]
-    fn one_time_invocation_is_not_cron() {
-        let body = "```agent\nuse: foo\ntrigger: one-time\nprompt: Hi.\n```";
-        let invs = parse_invocations("f", body);
-        assert_eq!(invs.len(), 1);
-        assert!(!invs[0].is_scheduled());
-        assert_eq!(invs[0].schedule_str(), None);
-        assert_eq!(invs[0].schedule(), None);
-    }
-
-    #[test]
-    fn trigger_defaults_to_one_time() {
-        let body = "```agent\nuse: foo\nprompt: Hi.\n```";
-        let invs = parse_invocations("f", body);
-        assert_eq!(invs.len(), 1);
-        assert_eq!(invs[0].trigger, "one-time");
-        assert!(!invs[0].is_scheduled());
-    }
-
-    #[test]
-    fn multi_line_prompt_runs_to_fence() {
-        let body = "```agent\nuse: foo\ntrigger: cron every 1m\nprompt: line one\nline two\nline three\n```";
-        let invs = parse_invocations("f", body);
-        assert_eq!(invs.len(), 1);
-        assert_eq!(invs[0].prompt, "line one\nline two\nline three");
-        assert_eq!(invs[0].schedule(), Some(Schedule::Interval(MINUTE_MS)));
-    }
-
-    #[test]
-    fn block_without_use_is_skipped() {
-        let body = "```agent\ntrigger: cron @hourly\nprompt: orphan\n```";
-        assert!(parse_invocations("f", body).is_empty());
-    }
-
-    #[test]
-    fn multiple_blocks_parse_in_order() {
-        let body = "```agent\nuse: a\ntrigger: one-time\nprompt: first\n```\n\n\
-                    ```agent\nuse: b\ntrigger: cron @daily\nprompt: second\n```";
-        let invs = parse_invocations("f", body);
-        assert_eq!(invs.len(), 2);
-        assert_eq!(invs[0].use_name, "a");
-        assert_eq!(invs[1].use_name, "b");
-        assert_eq!(invs[1].schedule(), Some(Schedule::Interval(DAY_MS)));
-    }
-
-    #[test]
-    fn invocation_id_is_stable_and_field_sensitive() {
-        let a = invocation_id("f", "foo", "cron @hourly", "p");
-        let b = invocation_id("f", "foo", "cron @hourly", "p");
-        assert_eq!(a, b, "same fields ⇒ same id");
-        // Any field change ⇒ a different id.
-        assert_ne!(a, invocation_id("g", "foo", "cron @hourly", "p"));
-        assert_ne!(a, invocation_id("f", "bar", "cron @hourly", "p"));
-        assert_ne!(a, invocation_id("f", "foo", "cron @daily", "p"));
-        assert_ne!(a, invocation_id("f", "foo", "cron @hourly", "q"));
+    fn schedule_of_strips_cron_and_handles_one_time() {
+        assert_eq!(schedule_str("cron @hourly"), Some("@hourly"));
+        assert_eq!(
+            schedule_of("cron @hourly"),
+            Some(Schedule::Interval(HOUR_MS))
+        );
+        assert_eq!(schedule_str("one-time"), None);
+        assert_eq!(schedule_of("one-time"), None);
+        assert_eq!(schedule_str("  "), None);
     }
 
     #[test]
     fn cronish_prefix_is_not_a_schedule() {
         // `cronish whatever` must NOT be read as a schedule (the `cron` prefix
         // requires a whitespace separator; the whole string fails the grammar).
-        let inv = Invocation {
-            use_name: "x".into(),
-            trigger: "cronish whatever".into(),
-            prompt: String::new(),
-            invocation_id: "id".into(),
-            block_end: 0,
-        };
-        assert!(!inv.is_scheduled());
-        assert_eq!(inv.schedule(), None);
+        assert!(!trigger_is_scheduled("cronish whatever"));
+        assert_eq!(schedule_of("cronish whatever"), None);
     }
 
     #[test]
     fn bare_interval_trigger_without_cron_prefix() {
         // v2: a bare `2d` trigger (no `cron ` prefix) is a first-class schedule.
-        let body = "```agent\nuse: x\ntrigger: 2d\nprompt: p\n```";
-        let inv = &parse_invocations("f", body)[0];
-        assert!(inv.is_scheduled());
-        assert_eq!(inv.schedule(), Some(Schedule::Interval(2 * DAY_MS)));
+        assert!(trigger_is_scheduled("2d"));
+        assert_eq!(schedule_of("2d"), Some(Schedule::Interval(2 * DAY_MS)));
     }
 
     #[test]
     fn unknown_schedule_is_disabled() {
-        let body = "```agent\nuse: x\ntrigger: cron @weekly\nprompt: p\n```";
-        let inv = &parse_invocations("f", body)[0];
         // @weekly is not in the grammar → not scheduled.
-        assert!(!inv.is_scheduled(), "@weekly is an unknown schedule");
-        assert_eq!(inv.schedule(), None);
-        assert!(!is_due(inv, None, 1_000_000));
+        assert!(!trigger_is_scheduled("cron @weekly"), "@weekly is unknown");
+        assert_eq!(schedule_of("cron @weekly"), None);
+        assert!(!trigger_is_due("cron @weekly", None, 1_000_000));
     }
 
     #[test]
     fn interval_due_logic() {
-        // Back-compat block (legacy `cron ` prefix, but new `1m` is fine too).
-        let body = "```agent\nuse: x\ntrigger: cron every 1m\nprompt: p\n```";
-        let inv = &parse_invocations("f", body)[0];
+        // A legacy `cron ` prefix and the new bare form behave identically.
+        let trig = "cron every 1m";
         // Never run → due.
-        assert!(is_due(inv, None, 0));
+        assert!(trigger_is_due(trig, None, 0));
         // Run just now → not due.
-        assert!(!is_due(inv, Some(1_000_000), 1_000_000));
+        assert!(!trigger_is_due(trig, Some(1_000_000), 1_000_000));
         // Run a minute ago → due.
-        assert!(is_due(inv, Some(1_000_000), 1_000_000 + MINUTE_MS));
+        assert!(trigger_is_due(trig, Some(1_000_000), 1_000_000 + MINUTE_MS));
         // Run 59s ago → not yet.
-        assert!(!is_due(inv, Some(1_000_000), 1_000_000 + MINUTE_MS - 1));
+        assert!(!trigger_is_due(
+            trig,
+            Some(1_000_000),
+            1_000_000 + MINUTE_MS - 1
+        ));
     }
 
     #[test]
-    fn back_compat_hourly_block_still_fires() {
-        // An old `cron @hourly` block keeps working under v2.
-        let body = "```agent\nuse: x\ntrigger: cron @hourly\nprompt: p\n```";
-        let inv = &parse_invocations("f", body)[0];
-        assert_eq!(inv.schedule(), Some(Schedule::Interval(HOUR_MS)));
-        assert!(is_due(inv, None, 0));
-        assert!(!is_due(inv, Some(1_000_000), 1_000_000 + HOUR_MS - 1));
-        assert!(is_due(inv, Some(1_000_000), 1_000_000 + HOUR_MS));
+    fn back_compat_hourly_trigger_still_fires() {
+        // An old `cron @hourly` trigger keeps working under v2.
+        let trig = "cron @hourly";
+        assert_eq!(schedule_of(trig), Some(Schedule::Interval(HOUR_MS)));
+        assert!(trigger_is_due(trig, None, 0));
+        assert!(!trigger_is_due(
+            trig,
+            Some(1_000_000),
+            1_000_000 + HOUR_MS - 1
+        ));
+        assert!(trigger_is_due(trig, Some(1_000_000), 1_000_000 + HOUR_MS));
     }
 
     // ── calendar (daily/weekly) due-computation, DST-aware via chrono-tz ──────
@@ -995,6 +819,43 @@ mod tests {
         let now = ms_at("UTC", 2026, 6, 15, 10, 0);
         let three_days_ago_9 = ms_at("UTC", 2026, 6, 12, 9, 0);
         assert!(schedule_is_due(&sched, Some(three_days_ago_9), now));
+    }
+
+    // ── inline `agent://<id>` link parsing + index-keyed due check ────────────
+
+    #[test]
+    fn parse_agent_links_finds_inline_handles() {
+        let body = "Daily check: [⚡ standup](agent://abc123) then more text.\n\
+                    Another [run me](agent://def456).";
+        let links = parse_agent_links(body);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].id, "abc123");
+        assert_eq!(links[1].id, "def456");
+        // link_end points just past the closing `)`.
+        assert_eq!(&body[links[0].link_end..links[0].link_end + 5], " then");
+    }
+
+    #[test]
+    fn parse_agent_links_ignores_non_links() {
+        // No opening `[` → not a markdown link; bare scheme is ignored.
+        assert!(parse_agent_links("see agent://abc for details").is_empty());
+        // Empty id is skipped.
+        assert!(parse_agent_links("[x](agent://)").is_empty());
+        // A normal wikilink/url is not an agent link.
+        assert!(parse_agent_links("[note](other://abc) [[wiki]]").is_empty());
+    }
+
+    #[test]
+    fn trigger_is_due_matches_block_path() {
+        // A bare interval trigger via the index behaves like the block path.
+        assert!(trigger_is_due("1m", None, 0));
+        assert!(!trigger_is_due("1m", Some(1_000_000), 1_000_000));
+        assert!(trigger_is_due("1m", Some(1_000_000), 1_000_000 + MINUTE_MS));
+        // one-time / unknown → never due.
+        assert!(!trigger_is_due("one-time", None, 0));
+        assert!(!trigger_is_due("@weekly", None, 0));
+        assert!(trigger_is_scheduled("daily at 09:00 UTC"));
+        assert!(!trigger_is_scheduled("one-time"));
     }
 
     #[test]

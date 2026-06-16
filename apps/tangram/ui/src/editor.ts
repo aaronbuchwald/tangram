@@ -48,6 +48,11 @@ import {
   wikiLinkHighlight,
 } from "./wikiLink";
 import {
+  type AgentLinkOpener,
+  agentLinkClick,
+  agentLinkHighlight,
+} from "./agentLink";
+import {
   type WikiCandidateProvider,
   wikiCompletionSource,
 } from "./wikiComplete";
@@ -147,6 +152,19 @@ const theme = EditorView.theme(
       textDecorationStyle: "dashed",
       opacity: "0.75",
     },
+    // Inline `[⚡ <agent>](agent://<id>)` agent links (the scheduled-invocation
+    // handle). DARK-BLUE so they read as a distinct affordance from `[[ ]]`
+    // wikilinks (accent blue) — a click opens the Trigger popup. A subtle tinted
+    // chip + bolt glyph marks it as an actionable agent schedule.
+    ".cm-agent-link": {
+      color: "#1746a2",
+      backgroundColor: "rgba(23,70,162,0.14)",
+      borderRadius: "4px",
+      padding: "0.05em 0.3em",
+      fontWeight: "600",
+      textDecoration: "none",
+      cursor: "pointer",
+    },
     // Blockquote: a left bar + dim text, drawn on the line so it survives the
     // concealed `>` marker.
     ".cm-lp-quote": {
@@ -238,6 +256,11 @@ export class MdEditor {
     // The path of the note being edited (sans `.md`), used to exclude it from
     // its own `[[ ]]` autocomplete candidates. Defaults to "unknown".
     currentNotePath: () => string | null = () => null,
+    // Inline `[⚡ <agent>](agent://<id>)` agent-link support (the scheduled-
+    // invocation redesign). Clicking a dark-blue agent link opens the Trigger
+    // popup for its invocation id. Defaults to a no-op so non-vault editors are
+    // unchanged (the highlight is harmless and always on).
+    onOpenAgentLink: AgentLinkOpener = () => {},
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -276,6 +299,12 @@ export class MdEditor {
         // default resolver every link is a harmless ghost and clicks are inert.
         wikiLinkHighlight(resolveWikiLink),
         wikiLinkClick(resolveWikiLink, onOpenWikiLink),
+        // Inline `agent://<id>` agent-link decoration + click-to-edit (the
+        // scheduled-invocation handle). Dark-blue, distinct from `.cm-wikilink`;
+        // a click opens the Trigger popup. Always on; the click is a no-op with
+        // the default opener.
+        agentLinkHighlight(),
+        agentLinkClick(onOpenAgentLink),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
         // mounts (notes stop rendering). So the slash `/<partial>` popup and the

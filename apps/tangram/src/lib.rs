@@ -29,16 +29,24 @@ mod agents;
 #[model]
 pub struct Vault {
     files: Vec<MdFile>,
-    /// Last-run bookkeeping for cron-triggered agent INVOCATIONS, keyed by the
-    /// invocation's stable id (R1: the trigger — and therefore the run cadence —
-    /// belongs to the ```agent``` block, not the definition). A replicated `Vec`
-    /// (not a `HashMap`; the model `Default` must stay deterministic) so a
-    /// scheduled run survives a host restart and a device's view of "when did
-    /// this invocation last run" replicates like any other state. Absent on
+    /// LEGACY: last-run bookkeeping for the retired ```agent```-block scheduling
+    /// path, keyed by the old content-hash invocation id. The redesign moved
+    /// last-run onto the `invocations` index entry (`Invocation.last_run_ms`);
+    /// this field is retained only so documents written by older binaries still
+    /// hydrate (the `missing` attribute supplies the empty default), and is no
+    /// longer written. A deterministic `Vec` (not a `HashMap`).
+    #[autosurgeon(missing = "Option::default")]
+    agent_runs: Option<Vec<AgentRun>>,
+    /// The replicated index of SCHEDULED agent invocations (the redesign): the
+    /// source of truth for a scheduled run's trigger/prompt/last-run/status,
+    /// keyed by a stable UUID that is also embedded in the note text as an inline
+    /// `[⚡ <agent>](agent://<id>)` link (the handle). The markdown carries only
+    /// `{id, agent}`; everything else lives here. A deterministic `Vec` (not a
+    /// `HashMap`; the model `Default` must stay deterministic). Absent on
     /// documents written by older binaries (the `missing` attribute hydrates the
     /// empty default).
     #[autosurgeon(missing = "Option::default")]
-    agent_runs: Option<Vec<AgentRun>>,
+    invocations: Option<Vec<Invocation>>,
     /// Tools/MCP T1: the replicated record of the user's decision on each
     /// `kind: agent` definition's `mcp_servers:` access REQUEST. The request is
     /// the declaration (the def's `mcp_servers`); this records the user's grant
@@ -51,14 +59,49 @@ pub struct Vault {
     mcp_grants: Option<Vec<McpGrant>>,
 }
 
-/// One invocation's last-run timestamp (the cron due-check reads this;
-/// `tick_agents` updates it in the same commit that appends the run's output).
+/// LEGACY (retired block-scheduling path): one invocation's last-run timestamp,
+/// keyed by the old content-hash id. Kept as a `#[model]` only so older
+/// documents with an `agent_runs` array still hydrate; the redesign records
+/// last-run on the `invocations` index entry instead.
 #[model]
 pub struct AgentRun {
-    /// The invocation's stable id (`agents::Invocation::invocation_id`).
+    /// The retired content-hash invocation id.
     invocation_id: String,
     /// Wall-clock ms of the last run that completed.
     last_run_ms: i64,
+}
+
+/// One SCHEDULED agent invocation in the replicated index (the redesign). The
+/// inline `[⚡ <agent>](agent://<id>)` link in a note is just the handle
+/// (`{id, agent}`); this record owns the trigger, prompt, host-file pointer,
+/// last-run bookkeeping, and status. Keyed by the stable `id` (a UUID the UI
+/// mints when it inserts the link). A deterministic `Vec` (not a `HashMap`).
+#[model]
+pub struct Invocation {
+    /// The stable UUID embedded in the note's `agent://<id>` link.
+    id: String,
+    /// The agent/skill definition this invocation runs (a definition `name`,
+    /// matched case-insensitively against the vault's defs).
+    agent: String,
+    /// The raw schedule trigger, e.g. `2h`, `daily at 09:00 America/New_York`,
+    /// `weekly on mon,wed,fri at 14:00 America/New_York` (the v2 grammar in
+    /// `agents::parse_schedule`). Scheduled invocations only — one-time stays a
+    /// run-now flow with no index entry.
+    trigger: String,
+    /// The user prompt sent on each run (the def's instructions are the system
+    /// message; this is the user message).
+    prompt: String,
+    /// The note this invocation's link lives in (the file id where output is
+    /// appended). The reconcile pass prunes entries whose link has vanished.
+    host_file_id: String,
+    /// Wall-clock ms of the last completed run, or `None` if it has never run
+    /// (the due-check reads this). `None` on documents written by older binaries
+    /// (the `missing` attribute hydrates the absent key).
+    #[autosurgeon(missing = "Option::default")]
+    last_run_ms: Option<i64>,
+    /// A short status string for the UI (`"scheduled"` | `"ran"` | `"error"`).
+    /// Free-form/forward-compatible; the scheduler writes `"ran"`/`"error"`.
+    status: String,
 }
 
 /// The user's decision on one `kind: agent` definition's MCP-access request
@@ -97,6 +140,12 @@ const STATUS_PENDING: &str = "pending";
 const STATUS_APPROVED: &str = "approved";
 const STATUS_DENIED: &str = "denied";
 
+/// Scheduled-invocation status values (string-typed for forward-compatibility):
+/// freshly created / never run, last run succeeded, last run errored.
+const STATUS_SCHEDULED: &str = "scheduled";
+const STATUS_RAN: &str = "ran";
+const STATUS_ERROR: &str = "error";
+
 /// The effective MCP status of one agent, computed from the live def's request
 /// and the recorded grant (the [`Vault::mcp_status`] read returns these). This
 /// is what the Agents-view approval UI renders.
@@ -133,6 +182,7 @@ impl Default for Vault {
                 updated_at_ms: None,
             }],
             agent_runs: Some(Vec::new()),
+            invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
         }
     }
@@ -312,43 +362,147 @@ impl Vault {
         Ok(())
     }
 
-    /// The host scheduler's per-tick entry point (host-side cron): scan every
-    /// note body for ```agent``` invocation blocks with a `trigger: cron …`
-    /// whose schedule says they are DUE, resolve each block's `use:` to a
-    /// definition, run it (the def's instructions = system, the block's prompt =
-    /// user), and append each completion right after its block. Returns the
-    /// `use:` names that ran this tick. Resolves the LLM call OUTSIDE the lock
-    /// and commits each result via `Ctx::mutate` (CLAUDE.md: the store lock is
-    /// never held across an await).
+    // ── scheduled invocations (the redesign): the replicated index ────────────
+    //
+    // A scheduled invocation is an inline `[⚡ <agent>](agent://<id>)` link in a
+    // note (the handle) backed by an entry in the `invocations` index (the
+    // trigger/prompt/last-run). The UI mints the UUID, inserts the link, and
+    // calls `create_invocation`. Editing the trigger/prompt goes through
+    // `update_invocation`; removing the link prunes the entry on the next tick.
+
+    /// Create (or replace) a scheduled invocation in the index, keyed by `id`
+    /// (the UUID the UI embedded in the note's `agent://<id>` link). Idempotent
+    /// on `id` (a re-create overwrites trigger/prompt/agent and resets the
+    /// last-run). The link insertion into the note is the UI's job; this records
+    /// the source of truth.
+    pub fn create_invocation(
+        &mut self,
+        id: String,
+        agent: String,
+        trigger: String,
+        prompt: String,
+        host_file_id: String,
+    ) -> Result<(), String> {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            return Err("invocation id must not be empty".to_string());
+        }
+        let invs = self.invocations.get_or_insert_with(Vec::new);
+        if let Some(existing) = invs.iter_mut().find(|i| i.id == id) {
+            existing.agent = agent;
+            existing.trigger = trigger;
+            existing.prompt = prompt;
+            existing.host_file_id = host_file_id;
+            existing.last_run_ms = None;
+            existing.status = STATUS_SCHEDULED.to_string();
+        } else {
+            invs.push(Invocation {
+                id,
+                agent,
+                trigger,
+                prompt,
+                host_file_id,
+                last_run_ms: None,
+                status: STATUS_SCHEDULED.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Edit a scheduled invocation's trigger + prompt in place (the Trigger
+    /// popup's Save). Resets the last-run/status so the new trigger fires on its
+    /// own cadence. Errors if no invocation has the given id.
+    pub fn update_invocation(
+        &mut self,
+        id: String,
+        trigger: String,
+        prompt: String,
+    ) -> Result<(), String> {
+        let inv = self
+            .invocations
+            .get_or_insert_with(Vec::new)
+            .iter_mut()
+            .find(|i| i.id == id)
+            .ok_or_else(|| format!("no invocation with id {id}"))?;
+        inv.trigger = trigger;
+        inv.prompt = prompt;
+        inv.last_run_ms = None;
+        inv.status = STATUS_SCHEDULED.to_string();
+        Ok(())
+    }
+
+    /// Delete a scheduled invocation from the index by id (the popup's explicit
+    /// delete; removing the inline link also prunes it on the next tick). Errors
+    /// if no invocation has the given id.
+    pub fn delete_invocation(&mut self, id: String) -> Result<(), String> {
+        let invs = self.invocations.get_or_insert_with(Vec::new);
+        let before = invs.len();
+        invs.retain(|i| i.id != id);
+        if invs.len() == before {
+            return Err(format!("no invocation with id {id}"));
+        }
+        Ok(())
+    }
+
+    /// List the scheduled invocations in the index (the UI reads these off the
+    /// state frame, but this is also a queryable action for parity/tests).
+    pub fn list_invocations(&self) -> Vec<Invocation> {
+        self.invocations.clone().unwrap_or_default()
+    }
+
+    /// Prune index entries whose backing `agent://<id>` link no longer exists in
+    /// any note body (stray-ref reconcile — no orphans, like the wikilink index).
+    /// Returns the number pruned. Also runs implicitly on every tick.
+    pub fn reconcile_invocations(&mut self) -> i64 {
+        let pruned = self.prune_orphan_invocations();
+        i64::try_from(pruned).unwrap_or(i64::MAX)
+    }
+
+    /// The host scheduler's per-tick entry point (host-side cron): scan the
+    /// replicated `invocations` index for DUE recurring invocations (reusing the
+    /// v2 schedule grammar on each `Invocation.trigger`), resolve each
+    /// invocation's `agent` to a definition, run it (the def's instructions =
+    /// system, the invocation's `prompt` = user), append each completion near the
+    /// `](agent://<id>)` link in the host note, and record `last_run_ms` by id.
+    /// Returns the `agent` names that ran this tick. Resolves the LLM call
+    /// OUTSIDE the lock and commits each result via `Ctx::mutate` (CLAUDE.md: the
+    /// store lock is never held across an await). A stray-ref reconcile (prune
+    /// index entries with no backing link) runs first.
     ///
     /// A no-op when nothing is due — the host dispatches this on a ~60s
     /// interval, so the common case is cheap (a snapshot scan, no egress).
     pub async fn tick_agents(ctx: Ctx<Self>) -> Result<Vec<String>, String> {
+        // Stray-ref reconcile up front (self-cleaning, like the link index): an
+        // invocation whose inline link was deleted should not keep firing.
+        ctx.mutate("tick_agents", Self::prune_orphan_invocations)
+            .map_err(|e| e.to_string())?;
+
         let state = ctx.state().map_err(|e| e.to_string())?;
         let now = now_ms();
 
-        // Index the definitions once (by lowercased name) so each due block can
-        // resolve its `use:`. Definitions are pure capabilities (no trigger).
+        // Index the definitions once (by lowercased name) so each due invocation
+        // can resolve its `agent`. Definitions are pure capabilities (no trigger).
         let defs: Vec<agents::AgentDef> = state
             .files
             .iter()
             .filter_map(|f| agents::parse_agent(&f.body))
             .collect();
-        let resolve = |use_name: &str| -> Option<agents::AgentDef> {
-            let needle = use_name.trim().to_ascii_lowercase();
+        let resolve = |agent: &str| -> Option<agents::AgentDef> {
+            let needle = agent.trim().to_ascii_lowercase();
             defs.iter()
                 .find(|d| d.name.to_ascii_lowercase() == needle)
                 .cloned()
         };
 
-        // Decide DUE (invocation, definition) pairs from a single snapshot.
-        let due: Vec<(agents::Invocation, agents::AgentDef)> = state
-            .files
+        // Decide DUE (invocation, definition) pairs from a single snapshot of the
+        // index (not block scanning — the index is the source of truth).
+        let due: Vec<(Invocation, agents::AgentDef)> = state
+            .invocations
             .iter()
-            .flat_map(|f| agents::parse_invocations(&f.id, &f.body))
-            .filter(|inv| inv.is_scheduled())
-            .filter(|inv| agents::is_due(inv, state.last_run_ms(&inv.invocation_id), now))
-            .filter_map(|inv| resolve(&inv.use_name).map(|def| (inv, def)))
+            .flatten()
+            .filter(|inv| agents::trigger_is_scheduled(&inv.trigger))
+            .filter(|inv| agents::trigger_is_due(&inv.trigger, inv.last_run_ms, now))
+            .filter_map(|inv| resolve(&inv.agent).map(|def| (inv.clone(), def)))
             .collect();
 
         let mut ran = Vec::new();
@@ -357,17 +511,17 @@ impl Vault {
             match run_definition(&def, &inv.prompt).await {
                 Ok(output) => {
                     ctx.mutate("tick_agents", |m| {
-                        m.append_invocation_output(&inv, &def, &output, now_ms());
+                        m.append_invocation_output(&inv, &def, &output, now_ms(), STATUS_RAN);
                     })
                     .map_err(|e| e.to_string())?;
-                    ran.push(inv.use_name.clone());
+                    ran.push(inv.agent.clone());
                 }
                 // A failing invocation must not abort the whole tick — record the
-                // error after its block (so the operator sees it) and continue.
+                // error near its link (so the operator sees it) and continue.
                 Err(e) => {
                     let msg = format!("error: {e}");
                     let _ = ctx.mutate("tick_agents", |m| {
-                        m.append_invocation_output(&inv, &def, &msg, now_ms());
+                        m.append_invocation_output(&inv, &def, &msg, now_ms(), STATUS_ERROR);
                     });
                 }
             }
@@ -565,42 +719,60 @@ impl Vault {
         }
     }
 
-    /// The recorded last-run wall-clock for the invocation `id`, if any (the
-    /// cron due-check reads this).
+    /// The recorded last-run wall-clock for the invocation `id` in the index, if
+    /// any (read directly off the index entry in the tick; this convenience is
+    /// used by the tests).
+    #[cfg(test)]
     fn last_run_ms(&self, id: &str) -> Option<i64> {
-        self.agent_runs
+        self.invocations
             .as_ref()?
             .iter()
-            .find(|r| r.invocation_id == id)
-            .map(|r| r.last_run_ms)
+            .find(|i| i.id == id)
+            .and_then(|i| i.last_run_ms)
     }
 
-    /// Record an invocation's last run, upserting into the replicated
-    /// `agent_runs` map (deterministic `Vec`, not a `HashMap`), keyed by the
-    /// invocation's stable id.
-    fn record_run(&mut self, id: &str, at_ms: i64) {
-        let runs = self.agent_runs.get_or_insert_with(Vec::new);
-        if let Some(run) = runs.iter_mut().find(|r| r.invocation_id == id) {
-            run.last_run_ms = at_ms;
-        } else {
-            runs.push(AgentRun {
-                invocation_id: id.to_string(),
-                last_run_ms: at_ms,
-            });
+    /// The set of live `agent://<id>` link ids across every note body. The
+    /// reconcile pass keeps only index entries that still have a backing link.
+    fn live_invocation_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for file in &self.files {
+            for link in agents::parse_agent_links(&file.body) {
+                if !ids.contains(&link.id) {
+                    ids.push(link.id);
+                }
+            }
         }
+        ids
     }
 
-    /// Append a cron invocation's output right after its ```agent``` block and
-    /// record the run time — both in the SAME commit (so the due-check and the
-    /// visible output never disagree). The block is located by re-parsing the
-    /// invocation's host note and matching the stable `invocation_id` (so an
-    /// edit to the block — which changes the id — never appends to a stale spot).
+    /// Stray-ref reconcile: drop every index entry whose `agent://<id>` link no
+    /// longer appears in any note body. Returns the number pruned (so the
+    /// `reconcile_invocations` action can report it). Self-cleaning, like the
+    /// wikilink index.
+    fn prune_orphan_invocations(&mut self) -> usize {
+        let live = self.live_invocation_ids();
+        let invs = self.invocations.get_or_insert_with(Vec::new);
+        let before = invs.len();
+        invs.retain(|i| live.contains(&i.id));
+        before - invs.len()
+    }
+
+    /// Append a scheduled invocation's output near its inline `agent://<id>` link
+    /// and record the run (`last_run_ms` + `status`) on the index entry — both in
+    /// the SAME commit (so the due-check and the visible output never disagree).
+    /// The link is located by re-scanning the host note for the matching id (so a
+    /// concurrent edit that moved the link is handled safely: if the id no longer
+    /// has a link we skip the append but still record the run, so a vanished
+    /// invocation does not re-fire). Falls back to scanning all notes when the
+    /// recorded `host_file_id` no longer matches (the link was moved to another
+    /// note).
     fn append_invocation_output(
         &mut self,
-        inv: &agents::Invocation,
+        inv: &Invocation,
         def: &agents::AgentDef,
         output: &str,
         at_ms: i64,
+        status: &str,
     ) {
         let block = format!(
             "\n\n> Agent: /{name} · model: {model} · {trigger}\n> Output: {output}\n",
@@ -608,21 +780,45 @@ impl Vault {
             model = def.model,
             trigger = inv.trigger.trim(),
         );
-        // Find the host note (by id) and the live block end (re-parsed, so a
-        // concurrent edit that moved/changed the block is handled safely: if the
-        // id no longer matches any block we skip the append but still record the
-        // run, so a vanished invocation does not re-fire).
+        // Prefer the recorded host note, then fall back to any note carrying the
+        // link (the user may have moved it). Insert just past the link.
+        let mut inserted = false;
         for file in self.files.iter_mut() {
-            if let Some(live) = agents::parse_invocations(&file.id, &file.body)
+            if file.id != inv.host_file_id {
+                continue;
+            }
+            if let Some(link) = agents::parse_agent_links(&file.body)
                 .into_iter()
-                .find(|i| i.invocation_id == inv.invocation_id)
+                .find(|l| l.id == inv.id)
             {
-                file.body.insert_str(live.block_end, &block);
+                file.body.insert_str(link.link_end, &block);
                 file.updated_at_ms = Some(at_ms);
-                break;
+                inserted = true;
+            }
+            break;
+        }
+        if !inserted {
+            for file in self.files.iter_mut() {
+                if let Some(link) = agents::parse_agent_links(&file.body)
+                    .into_iter()
+                    .find(|l| l.id == inv.id)
+                {
+                    file.body.insert_str(link.link_end, &block);
+                    file.updated_at_ms = Some(at_ms);
+                    break;
+                }
             }
         }
-        self.record_run(&inv.invocation_id, at_ms);
+        // Record the run on the index entry by id (the source of truth).
+        if let Some(entry) = self
+            .invocations
+            .get_or_insert_with(Vec::new)
+            .iter_mut()
+            .find(|i| i.id == inv.id)
+        {
+            entry.last_run_ms = Some(at_ms);
+            entry.status = status.to_string();
+        }
     }
 
     /// Append a MANUAL run's output block to the agent definition's own note
@@ -778,6 +974,7 @@ mod tests {
         Vault {
             files: Vec::new(),
             agent_runs: Some(Vec::new()),
+            invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
         }
     }
@@ -842,47 +1039,170 @@ mod tests {
         assert_eq!(v.read_file(id).unwrap(), "# Roadmap\n\n- ship it\n");
     }
 
-    /// The append path the cron tick drives: an invocation block's output is
-    /// inserted right after the block, and the run is recorded by the block's
-    /// stable id (not the definition name) so a second, distinct invocation of
-    /// the same def is tracked independently.
-    #[test]
-    fn invocation_output_appends_after_block_and_records_by_id() {
+    // ── scheduled invocations (the redesign): the replicated index ────────────
+
+    /// A def named `name` plus a note carrying its inline `agent://<id>` link,
+    /// and the matching index entry created via `create_invocation`. Returns the
+    /// host file id.
+    fn vault_with_invocation(name: &str, id: &str, trigger: &str) -> Vault {
         let mut v = empty();
-        let body = "# Daily\n\n```agent\nuse: standup\ntrigger: cron @hourly\n\
-                    prompt: Summarize today.\n```\n\ntail";
-        let id = v.create_file("daily.md".into(), body.into()).unwrap();
-        let file = v.files.iter().find(|f| f.id == id).unwrap();
-        let inv = agents::parse_invocations(&file.id, &file.body)
-            .into_iter()
-            .next()
+        v.create_file(
+            format!("agents/{name}.md"),
+            format!("---\nkind: skill\nname: {name}\n---\nWrite a status."),
+        )
+        .unwrap();
+        let host = v
+            .create_file(
+                "daily.md".into(),
+                format!("# Daily\n\nRun: [⚡ {name}](agent://{id}) every day.\n"),
+            )
             .unwrap();
-        let def = agents::AgentDef {
+        v.create_invocation(
+            id.into(),
+            name.into(),
+            trigger.into(),
+            "Summarize today.".into(),
+            host.clone(),
+        )
+        .unwrap();
+        v
+    }
+
+    /// A def for the append path tests.
+    fn standup_def() -> agents::AgentDef {
+        agents::AgentDef {
             kind: "skill".into(),
             name: "standup".into(),
             model: "deepseek-chat".into(),
             instructions: "Write a status.".into(),
             mcp_servers: Vec::new(),
-        };
-        assert_eq!(v.last_run_ms(&inv.invocation_id), None);
-        v.append_invocation_output(&inv, &def, "all good", 1_234);
-        let after = v.read_file(id).unwrap();
-        // The output block lands right after the fence, before `tail`.
-        let fence_end = after.find("```\n").unwrap() + "```\n".len();
-        assert!(after[fence_end..].starts_with("\n\n> Agent: /standup"));
-        assert!(after.contains("> Output: all good"));
-        assert!(after.trim_end().ends_with("tail"));
-        // Run recorded by invocation id.
-        assert_eq!(v.last_run_ms(&inv.invocation_id), Some(1_234));
+        }
     }
 
-    /// Editing the block changes its id, so the prior run no longer suppresses
-    /// it (stray-ref-safe / self-cleaning bookkeeping).
     #[test]
-    fn editing_a_block_yields_a_fresh_invocation_id() {
-        let a = agents::invocation_id("f", "x", "cron @hourly", "p");
-        let b = agents::invocation_id("f", "x", "cron @daily", "p");
-        assert_ne!(a, b);
+    fn create_invocation_indexes_by_id_and_lists() {
+        let v = vault_with_invocation("standup", "uuid-1", "daily at 09:00 UTC");
+        let invs = v.list_invocations();
+        assert_eq!(invs.len(), 1);
+        assert_eq!(invs[0].id, "uuid-1");
+        assert_eq!(invs[0].agent, "standup");
+        assert_eq!(invs[0].trigger, "daily at 09:00 UTC");
+        assert_eq!(invs[0].status, STATUS_SCHEDULED);
+        assert_eq!(invs[0].last_run_ms, None);
+    }
+
+    #[test]
+    fn create_invocation_rejects_empty_id() {
+        let mut v = empty();
+        assert!(
+            v.create_invocation("".into(), "a".into(), "2h".into(), "p".into(), "f".into())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn update_invocation_edits_trigger_and_prompt() {
+        let mut v = vault_with_invocation("standup", "uuid-1", "2h");
+        v.update_invocation(
+            "uuid-1".into(),
+            "daily at 08:00 UTC".into(),
+            "New prompt.".into(),
+        )
+        .unwrap();
+        let inv = &v.list_invocations()[0];
+        assert_eq!(inv.trigger, "daily at 08:00 UTC");
+        assert_eq!(inv.prompt, "New prompt.");
+        assert_eq!(inv.status, STATUS_SCHEDULED);
+        // Updating an absent id errors.
+        assert!(
+            v.update_invocation("nope".into(), "2h".into(), "p".into())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn delete_invocation_removes_entry() {
+        let mut v = vault_with_invocation("standup", "uuid-1", "2h");
+        v.delete_invocation("uuid-1".into()).unwrap();
+        assert!(v.list_invocations().is_empty());
+        assert!(v.delete_invocation("uuid-1".into()).is_err());
+    }
+
+    #[test]
+    fn due_scan_reads_from_index_keyed_by_id() {
+        // An interval invocation never run is due; recording a run by id stops it
+        // until the interval elapses (the index `last_run_ms` is the due source).
+        let v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = &v.list_invocations()[0];
+        assert!(agents::trigger_is_due(
+            &inv.trigger,
+            inv.last_run_ms,
+            1_000_000
+        ));
+        // After a run, last_run_ms on the index entry suppresses an immediate re-fire.
+        let mut v2 = v;
+        let inv = v2.list_invocations()[0].clone();
+        v2.append_invocation_output(&inv, &standup_def(), "ok", 1_000_000, STATUS_RAN);
+        assert_eq!(v2.last_run_ms("uuid-1"), Some(1_000_000));
+        let after = &v2.list_invocations()[0];
+        assert!(!agents::trigger_is_due(
+            &after.trigger,
+            after.last_run_ms,
+            1_000_000
+        ));
+        assert!(agents::trigger_is_due(
+            &after.trigger,
+            after.last_run_ms,
+            1_000_000 + 60_000
+        ));
+    }
+
+    #[test]
+    fn output_appends_near_the_inline_link_and_records_last_run_by_id() {
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = v.list_invocations()[0].clone();
+        v.append_invocation_output(&inv, &standup_def(), "all good", 1_234, STATUS_RAN);
+        let host = v
+            .files
+            .iter()
+            .find(|f| f.path == "daily.md")
+            .unwrap()
+            .clone();
+        // The output lands right after the `)` of the link.
+        let link_end = host.body.find("(agent://uuid-1)").unwrap() + "(agent://uuid-1)".len();
+        assert!(host.body[link_end..].starts_with("\n\n> Agent: /standup"));
+        assert!(host.body.contains("> Output: all good"));
+        // The tail text after the link is preserved.
+        assert!(host.body.contains("every day."));
+        // Run recorded by id + status updated.
+        assert_eq!(v.last_run_ms("uuid-1"), Some(1_234));
+        assert_eq!(v.list_invocations()[0].status, STATUS_RAN);
+    }
+
+    #[test]
+    fn reconcile_prunes_orphan_invocations() {
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        assert_eq!(v.list_invocations().len(), 1);
+        // Remove the inline link from the note → the index entry is an orphan.
+        let host = v
+            .files
+            .iter()
+            .find(|f| f.path == "daily.md")
+            .unwrap()
+            .clone();
+        v.write_file(host.id, "# Daily\n\nno link anymore.\n".into())
+            .unwrap();
+        assert_eq!(v.reconcile_invocations(), 1);
+        assert!(v.list_invocations().is_empty());
+        // A second reconcile prunes nothing.
+        assert_eq!(v.reconcile_invocations(), 0);
+    }
+
+    #[test]
+    fn reconcile_keeps_invocations_with_a_live_link() {
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        assert_eq!(v.reconcile_invocations(), 0);
+        assert_eq!(v.list_invocations().len(), 1);
     }
 
     // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────

@@ -30,22 +30,27 @@
 
 import { DEFAULT_MODEL, type AgentDef } from "./agents";
 import {
-  buildInvocationBlock,
   buildTrigger,
   browserTz,
   parseSchedule,
   WEEKDAYS,
   type Recurrence,
+  type Schedule,
   type Weekday,
 } from "./invocations";
 
 /** What the popup does with the exchange / the chosen trigger. */
 export interface AgentPopupCallbacks {
   /** Replace the triggering `/<name>` range with the given markdown block and
-   *  refocus the editor. Wired by main.ts onto the live MdEditor. Used for both
-   *  the one-time Output block (on Save) and the durable ```agent block (on a
-   *  Schedule submit). */
+   *  refocus the editor. Wired by main.ts onto the live MdEditor. Used for the
+   *  one-time Output block (on Save). */
   onSave: (block: string) => void;
+  /** A Schedule submit: the user picked a recurring trigger + prompt. The
+   *  caller mints a UUID, inserts the inline `[⚡ <agent>](agent://<id>)` link in
+   *  place of the `/<name>` token, and records the invocation in the replicated
+   *  index (`create_invocation`). Optional — when omitted, the Schedule tab is
+   *  inert (e.g. a quick-open run popup with no editor target). */
+  onSchedule?: (trigger: string, prompt: string) => void;
   /** Close with no document change (Exit / dismiss); refocus the editor. */
   onClose: () => void;
 }
@@ -305,9 +310,12 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
       }
       const trigger = picker.trigger();
       if (!trigger) return;
-      // Write the durable ```agent block; do NOT run now (the scheduler does).
+      if (!callbacks.onSchedule) return; // Schedule inert without a target
+      // Hand the trigger + prompt to the caller; it mints the UUID, inserts the
+      // inline `agent://<id>` link, and records the invocation in the index. Do
+      // NOT run now — the scheduler picks it up.
       teardown();
-      callbacks.onSave(buildInvocationBlock(def.name, trigger, prompt));
+      callbacks.onSchedule(trigger, prompt);
     }
 
     input.addEventListener("input", refresh);
@@ -498,6 +506,22 @@ function disabledRow(label: string, tooltip: string): HTMLElement {
 /** The recurring sub-modes the calendar-style picker handles. */
 type RecurringMode = "interval" | "daily" | "weekly";
 
+/** Format `hh:mm` as a zero-padded 24h `HH:MM` string (for the time inputs). */
+function hhmm(hh: number, mm: number): string {
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+/** Decompose an interval in ms back to the largest whole `<N><unit>` that
+ *  reproduces it (days, then hours, then minutes), for prefilling the picker. */
+function intervalParts(ms: number): [number, "m" | "h" | "d"] {
+  const MIN = 60 * 1000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  if (ms % DAY === 0) return [ms / DAY, "d"];
+  if (ms % HOUR === 0) return [ms / HOUR, "h"];
+  return [Math.max(1, Math.round(ms / MIN)), "m"];
+}
+
 /** Day-of-week chip labels (two letters), aligned to `WEEKDAYS` order.
  *  Two letters disambiguate Tue/Thu and Sat/Sun, which a single-letter label
  *  collapsed (the `title` tooltip still carries the full token). */
@@ -535,15 +559,24 @@ const RECURRING_MODES: readonly { mode: RecurringMode; label: string }[] = [
  * component computes the occurrence in the right zone. Times are entered/shown
  * in local 24h `HH:MM`.
  */
-function buildRecurrencePicker(onChange: () => void): {
+export function buildRecurrencePicker(
+  onChange: () => void,
+  initial?: Schedule | null,
+): {
   el: HTMLElement;
   show: (visible: boolean) => void;
   trigger: () => string | null;
   isValid: () => boolean;
 } {
-  const tz = browserTz();
-  // The default recurrence sub-mode when Schedule is selected.
-  const DEFAULT_MODE: RecurringMode = "daily";
+  // When prefilling from an existing trigger, use its timezone so the emitted
+  // trigger round-trips unchanged; otherwise default to the browser zone.
+  const tz =
+    initial && (initial.kind === "daily" || initial.kind === "weekly")
+      ? initial.tz
+      : browserTz();
+  // The default recurrence sub-mode when Schedule is selected, or the prefilled
+  // schedule's mode when editing an existing invocation.
+  const DEFAULT_MODE: RecurringMode = initial ? initial.kind : "daily";
   let mode: RecurringMode = DEFAULT_MODE;
 
   const el = document.createElement("div");
@@ -652,6 +685,30 @@ function buildRecurrencePicker(onChange: () => void): {
   const tzHint = document.createElement("div");
   tzHint.className = "agent-recur-tz micro";
   tzHint.textContent = `times in ${tz}`;
+
+  // Prefill the sub-controls from an existing schedule (the Trigger popup edit
+  // flow). The sub-mode itself is set via DEFAULT_MODE above; here we fill the
+  // values so Save round-trips an unedited trigger unchanged.
+  if (initial) {
+    if (initial.kind === "interval") {
+      const [n, unit] = intervalParts(initial.ms);
+      nInput.value = String(n);
+      unitVal = unit;
+      applyUnit();
+    } else if (initial.kind === "daily") {
+      dailyTime.value = hhmm(initial.hh, initial.mm);
+    } else {
+      weeklyTime.value = hhmm(initial.hh, initial.mm);
+      for (const chip of chips.querySelectorAll<HTMLButtonElement>(".agent-day-chip")) {
+        const day = chip.title as Weekday;
+        if (initial.days.includes(day)) {
+          selectedDays.add(day);
+          chip.classList.add("active");
+          chip.setAttribute("aria-pressed", "true");
+        }
+      }
+    }
+  }
 
   el.append(subRow, intervalRow, dailyRow, weeklyRow, tzHint);
 

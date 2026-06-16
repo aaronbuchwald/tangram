@@ -28,11 +28,28 @@ export interface McpGrant {
   updated_at_ms: number;
 }
 
+/** One SCHEDULED agent invocation from the replicated index. Mirrors
+ *  `Invocation` in `apps/tangram/src/lib.rs`; carried on the vault state frame.
+ *  The inline `[⚡ <agent>](agent://<id>)` link in a note is just the handle
+ *  (`{id, agent}`); this record owns trigger/prompt/last-run/status. */
+export interface Invocation {
+  id: string;
+  agent: string;
+  trigger: string;
+  prompt: string;
+  host_file_id: string;
+  last_run_ms: number | null;
+  status: string;
+}
+
 export interface VaultState {
   files: MdFile[];
   /** Present on documents written by this binary or newer; absent (treat as
    *  []) on older docs. */
   mcp_grants?: McpGrant[] | null;
+  /** The replicated scheduled-invocation index (the redesign). Absent on older
+   *  docs (treat as []). */
+  invocations?: Invocation[] | null;
 }
 
 // The shell's own app name on the host. The shell is the outer container and
@@ -88,6 +105,27 @@ export const vault = {
     postAction("rename_folder", { path, new_path }) as Promise<null>,
   deleteFolder: (path: string) =>
     postAction("delete_folder", { path }) as Promise<null>,
+  // Scheduled invocations (the redesign): the replicated index keyed by the
+  // UUID embedded in the note's inline `agent://<id>` link. The UI mints the id,
+  // inserts the link, and creates the entry; the Trigger popup edits/deletes it.
+  createInvocation: (
+    id: string,
+    agent: string,
+    trigger: string,
+    prompt: string,
+    host_file_id: string,
+  ) =>
+    postAction("create_invocation", {
+      id,
+      agent,
+      trigger,
+      prompt,
+      host_file_id,
+    }) as Promise<null>,
+  updateInvocation: (id: string, trigger: string, prompt: string) =>
+    postAction("update_invocation", { id, trigger, prompt }) as Promise<null>,
+  deleteInvocation: (id: string) =>
+    postAction("delete_invocation", { id }) as Promise<null>,
   // Tools/MCP T1: the user-approval actions on a `kind: agent`'s `mcp_servers`
   // request. `approve_mcp` binds to the hash the user saw (a stale hash is
   // refused by the component).

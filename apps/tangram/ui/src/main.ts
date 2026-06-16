@@ -15,6 +15,7 @@ import {
   type VaultState,
 } from "./api";
 import { isAgentPopupOpen, openAgentPopup } from "./agentPopup";
+import { isTriggerPopupOpen, openTriggerPopup } from "./triggerPopup";
 import {
   isQuickOpenOpen,
   openQuickOpen,
@@ -29,6 +30,7 @@ import {
 import { renderAgentsView } from "./agentsView";
 import { buildLinkIndex, type LinkIndex } from "./links";
 import {
+  buildAgentLink,
   buildInvocationIndex,
   parseSchedule,
   type InvocationIndex,
@@ -101,11 +103,11 @@ let agentIndex: AgentIndex = buildAgentIndex([]);
 // reference (a stable closure), so links re-resolve and backlinks refresh on
 // the next vault state without re-mounting the editor.
 let linkIndex: LinkIndex = buildLinkIndex([]);
-// The agent INVOCATION index (R1): every ```agent block across the vault,
-// derived from the file text (so editing/removing a block self-cleans). Built
-// here alongside the other indexes so the UI and the component (which is the
-// scheduler-side consumer) agree on the format. Display of invocations is not
-// required for R1 — this just keeps the parser in lockstep with agents.rs.
+// The scheduled-invocation index (the redesign): the app's REPLICATED
+// `invocations` records, carried on the vault state frame and rebuilt here on
+// every state alongside the other indexes. The inline `agent://<id>` link in a
+// note is only the handle; the trigger/prompt/last-run live in this index. The
+// Trigger popup reads an invocation from here by id.
 let invocationIndex: InvocationIndex = buildInvocationIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
@@ -964,6 +966,55 @@ function headingToBaseName(heading: string): string | null {
   return base.length ? base : null;
 }
 
+// Open the Trigger popup for an inline `agent://<id>` link click. Reads the
+// invocation from the live (replicated) index by id; the popup stays on the
+// file. Save edits the trigger/prompt (`update_invocation`); Delete removes the
+// index entry AND strips the inline link from the open note (so the handle and
+// the record go together); "Open in Agents" switches to the Agents tab.
+function openAgentLinkTrigger(id: string): void {
+  const inv = invocationIndex.byId(id);
+  if (!inv) {
+    // The link has no backing record (e.g. it was just deleted on another
+    // device); send the user to the Agents tab rather than a dead popup.
+    tabs.openAgents();
+    return;
+  }
+  openTriggerPopup(inv, {
+    onSave: (trigger, prompt) => {
+      void vault
+        .updateInvocation(id, trigger, prompt)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+      activeEditor?.editor.focus();
+    },
+    onOpenAgents: () => tabs.openAgents(),
+    onDelete: () => {
+      stripAgentLink(id);
+      void vault
+        .deleteInvocation(id)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+    },
+    onClose: () => activeEditor?.editor.focus(),
+  });
+}
+
+// Strip the inline `[…](agent://<id>)` link from the active note editor (used by
+// the Trigger popup's Delete). Finds the token in the live doc and replaces it
+// with its label text (so the sentence reads naturally), then the debounced
+// onChange persists the edit and the component reconcile prunes the orphan.
+function stripAgentLink(id: string): void {
+  const editor = activeEditor?.editor;
+  if (!editor) return;
+  const doc = editor.doc;
+  const token = `](agent://${id})`;
+  const close = doc.indexOf(token);
+  if (close === -1) return;
+  const open = doc.lastIndexOf("[", close);
+  if (open === -1) return;
+  const label = doc.slice(open + 1, close); // the `⚡ <agent>` label
+  const to = close + token.length;
+  editor.replaceRange(open, to, label);
+}
+
 // A single Obsidian-style "Live Preview" CodeMirror 6 editor (issue #11): the
 // editable view *is* the rendered note — markdown syntax is concealed off the
 // active line and rendered inline (see editor.ts / livePreview.ts). There is no
@@ -1009,6 +1060,17 @@ function renderNoteTab(fileId: string) {
       const openRun = (def: AgentDef, tokFrom: number, tokTo: number) => {
         openAgentPopup(def, {
           onSave: (block) => editor.replaceRange(tokFrom, tokTo, block),
+          // Schedule submit: mint a UUID, swap the `/<name>` token for the inline
+          // `[⚡ <agent>](agent://<id>)` handle, and record the invocation in the
+          // replicated index. The scheduler picks it up; the popup did not run.
+          onSchedule: (trigger, prompt) => {
+            const id = crypto.randomUUID();
+            const link = buildAgentLink(def.name, id);
+            editor.replaceRange(tokFrom, tokTo, link);
+            void vault
+              .createInvocation(id, def.name, trigger, prompt, fileId)
+              .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+          },
           onClose: () => editor.focus(),
         });
       };
@@ -1054,7 +1116,7 @@ function renderNoteTab(fileId: string) {
     (word) => agentIndex.findAgent(word) !== null,
     // Auto-open guard (Fix 1): don't re-pop the create popup while either agent
     // popup (create or run) is already up.
-    () => isCreateAgentPopupOpen() || isAgentPopupOpen(),
+    () => isCreateAgentPopupOpen() || isAgentPopupOpen() || isTriggerPopupOpen(),
     // Live candidates for the `/<partial>` autocomplete popup: every indexed
     // agent/skill (kind from its def) plus the reserved `agent` create command.
     // Reads through the live index (rebuilt each vault state) so new defs show
@@ -1077,6 +1139,11 @@ function renderNoteTab(fileId: string) {
     // The note being edited, so it's excluded from its own link autocomplete.
     // Read live from the index in case the note is renamed while open.
     () => filesById.get(fileId)?.path ?? null,
+    // Click an inline `[⚡ <agent>](agent://<id>)` link → open the Trigger popup
+    // for that invocation (read from the live index by id). Save edits the
+    // trigger/prompt; Delete removes the index entry AND strips the inline link;
+    // "Open in Agents" switches to the Agents tab (the table lands later).
+    (id) => openAgentLinkTrigger(id),
   );
   state.editor = editor;
 
@@ -1391,10 +1458,10 @@ function onVaultState(state: VaultState) {
   // panel re-renders from it via renderContent below, so both reflect the new
   // vault without an editor re-mount.
   linkIndex = buildLinkIndex(files);
-  // Rebuild the agent invocation index over the same vault snapshot (R1). It is
-  // derived from each file's ```agent blocks, so edited/removed invocations
-  // self-clean here without any extra bookkeeping.
-  invocationIndex = buildInvocationIndex(files);
+  // Rebuild the scheduled-invocation index from the REPLICATED records on the
+  // state frame (the source of truth — not the markdown). The Trigger popup
+  // reads invocations from here by id; the component prunes orphans server-side.
+  invocationIndex = buildInvocationIndex(state.invocations ?? []);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();

@@ -1,195 +1,103 @@
-// Agent INVOCATIONS, parsed from ```agent fenced blocks in any vault note (R1).
+// Scheduled agent INVOCATIONS (the redesign): an inline dark-blue markdown link
+// `[⚡ <agent>](agent://<id>)` in any vault note is the HANDLE; the source of
+// truth (trigger/prompt/last-run/status) lives in the app's replicated
+// `invocations` index, keyed by the stable UUID `<id>` embedded in the link.
 //
-// R1 — the trigger belongs to the INVOCATION, not the definition. A definition
-// (agents.ts) is a pure capability (kind/name/model/instructions/labels); the
-// thing that decides WHEN and HOW an agent runs is a durable instance — a fenced
-// block inside a markdown file — that links to a definition via `use:` and owns
-// the `trigger` + `prompt`:
+//   - The link text survives edits/sync (the id is in the doc).
+//   - Editing the trigger/prompt is a popup → `update_invocation` call; the
+//     markdown never carries those fields.
+//   - Removing the link makes the index entry an orphan; the component prunes it
+//     on the next tick (stray-ref reconcile, like the wikilink index).
 //
-//     ```agent
-//     use: <definition-name>
-//     trigger: cron every 1h          # or "one-time"
-//     prompt: <prompt text, may span
-//     multiple lines until the fence>
-//     ```
-//
-// The block is the source of truth and is INDEXED (derived from the file text),
-// so editing or removing it self-cleans — no stray refs. Each invocation gets a
-// stable `invocationId` = a hash of {hostFileId + use + trigger + prompt}; an
-// unedited block keeps its id, editing it produces a new id, removing it drops
-// it. UI display of invocations is not required for R1 — the component is the
-// consumer; this module just provides the parser/index so the UI and the
-// component (apps/tangram/src/agents.rs) agree on the format BYTE-FOR-BYTE.
+// This module provides: the inline-link parser + EOF-safe hit-test (so the
+// decoration/click in editor.ts can find the handle), a builder for the link
+// text, and an index over the REPLICATED invocations carried on the vault state
+// frame. It mirrors `parse_agent_links` in `apps/tangram/src/agents.rs` so both
+// sides agree on the handle format.
 
-import type { MdFile } from "./api";
+import type { Invocation } from "./api";
 
-/** One parsed ```agent invocation block. */
-export interface Invocation {
-  /** The host file this block lives in (its stable id). */
-  hostFileId: string;
-  /** The definition this invocation runs (the `use:` field — a def name). */
-  use: string;
-  /** The raw `trigger:` text, e.g. `cron every 1h`, `cron @daily`, `one-time`. */
-  trigger: string;
-  /** The `prompt:` text (may span multiple lines until the closing fence). */
-  prompt: string;
-  /** Stable hash of {hostFileId + use + trigger + prompt} — stray-ref-safe. */
-  invocationId: string;
+/** One inline `[<label>](agent://<id>)` link occurrence in a note body. */
+export interface AgentLink {
+  /** The invocation id embedded in the link target (`agent://<id>`). */
+  id: string;
+  /** The character offset of the opening `[`. */
+  from: number;
+  /** The character offset just past the closing `)`. */
+  to: number;
 }
+
+// `[<label>](agent://<id>)` — label excludes `]`; the id excludes `)`/whitespace.
+// Global so we can scan a body for every occurrence.
+const AGENT_LINK = /\[([^\]\n]*)\]\(agent:\/\/([^)\s]+)\)/g;
 
 /**
- * A stable id for an invocation: a hex 64-bit FNV-1a hash of
- * `hostFileId\0use\0trigger\0prompt`. This mirrors `invocation_id` in
- * `apps/tangram/src/agents.rs` EXACTLY (same fields, same NUL separator, same
- * FNV-1a constants, same 16-hex-digit zero-padded output) so the UI and the
- * component derive identical ids for the same block.
+ * Parse every inline `[<label>](agent://<id>)` link in `body`, in document
+ * order. Mirrors `parse_agent_links` in `apps/tangram/src/agents.rs` so the UI
+ * and component agree on the handle format.
  */
-export function invocationId(
-  hostFileId: string,
-  use: string,
-  trigger: string,
-  prompt: string,
-): string {
-  const key = `${hostFileId}\0${use}\0${trigger}\0${prompt}`;
-  return fnv1aHex(key);
-}
-
-// 64-bit FNV-1a over the UTF-8 bytes, lowercase hex (16 digits, zero-padded).
-// BigInt keeps the full 64-bit width (Number would lose precision past 2^53).
-function fnv1aHex(s: string): string {
-  const OFFSET = 0xcbf29ce484222325n;
-  const PRIME = 0x00000100000001b3n;
-  const MASK = 0xffffffffffffffffn;
-  const bytes = new TextEncoder().encode(s);
-  let hash = OFFSET;
-  for (const b of bytes) {
-    hash ^= BigInt(b);
-    hash = (hash * PRIME) & MASK;
-  }
-  return hash.toString(16).padStart(16, "0");
-}
-
-/**
- * Parse every ```agent invocation block in `body`, in document order. Mirrors
- * `parse_invocations` in `apps/tangram/src/agents.rs`: `use`/`trigger`/`prompt`
- * are flat `key: value` lines at the top of the block; everything after the
- * `prompt:` line (until the closing fence) is part of the prompt (multi-line). A
- * block missing `use` is skipped (it cannot resolve a definition); `trigger`
- * defaults to `one-time`.
- */
-export function parseInvocations(hostFileId: string, body: string): Invocation[] {
-  const out: Invocation[] = [];
-  const lines = (body ?? "").split("\n");
-  let i = 0;
-  while (i < lines.length) {
-    if (lines[i].trim() !== "```agent") {
-      i++;
-      continue;
-    }
-    // Collect block lines until the closing fence.
-    let j = i + 1;
-    const block: string[] = [];
-    let closed = false;
-    while (j < lines.length) {
-      if (lines[j].trim() === "```") {
-        closed = true;
-        break;
-      }
-      block.push(lines[j]);
-      j++;
-    }
-    const inv = parseInvocationBlock(hostFileId, block);
-    if (inv) out.push(inv);
-    i = closed ? j + 1 : j;
+export function parseAgentLinks(body: string): AgentLink[] {
+  const out: AgentLink[] = [];
+  AGENT_LINK.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = AGENT_LINK.exec(body ?? "")) !== null) {
+    const id = m[2].trim();
+    if (id.length === 0) continue;
+    out.push({ id, from: m.index, to: m.index + m[0].length });
   }
   return out;
 }
 
-/** Parse the inner lines of one ```agent block; null when `use` is missing. */
-function parseInvocationBlock(hostFileId: string, block: string[]): Invocation | null {
-  let use: string | null = null;
-  let trigger: string | null = null;
-  let prompt: string | null = null;
-
-  for (let k = 0; k < block.length; k++) {
-    const line = block[k];
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim().toLowerCase();
-    const val = line.slice(idx + 1).trim();
-    if (key === "use" && use === null) {
-      use = val;
-    } else if (key === "trigger" && trigger === null) {
-      trigger = val;
-    } else if (key === "prompt" && prompt === null) {
-      // The prompt runs from this line's value to the end of the block.
-      const parts = [val, ...block.slice(k + 1)];
-      prompt = parts.join("\n").trim();
-      break;
-    }
+/**
+ * If `pos` lands ON an `agent://` link token (opening boundary inclusive,
+ * closing boundary exclusive — see `posOnToken` in wikiLink.ts), return its id +
+ * range. Used by the click handler in editor.ts to open the Trigger popup.
+ */
+export function agentLinkAt(body: string, pos: number): AgentLink | null {
+  for (const link of parseAgentLinks(body)) {
+    if (pos >= link.from && pos < link.to) return link;
   }
-
-  const useTrimmed = (use ?? "").trim();
-  if (useTrimmed.length === 0) return null;
-  const triggerVal = trigger ?? "one-time";
-  const promptVal = prompt ?? "";
-  return {
-    hostFileId,
-    use: useTrimmed,
-    trigger: triggerVal,
-    prompt: promptVal,
-    invocationId: invocationId(hostFileId, useTrimmed, triggerVal, promptVal),
-  };
+  return null;
 }
 
-/** A read-only index of the vault's agent invocations. */
+/**
+ * Build the inline link text inserted into the note when a scheduled invocation
+ * is created (the handle). The `⚡` glyph + dark-blue decoration mark it as an
+ * agent link distinct from a `[[ ]]` wikilink. `id` is a UUID the caller mints.
+ */
+export function buildAgentLink(agent: string, id: string): string {
+  return `[⚡ ${agent}](agent://${id})`;
+}
+
+/** A read-only index of the vault's scheduled invocations (the replicated index
+ *  carried on the vault state frame). */
 export interface InvocationIndex {
-  /** All parsed invocations, in input (file, then document) order. */
+  /** All invocations from the replicated index, in stored order. */
   readonly all: Invocation[];
   /** Look up an invocation by its stable id. */
   byId(id: string): Invocation | null;
-  /** Every invocation whose `use:` names the given definition (case-insensitive). */
-  forDef(name: string): Invocation[];
+  /** Every invocation whose `agent` names the given definition (case-insensitive). */
+  forAgent(name: string): Invocation[];
 }
 
 /**
- * Build the invocation index over the current vault files. Rebuilt on each vault
- * state alongside the agent/link indexes (the single rebuild point in
- * `main.ts`'s `onVaultState`). Because it is derived from each file's body, an
- * edited/removed block self-cleans on the next state.
+ * Build the invocation index over the REPLICATED invocations from the vault
+ * state frame. Rebuilt in `main.ts`'s `onVaultState` alongside the other
+ * indexes. (The source of truth is the index, not the markdown — the inline
+ * link is only the handle.)
  */
-export function buildInvocationIndex(files: MdFile[]): InvocationIndex {
-  const all: Invocation[] = [];
+export function buildInvocationIndex(invocations: Invocation[]): InvocationIndex {
+  const all = invocations ?? [];
   const byId = new Map<string, Invocation>();
-  for (const f of files) {
-    for (const inv of parseInvocations(f.id, f.body ?? "")) {
-      all.push(inv);
-      byId.set(inv.invocationId, inv);
-    }
-  }
+  for (const inv of all) byId.set(inv.id, inv);
   return {
     all,
     byId: (id) => byId.get(id) ?? null,
-    forDef: (name) => {
+    forAgent: (name) => {
       const needle = name.trim().toLowerCase();
-      return all.filter((inv) => inv.use.trim().toLowerCase() === needle);
+      return all.filter((inv) => inv.agent.trim().toLowerCase() === needle);
     },
   };
-}
-
-/**
- * Render a durable ```agent block (the cron-invocation text written into the
- * file when the user picks a non-one-time trigger in the run popup). The shape
- * matches `parseInvocations` above and the component's parser exactly.
- */
-export function buildInvocationBlock(
-  use: string,
-  trigger: string,
-  prompt: string,
-): string {
-  return ["```agent", `use: ${use}`, `trigger: ${trigger}`, `prompt: ${prompt}`, "```"].join(
-    "\n",
-  );
 }
 
 // ── schedule grammar v2 (mirrors apps/tangram/src/agents.rs parse_schedule) ──

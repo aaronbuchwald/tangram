@@ -10,9 +10,9 @@
 //! action-dispatch path (`AppRuntime::dispatch`), so all the existing egress
 //! enforcement and credential injection apply unchanged.
 //!
-//! v1 is interval/cron only, DeepSeek only, output appended to the agent's own
-//! note. A failing dispatch is logged and the loop continues — a misbehaving
-//! agent never crashes the host.
+//! v1 is interval/cron only, DeepSeek only, output appended near the
+//! invocation's inline `agent://<id>` link. A failing dispatch is logged and the
+//! loop continues — a misbehaving agent never crashes the host.
 
 use std::sync::Arc;
 use std::time::Duration;
