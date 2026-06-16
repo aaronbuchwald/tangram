@@ -22,6 +22,7 @@ import {
 } from "./agents";
 import { renderAgentsView } from "./agentsView";
 import { buildLinkIndex, type LinkIndex } from "./links";
+import { wikiCandidatesFromFiles } from "./wikiComplete";
 import {
   type CreatedAgent,
   isCreateAgentPopupOpen,
@@ -723,6 +724,14 @@ function renderNoteTab(fileId: string) {
     (name) => linkIndex.resolve(name),
     // Click a resolved `[[name]]` → open its target note in a tab.
     (targetId) => tabs.openNote(targetId),
+    // Live candidates for the `[[ ]]` wikilink autocomplete popup: the vault
+    // notes (folder sentinels excluded). Read through the live `files` array
+    // (reassigned each vault state) so newly-created notes appear without
+    // re-mounting the editor — same pattern as the slash candidates above.
+    () => wikiCandidatesFromFiles(files),
+    // The note being edited, so it's excluded from its own link autocomplete.
+    // Read live from the index in case the note is renamed while open.
+    () => filesById.get(fileId)?.path ?? null,
   );
   state.editor = editor;
 

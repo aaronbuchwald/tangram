@@ -45,6 +45,10 @@ import {
   wikiLinkClick,
   wikiLinkHighlight,
 } from "./wikiLink";
+import {
+  type WikiCandidateProvider,
+  wikiAutocomplete,
+} from "./wikiComplete";
 import { livePreview } from "./livePreview";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
@@ -190,6 +194,15 @@ export class MdEditor {
     // inert, so non-vault editors are unchanged.
     resolveWikiLink: WikiLinkResolver = () => null,
     onOpenWikiLink: WikiLinkOpener = () => {},
+    // Live candidate set for the `[[ ]]` wikilink autocomplete popup (the vault
+    // notes). Read fresh on each keystroke so newly-created notes appear without
+    // re-mounting — same closure idiom as `slashCandidates`/`resolveWikiLink`.
+    // Defaults to an empty list so the autocomplete is a harmless no-op (returns
+    // no popup) when not wired.
+    wikiCandidates: WikiCandidateProvider = () => [],
+    // The path of the note being edited (sans `.md`), used to exclude it from
+    // its own `[[ ]]` autocomplete candidates. Defaults to "unknown".
+    currentNotePath: () => string | null = () => null,
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -226,6 +239,10 @@ export class MdEditor {
         // default resolver every link is a harmless ghost and clicks are inert.
         wikiLinkHighlight(resolveWikiLink),
         wikiLinkClick(resolveWikiLink, onOpenWikiLink),
+        // The `[[<partial>` autocomplete popup. Completion only — accepting
+        // rewrites the open token to a closed `[[<name>]]`; the highlight/click
+        // above then apply. With empty candidates it's a harmless no-op.
+        wikiAutocomplete(wikiCandidates, currentNotePath),
         theme,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
