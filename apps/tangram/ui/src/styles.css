@@ -516,3 +516,54 @@ body {
   transition: color 0.12s ease, border-color 0.12s ease;
 }
 .agents-run:hover { color: var(--text); border-color: var(--blue); }
+
+/* ── `/<partial>` slash autocomplete dropdown (P2) ──
+   The CodeMirror @codemirror/autocomplete tooltip, restyled into the shell's
+   panel/popup idiom (panel-2 card, hairline border, soft shadow). Small and
+   single-column: each row is the completed `/<name>` label plus a kind chip
+   (agent / skill / "new agent/skill"). Selected row reads with a blue accent. */
+.cm-tooltip.cm-tooltip-autocomplete {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.cm-tooltip-autocomplete > ul {
+  font-family: var(--sans);
+  font-size: 13px;
+  max-height: 16em;
+  min-width: 200px;
+}
+.cm-tooltip-autocomplete > ul > li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  color: var(--text);
+  line-height: 1.4;
+}
+.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: rgba(0, 158, 238, 0.14);
+  color: var(--text);
+}
+.cm-tooltip-autocomplete .cm-completionLabel {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--blue);
+}
+.cm-tooltip-autocomplete .cm-completionMatchedText {
+  text-decoration: none;
+  font-weight: 700;
+}
+/* The kind chip (detail): pill on the right, dim like the agents-view chip. */
+.cm-tooltip-autocomplete .cm-completionDetail {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--dim);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+}

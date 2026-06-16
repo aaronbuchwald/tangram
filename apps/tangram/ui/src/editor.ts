@@ -35,6 +35,10 @@ import {
   slashTagHighlight,
   slashTrigger,
 } from "./slashTrigger";
+import {
+  type SlashCandidateProvider,
+  slashAutocomplete,
+} from "./slashComplete";
 import { livePreview } from "./livePreview";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
@@ -151,6 +155,11 @@ export class MdEditor {
     // listener uses this to avoid re-firing the create popup over an open one.
     // Defaults to "never open" so the auto-open is unguarded if not wired.
     isPopupOpen: () => boolean = () => false,
+    // Live candidate set for the `/<partial>` autocomplete popup (every indexed
+    // agent/skill plus the reserved `agent` create command). Read fresh on each
+    // keystroke so newly-created defs appear without re-mounting. Defaults to an
+    // empty list so the autocomplete is a harmless no-op when not wired.
+    slashCandidates: SlashCandidateProvider = () => [],
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -162,6 +171,9 @@ export class MdEditor {
           slashTrigger(onSlashTrigger, resolveAgent),
           slashClickToReopen(onSlashTrigger, resolveAgent),
           slashAutoOpen(onSlashTrigger, isPopupOpen),
+          // The `/<partial>` autocomplete popup. Completion only — accepting
+          // rewrites the token to `/<name>`; the trigger logic above then runs.
+          slashAutocomplete(slashCandidates),
         ]
       : [];
     const state = EditorState.create({

@@ -28,6 +28,7 @@ import {
 } from "./createAgentPopup";
 import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
+import { CREATE_WORD } from "./slashTrigger";
 import { registry } from "./manage";
 import { confirmAction, promptName } from "./modal";
 import { TabStore, type Tab } from "./tabs";
@@ -701,6 +702,14 @@ function renderNoteTab(fileId: string) {
     // Auto-open guard (Fix 1): don't re-pop the create popup while either agent
     // popup (create or run) is already up.
     () => isCreateAgentPopupOpen() || isAgentPopupOpen(),
+    // Live candidates for the `/<partial>` autocomplete popup: every indexed
+    // agent/skill (kind from its def) plus the reserved `agent` create command.
+    // Reads through the live index (rebuilt each vault state) so new defs show
+    // up without re-mounting — same pattern as the resolver above.
+    () => [
+      { name: CREATE_WORD, kind: "create" as const },
+      ...agentIndex.all.map((d) => ({ name: d.name, kind: d.kind })),
+    ],
   );
   state.editor = editor;
 
