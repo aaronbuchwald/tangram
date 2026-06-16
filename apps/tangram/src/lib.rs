@@ -100,6 +100,16 @@ pub struct Invocation {
     /// (the `missing` attribute hydrates the absent key).
     #[autosurgeon(missing = "Option::default")]
     last_run_ms: Option<i64>,
+    /// The precomputed **next fire time** (epoch-ms): the scheduler selects an
+    /// invocation when `next_fire_ms <= now`, instead of re-deriving due-ness for
+    /// the whole index every tick (the next-fire model). Computed from the
+    /// trigger's schedule grammar (`agents::next_fire_ms`, DST-aware) whenever the
+    /// invocation is created/updated and after each run, and backfilled on a tick
+    /// for any entry left `None` (older documents / a just-migrated index). `None`
+    /// also for a `one-time`/unknown trigger (never scheduled). The `missing`
+    /// attribute hydrates the absent key on documents written by older binaries.
+    #[autosurgeon(missing = "Option::default")]
+    next_fire_ms: Option<i64>,
     /// A short status string for the UI (`"scheduled"` | `"ran"` | `"error"`).
     /// Free-form/forward-compatible; the scheduler writes `"ran"`/`"error"`.
     status: String,
@@ -388,6 +398,10 @@ impl Vault {
         if id.is_empty() {
             return Err("invocation id must not be empty".to_string());
         }
+        // Compute the next fire from the (fresh, never-run) trigger so the tick
+        // can select by stored timestamp. `None` ⇒ a one-time/unknown trigger.
+        let now = now_ms();
+        let next_fire_ms = agents::next_fire_ms(&trigger, None, now);
         let invs = self.invocations.get_or_insert_with(Vec::new);
         if let Some(existing) = invs.iter_mut().find(|i| i.id == id) {
             existing.agent = agent;
@@ -395,6 +409,7 @@ impl Vault {
             existing.prompt = prompt;
             existing.host_file_id = host_file_id;
             existing.last_run_ms = None;
+            existing.next_fire_ms = next_fire_ms;
             existing.status = STATUS_SCHEDULED.to_string();
         } else {
             invs.push(Invocation {
@@ -404,6 +419,7 @@ impl Vault {
                 prompt,
                 host_file_id,
                 last_run_ms: None,
+                next_fire_ms,
                 status: STATUS_SCHEDULED.to_string(),
             });
         }
@@ -425,6 +441,7 @@ impl Vault {
             .iter_mut()
             .find(|i| i.id == id)
             .ok_or_else(|| format!("no invocation with id {id}"))?;
+        inv.next_fire_ms = agents::next_fire_ms(&trigger, None, now_ms());
         inv.trigger = trigger;
         inv.prompt = prompt;
         inv.last_run_ms = None;
@@ -478,8 +495,14 @@ impl Vault {
         ctx.mutate("tick_agents", Self::prune_orphan_invocations)
             .map_err(|e| e.to_string())?;
 
-        let state = ctx.state().map_err(|e| e.to_string())?;
         let now = now_ms();
+        // Backfill the stored next-fire for any entry left `None` (older
+        // documents / a just-migrated index), so the timestamp selection below is
+        // complete. A no-op once every entry has a next-fire.
+        ctx.mutate("tick_agents", |m| m.backfill_next_fire(now))
+            .map_err(|e| e.to_string())?;
+
+        let state = ctx.state().map_err(|e| e.to_string())?;
 
         // Index the definitions once (by lowercased name) so each due invocation
         // can resolve its `agent`. Definitions are pure capabilities (no trigger).
@@ -495,14 +518,17 @@ impl Vault {
                 .cloned()
         };
 
-        // Decide DUE (invocation, definition) pairs from a single snapshot of the
-        // index (not block scanning — the index is the source of truth).
+        // Select the "due now" set by the STORED next-fire timestamp instead of
+        // re-deriving due-ness for every entry (the next-fire model). After the
+        // backfill above, every scheduled entry carries a `next_fire_ms`; a
+        // `None` here is a one-time/unknown trigger (never scheduled) and is
+        // skipped. The next-fire is the inverse of the old due check, so the same
+        // invocations fire at the same times (see `agents::next_fire_ms`).
         let due: Vec<(Invocation, agents::AgentDef)> = state
             .invocations
             .iter()
             .flatten()
-            .filter(|inv| agents::trigger_is_scheduled(&inv.trigger))
-            .filter(|inv| agents::trigger_is_due(&inv.trigger, inv.last_run_ms, now))
+            .filter(|inv| inv.next_fire_ms.is_some_and(|nf| nf <= now))
             .filter_map(|inv| resolve(&inv.agent).map(|def| (inv.clone(), def)))
             .collect();
 
@@ -792,6 +818,21 @@ impl Vault {
         before - invs.len()
     }
 
+    /// Backfill the stored `next_fire_ms` for any index entry that still has it
+    /// `None` — older documents written before the field existed, or a freshly
+    /// hydrated index. Computed from each entry's trigger + recorded last run
+    /// (`agents::next_fire_ms`, DST-aware), so a backfilled entry fires exactly
+    /// when the old derive-every-tick path would have. A no-op once every entry
+    /// carries a next-fire (the steady-state). Entries whose trigger is
+    /// one-time/unknown stay `None` (never scheduled).
+    fn backfill_next_fire(&mut self, now: i64) {
+        for inv in self.invocations.get_or_insert_with(Vec::new) {
+            if inv.next_fire_ms.is_none() {
+                inv.next_fire_ms = agents::next_fire_ms(&inv.trigger, inv.last_run_ms, now);
+            }
+        }
+    }
+
     /// Append a scheduled invocation's output near its inline `agent://<id>` link
     /// and record the run (`last_run_ms` + `status`) on the index entry — both in
     /// the SAME commit (so the due-check and the visible output never disagree).
@@ -852,6 +893,9 @@ impl Vault {
             .find(|i| i.id == inv.id)
         {
             entry.last_run_ms = Some(at_ms);
+            // Advance the stored next fire from this run so the next tick selects
+            // it only when the next occurrence/interval is reached (DST-aware).
+            entry.next_fire_ms = agents::next_fire_ms(&entry.trigger, Some(at_ms), at_ms);
             entry.status = status.to_string();
         }
     }
@@ -1243,6 +1287,17 @@ mod tests {
         );
     }
 
+    /// epoch-ms for a wall-clock instant in a named zone (next-fire test helper,
+    /// mirrors the one in the `agents` test module).
+    fn ms_at(tz_name: &str, y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        use chrono::TimeZone;
+        let tz: chrono_tz::Tz = tz_name.parse().unwrap();
+        tz.with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    }
+
     fn empty() -> Vault {
         Vault {
             files: Vec::new(),
@@ -1428,6 +1483,159 @@ mod tests {
             after.last_run_ms,
             1_000_000 + 60_000
         ));
+    }
+
+    /// The stored next-fire for the invocation `id`, if any (mirrors the
+    /// `last_run_ms` test helper).
+    fn next_fire_ms_of(v: &Vault, id: &str) -> Option<i64> {
+        v.list_invocations()
+            .into_iter()
+            .find(|i| i.id == id)
+            .and_then(|i| i.next_fire_ms)
+    }
+
+    /// The "due now" set the tick selects: entries whose stored next-fire is
+    /// `<= now` (the exact filter in `tick_agents`). A pure stand-in so the
+    /// next-fire selection is unit-testable without the async egress path.
+    fn due_now_ids(v: &Vault, now: i64) -> Vec<String> {
+        v.list_invocations()
+            .into_iter()
+            .filter(|inv| inv.next_fire_ms.is_some_and(|nf| nf <= now))
+            .map(|inv| inv.id)
+            .collect()
+    }
+
+    #[test]
+    fn next_fire_is_computed_on_create() {
+        // A scheduled interval invocation gets a next-fire on create. Never run
+        // ⇒ it is `<= now` (immediately due), matching the old never-run rule.
+        let v = vault_with_invocation("standup", "uuid-1", "1m");
+        let nf = next_fire_ms_of(&v, "uuid-1").expect("scheduled ⇒ Some");
+        assert!(nf <= now_ms() + 5_000, "fresh interval fires immediately");
+        // A one-time invocation is never scheduled ⇒ no next-fire stored.
+        let v2 = vault_with_invocation("standup2", "uuid-2", "one-time");
+        assert_eq!(next_fire_ms_of(&v2, "uuid-2"), None);
+    }
+
+    #[test]
+    fn next_fire_is_recomputed_on_update() {
+        // Updating the trigger recomputes the stored next-fire from the new
+        // schedule (and resets the run).
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        v.update_invocation("uuid-1".into(), "daily at 09:00 UTC".into(), "p".into())
+            .unwrap();
+        let nf = next_fire_ms_of(&v, "uuid-1").expect("daily ⇒ Some");
+        // Must equal what the grammar computes for a never-run daily schedule.
+        let expected = agents::next_fire_ms("daily at 09:00 UTC", None, now_ms());
+        assert_eq!(Some(nf), expected);
+        // Updating to a one-time trigger clears the next-fire.
+        v.update_invocation("uuid-1".into(), "one-time".into(), "p".into())
+            .unwrap();
+        assert_eq!(next_fire_ms_of(&v, "uuid-1"), None);
+    }
+
+    #[test]
+    fn tick_selects_only_due_entries_by_next_fire() {
+        // Two interval invocations: one already run (next-fire in the future),
+        // one never run (next-fire now). Only the never-run one is "due now".
+        let mut v = vault_with_invocation("a", "uuid-a", "1h");
+        v.create_file(
+            "agents/b.md".into(),
+            "---\nkind: skill\nname: b\n---\nDo b.".into(),
+        )
+        .unwrap();
+        let hb = v
+            .create_file("b.md".into(), "[⚡ b](agent://uuid-b) hi".into())
+            .unwrap();
+        v.create_invocation("uuid-b".into(), "b".into(), "1h".into(), "p".into(), hb)
+            .unwrap();
+        // Record a run for `a` at T so its next-fire is T + 1h (future).
+        let t = 2_000_000_000_000;
+        let inv_a = v
+            .list_invocations()
+            .into_iter()
+            .find(|i| i.id == "uuid-a")
+            .unwrap();
+        v.append_invocation_output(&inv_a, &standup_def(), "ok", t, STATUS_RAN);
+        // At T, only `b` (never run, next-fire ≤ T) is due; `a` fires at T+1h.
+        let due = due_now_ids(&v, t);
+        assert_eq!(due, vec!["uuid-b".to_string()]);
+        // One hour later both are due.
+        let later = t + 60 * 60 * 1000;
+        let mut both = due_now_ids(&v, later);
+        both.sort();
+        assert_eq!(both, vec!["uuid-a".to_string(), "uuid-b".to_string()]);
+    }
+
+    #[test]
+    fn next_fire_advances_after_a_run() {
+        // After a run the stored next-fire moves to last_run + interval, so the
+        // invocation is no longer due until the interval elapses.
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = v.list_invocations()[0].clone();
+        let t = 1_000_000;
+        v.append_invocation_output(&inv, &standup_def(), "ok", t, STATUS_RAN);
+        assert_eq!(next_fire_ms_of(&v, "uuid-1"), Some(t + 60_000));
+        // Not due right after the run; due once the interval elapses.
+        assert!(due_now_ids(&v, t).is_empty());
+        assert_eq!(due_now_ids(&v, t + 60_000), vec!["uuid-1".to_string()]);
+    }
+
+    #[test]
+    fn backfill_sets_next_fire_for_none_entries() {
+        // Simulate an older document: an index entry hydrated with no next-fire.
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        // Force the field back to None (as a pre-field document would hydrate).
+        v.invocations.as_mut().unwrap()[0].next_fire_ms = None;
+        assert_eq!(next_fire_ms_of(&v, "uuid-1"), None);
+        // The tick's backfill fills it from the trigger + last run.
+        let now = 1_000_000;
+        v.backfill_next_fire(now);
+        // Never run ⇒ next-fire is `now` (immediately due), so the entry selects.
+        assert_eq!(next_fire_ms_of(&v, "uuid-1"), Some(now));
+        assert_eq!(due_now_ids(&v, now), vec!["uuid-1".to_string()]);
+        // A one-time entry stays None through backfill (never scheduled).
+        v.invocations.as_mut().unwrap()[0].trigger = "one-time".into();
+        v.invocations.as_mut().unwrap()[0].next_fire_ms = None;
+        v.backfill_next_fire(now);
+        assert_eq!(next_fire_ms_of(&v, "uuid-1"), None);
+    }
+
+    #[test]
+    fn next_fire_matches_due_for_daily_and_weekly_invocations() {
+        // The stored next-fire must reproduce trigger_is_due for calendar
+        // schedules at create time (never run): selecting by next-fire ≤ now
+        // equals the old due check.
+        // Use fixed clock instants (not now_ms()) so `selected` and `due` are
+        // evaluated against the exact same `now` — the equivalence is per-`now`.
+        let cases: &[(&str, i64)] = &[
+            // Daily 09:00 ET, now = 10:00 ET (past today's slot), never run ⇒ due.
+            (
+                "daily at 09:00 America/New_York",
+                ms_at("America/New_York", 2026, 3, 10, 10, 0),
+            ),
+            // Daily 09:00 ET, now = 08:00 ET (before today's slot), never run ⇒
+            // the most-recent occurrence is yesterday's, ≤ now ⇒ due.
+            (
+                "daily at 09:00 America/New_York",
+                ms_at("America/New_York", 2026, 3, 10, 8, 0),
+            ),
+            // Weekly Mon/Wed/Fri 14:00 ET, now = Mon 15:00 ⇒ due (slot passed).
+            (
+                "weekly on mon,wed,fri at 14:00 America/New_York",
+                ms_at("America/New_York", 2026, 6, 15, 15, 0),
+            ),
+        ];
+        for (trigger, now) in cases {
+            // Reproduce the create-time computation at this exact `now`.
+            let nf = agents::next_fire_ms(trigger, None, *now);
+            let selected = nf.is_some_and(|t| t <= *now);
+            let due = agents::trigger_is_due(trigger, None, *now);
+            assert_eq!(
+                selected, due,
+                "next-fire selection must match due for {trigger:?}"
+            );
+        }
     }
 
     #[test]

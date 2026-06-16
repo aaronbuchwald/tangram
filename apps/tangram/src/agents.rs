@@ -435,6 +435,125 @@ fn last_calendar_occurrence_ms(
     None
 }
 
+/// The epoch-ms of the FIRST scheduled occurrence STRICTLY AFTER `after_ms` for
+/// a calendar (daily/weekly) schedule, computed in `tz` so it is DST-aware (the
+/// forward twin of [`last_calendar_occurrence_ms`]). `None` only if no occurrence
+/// can be represented within the look-ahead window.
+///
+/// Strategy: walk forward day-by-day from "the day of `after_ms` in `tz`" (at
+/// most 9 days — a full week plus slack for the time-of-day not-yet-reached and
+/// DST). For each candidate day that matches the schedule's weekday set, resolve
+/// its `hh:mm` wall-clock to an instant and return the first one strictly
+/// `> after_ms`. Walking days (not a fixed interval) is what keeps it DST-correct:
+/// each day's `hh:mm` is resolved independently in the zone.
+fn next_calendar_occurrence_ms(
+    days: Option<&[Weekday]>,
+    hh: u32,
+    mm: u32,
+    tz: Tz,
+    after_ms: i64,
+) -> Option<i64> {
+    let after_utc = chrono::DateTime::from_timestamp_millis(after_ms)?;
+    let after_local = after_utc.with_timezone(&tz);
+    let start = after_local.date_naive();
+    // Look ahead over a full week (+2 days of slack for time-of-day / DST).
+    for ahead in 0..9 {
+        let day = start + chrono::Duration::days(ahead);
+        if let Some(allowed) = days
+            && !allowed.contains(&day.weekday())
+        {
+            continue;
+        }
+        // Resolve this day's wall-clock hh:mm in the zone (DST-aware). On a
+        // spring-forward gap the slot may not exist; `single()` yields None, so
+        // we fall through to the next valid day (matching the backward walk's
+        // "missed slot fires on the next valid occurrence" semantics).
+        let Some(occ) = tz
+            .with_ymd_and_hms(day.year(), day.month(), day.day(), hh, mm, 0)
+            .single()
+        else {
+            continue;
+        };
+        let occ_ms = occ.timestamp_millis();
+        if occ_ms > after_ms {
+            return Some(occ_ms);
+        }
+    }
+    None
+}
+
+/// The stored **next fire time** for a recurring `trigger`: the epoch-ms instant
+/// at or before which the invocation becomes DUE. This is the inverse of
+/// [`trigger_is_due`] — for every `now_ms`, `next_fire_ms(..) <= Some(now_ms)`
+/// holds exactly when [`trigger_is_due`] is `true`, so the scheduler can select
+/// "due now" entries by a stored timestamp instead of re-deriving due-ness for
+/// the whole index every tick. `None` for a `one-time`/unknown trigger (never
+/// scheduled), or when no calendar occurrence can be represented.
+///
+/// - **Interval** (`2m`/`@hourly`/…): never run ⇒ fire now (`now_ms`, so it is
+///   immediately due); otherwise `last_run + interval`. This matches the
+///   `now - last >= interval` due rule exactly.
+/// - **Daily / Weekly**: the next occurrence STRICTLY AFTER the last run (so the
+///   slot fires exactly once); never run ⇒ fire at the earliest representable
+///   occurrence so a fresh invocation catches up on its first eligible tick,
+///   matching the `occurrence <= now && occurrence > last_run` due rule (with no
+///   last run, any past-or-present occurrence is due).
+#[must_use]
+pub fn next_fire_ms(trigger: &str, last_run_ms: Option<i64>, now_ms: i64) -> Option<i64> {
+    schedule_of(trigger).and_then(|s| schedule_next_fire_ms(&s, last_run_ms, now_ms))
+}
+
+/// [`next_fire_ms`] over an already-parsed [`Schedule`] (the testable core).
+#[must_use]
+pub fn schedule_next_fire_ms(
+    schedule: &Schedule,
+    last_run_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<i64> {
+    match schedule {
+        Schedule::Interval(interval) => match last_run_ms {
+            // Never run ⇒ due now: a next-fire at `now` is `<= now` (immediately
+            // due), matching `trigger_is_due(.., None, now) == true`.
+            None => Some(now_ms),
+            Some(last) => Some(last.saturating_add(*interval)),
+        },
+        Schedule::Daily { hh, mm, tz } => {
+            calendar_next_fire(None, *hh, *mm, *tz, last_run_ms, now_ms)
+        }
+        Schedule::Weekly { days, hh, mm, tz } => {
+            calendar_next_fire(Some(days), *hh, *mm, *tz, last_run_ms, now_ms)
+        }
+    }
+}
+
+/// Shared daily/weekly next-fire: the next occurrence strictly after the last
+/// run. With no last run, anchor the walk just before the most-recent occurrence
+/// at or before `now` (so that occurrence — which makes the invocation due — is
+/// returned), falling back to the next future occurrence if none has happened
+/// yet. This reproduces [`schedule_is_due`]'s calendar branch as a timestamp.
+fn calendar_next_fire(
+    days: Option<&[Weekday]>,
+    hh: u32,
+    mm: u32,
+    tz: Tz,
+    last_run_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<i64> {
+    let after = match last_run_ms {
+        Some(last) => last,
+        None => {
+            // Never run: if an occurrence is already at/before now, that one is
+            // due — return it by anchoring one ms before it. Otherwise fall
+            // through to the first future occurrence (not yet due).
+            match last_calendar_occurrence_ms(days, hh, mm, tz, now_ms) {
+                Some(occ) => occ.saturating_sub(1),
+                None => now_ms,
+            }
+        }
+    };
+    next_calendar_occurrence_ms(days, hh, mm, tz, after)
+}
+
 // ── inline `agent://<id>` links (the scheduled-invocation handle) ─────────────
 
 /// One inline `[<label>](agent://<id>)` link found in a note body: the stable
@@ -493,9 +612,14 @@ pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
 }
 
 /// Whether a recurring schedule described by the raw `trigger` text is DUE at
-/// `now_ms` given its last run. A `one-time`/unknown trigger returns `false`
-/// (the scheduler skips it). The index-keyed entry point: the trigger lives on
-/// the `Invocation` index entry, not in a block.
+/// `now_ms` given its last run. A `one-time`/unknown trigger returns `false`.
+///
+/// **Reference oracle (test-only).** The scheduler now selects due invocations
+/// by the stored [`next_fire_ms`] (the next-fire model — a tick consumes only
+/// what is actually due instead of re-deriving this for the whole index). This
+/// predicate is retained as the correctness oracle the next-fire computation is
+/// validated against: for every `now_ms`, `next_fire_ms(..) <= Some(now_ms)`
+/// must equal `trigger_is_due(..)`. Hence `#[cfg(test)]`.
 ///
 /// - **Interval** (`2m`/`2h`/`2d`/`@hourly`/`@daily`): due iff never run, or at
 ///   least the interval has elapsed since the last run.
@@ -505,6 +629,7 @@ pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
 ///   same slot sees the same occurrence ≤ last_run and is NOT due), and a missed
 ///   occurrence fires on the next tick (the occurrence is still > last_run).
 ///   Never run ⇒ due as soon as an occurrence exists at or before now.
+#[cfg(test)]
 #[must_use]
 pub fn trigger_is_due(trigger: &str, last_run_ms: Option<i64>, now_ms: i64) -> bool {
     match schedule_of(trigger) {
@@ -514,13 +639,17 @@ pub fn trigger_is_due(trigger: &str, last_run_ms: Option<i64>, now_ms: i64) -> b
 }
 
 /// Whether the raw `trigger` text names a recurring schedule the grammar
-/// understands (the host scheduler should consider it).
+/// understands. Test-only reference oracle now that the scheduler selects by the
+/// stored [`next_fire_ms`] (which is `None` exactly for an unscheduled trigger).
+#[cfg(test)]
 #[must_use]
 pub fn trigger_is_scheduled(trigger: &str) -> bool {
     schedule_of(trigger).is_some()
 }
 
-/// [`trigger_is_due`] over an already-parsed [`Schedule`] (the testable core).
+/// [`trigger_is_due`] over an already-parsed [`Schedule`] (the testable core of
+/// the reference oracle; see [`trigger_is_due`]). Test-only.
+#[cfg(test)]
 #[must_use]
 pub fn schedule_is_due(schedule: &Schedule, last_run_ms: Option<i64>, now_ms: i64) -> bool {
     match schedule {
@@ -856,6 +985,125 @@ mod tests {
         assert!(!trigger_is_due("@weekly", None, 0));
         assert!(trigger_is_scheduled("daily at 09:00 UTC"));
         assert!(!trigger_is_scheduled("one-time"));
+    }
+
+    // ── next_fire_ms: the stored next-fire, inverse of the due check ──────────
+
+    /// Assert the next-fire/due equivalence at a given `now`: `next_fire <= now`
+    /// iff `trigger_is_due`. This is the invariant the scheduler relies on.
+    fn assert_next_fire_matches_due(trigger: &str, last_run: Option<i64>, now: i64) {
+        let nf = next_fire_ms(trigger, last_run, now);
+        let due = trigger_is_due(trigger, last_run, now);
+        let nf_due = nf.is_some_and(|t| t <= now);
+        assert_eq!(
+            nf_due, due,
+            "next_fire {nf:?} <= now {now} ({nf_due}) must equal trigger_is_due ({due}) \
+             for {trigger:?} last_run {last_run:?}"
+        );
+    }
+
+    #[test]
+    fn next_fire_interval_advances_by_interval() {
+        // Never run ⇒ fire now (immediately due).
+        assert_eq!(next_fire_ms("every 1m", None, 1_000_000), Some(1_000_000));
+        // Run at T ⇒ next fire is T + interval.
+        assert_eq!(
+            next_fire_ms("every 1m", Some(1_000_000), 1_000_000),
+            Some(1_000_000 + MINUTE_MS)
+        );
+        assert_eq!(
+            next_fire_ms("@hourly", Some(5_000_000), 5_000_000),
+            Some(5_000_000 + HOUR_MS)
+        );
+        // one-time / unknown ⇒ no next fire.
+        assert_eq!(next_fire_ms("one-time", None, 0), None);
+        assert_eq!(next_fire_ms("@weekly", None, 0), None);
+    }
+
+    #[test]
+    fn next_fire_matches_due_for_intervals() {
+        // Sweep the boundary around `last + interval` for an interval schedule.
+        let last = 1_000_000;
+        for delta in [0, MINUTE_MS - 1, MINUTE_MS, MINUTE_MS + 1, 5 * MINUTE_MS] {
+            assert_next_fire_matches_due("every 1m", Some(last), last + delta);
+        }
+        // Never run is due at any now.
+        assert_next_fire_matches_due("every 1m", None, 1_000_000);
+    }
+
+    #[test]
+    fn next_fire_daily_is_next_occurrence_after_last_run() {
+        let sched = parse_schedule("daily at 09:00 America/New_York").unwrap();
+        // Ran at today's 09:00 ⇒ next fire is tomorrow's 09:00 (DST-aware).
+        let today_9 = ms_at("America/New_York", 2026, 3, 10, 9, 0);
+        let now = ms_at("America/New_York", 2026, 3, 10, 10, 0);
+        let tomorrow_9 = ms_at("America/New_York", 2026, 3, 11, 9, 0);
+        assert_eq!(
+            schedule_next_fire_ms(&sched, Some(today_9), now),
+            Some(tomorrow_9)
+        );
+        // Never run, now is past today's 09:00 ⇒ next fire is today's 09:00
+        // (≤ now ⇒ immediately due, the catch-up case).
+        let nf = schedule_next_fire_ms(&sched, None, now).unwrap();
+        assert_eq!(nf, today_9);
+        assert!(nf <= now);
+    }
+
+    #[test]
+    fn next_fire_weekly_skips_to_next_selected_day() {
+        // Mon/Wed/Fri at 14:00 ET. Ran Monday 14:00 ⇒ next fire Wednesday 14:00.
+        let sched = parse_schedule("weekly on mon,wed,fri at 14:00 America/New_York").unwrap();
+        let mon_2pm = ms_at("America/New_York", 2026, 6, 15, 14, 0);
+        let tue_4pm = ms_at("America/New_York", 2026, 6, 16, 16, 0);
+        let wed_2pm = ms_at("America/New_York", 2026, 6, 17, 14, 0);
+        assert_eq!(
+            schedule_next_fire_ms(&sched, Some(mon_2pm), tue_4pm),
+            Some(wed_2pm)
+        );
+    }
+
+    #[test]
+    fn next_fire_matches_due_for_calendar_schedules() {
+        // Daily: sweep before/at/after today's slot, never-run and last-run cases.
+        let daily = "daily at 09:00 America/New_York";
+        let yesterday_9 = ms_at("America/New_York", 2026, 3, 9, 9, 0);
+        let today_9 = ms_at("America/New_York", 2026, 3, 10, 9, 0);
+        for now in [
+            ms_at("America/New_York", 2026, 3, 10, 8, 0),
+            today_9,
+            ms_at("America/New_York", 2026, 3, 10, 10, 0),
+        ] {
+            assert_next_fire_matches_due(daily, None, now);
+            assert_next_fire_matches_due(daily, Some(yesterday_9), now);
+            assert_next_fire_matches_due(daily, Some(today_9), now);
+        }
+        // Weekly across a non-selected day and a selected day.
+        let weekly = "weekly on mon,wed,fri at 14:00 America/New_York";
+        let mon_2pm = ms_at("America/New_York", 2026, 6, 15, 14, 0);
+        for now in [
+            ms_at("America/New_York", 2026, 6, 15, 15, 0), // Mon after slot
+            ms_at("America/New_York", 2026, 6, 16, 16, 0), // Tue (not selected)
+            ms_at("America/New_York", 2026, 6, 17, 14, 30), // Wed after slot
+        ] {
+            assert_next_fire_matches_due(weekly, None, now);
+            assert_next_fire_matches_due(weekly, Some(mon_2pm), now);
+        }
+    }
+
+    #[test]
+    fn next_fire_daily_is_dst_aware() {
+        // 09:00 ET the day after US spring-forward must resolve to 13:00 UTC
+        // (EDT), not a naive fixed-offset 14:00 UTC.
+        let sched = parse_schedule("daily at 09:00 America/New_York").unwrap();
+        // Ran at 09:00 EST on 2026-03-07 ⇒ next fire is 09:00 EDT 2026-03-08
+        // (the spring-forward day) at 13:00 UTC.
+        let ran = ms_at("America/New_York", 2026, 3, 7, 9, 0);
+        let now = ms_at("America/New_York", 2026, 3, 7, 10, 0);
+        let next_edt = ms_at("UTC", 2026, 3, 8, 13, 0);
+        assert_eq!(
+            schedule_next_fire_ms(&sched, Some(ran), now),
+            Some(next_edt)
+        );
     }
 
     #[test]
