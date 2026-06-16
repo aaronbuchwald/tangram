@@ -708,6 +708,146 @@ ui = "{notes_ui}"
     );
 }
 
+/// ADR-0012 OpenAI-compatible mechanism: DeepSeek has NO native agentgateway
+/// provider — it is an OpenAI-shaped API at `api.deepseek.com`, so the host
+/// renders `provider="deepseek"` onto agentgateway's `openAI` provider with a
+/// host/path override + backendTLS. Pins (a) the generated config — the
+/// `/llm/deepseek` route carries the loopback rule, the `$VAR` key ref, the
+/// `openAI` provider (NOT a `deepseek` tag), the `api.deepseek.com:443`
+/// hostOverride + `/v1/chat/completions` pathOverride, and backendTLS; and (b)
+/// the route WIRING — a POST to `/llm/deepseek/v1/chat/completions` with a bogus
+/// key is proxied through to api.deepseek.com, which answers a DeepSeek-side
+/// auth error (a 401). That 4xx proves the host override + key injection work;
+/// no tokens spent.
+#[tokio::test]
+async fn deepseek_openai_compatible_route_is_generated_and_wired() {
+    if !component("notes").exists() {
+        eprintln!("SKIPPING deepseek proxy test: notes component missing");
+        return;
+    }
+    if !agentgateway_on_path() {
+        eprintln!("SKIPPING deepseek proxy test: no agentgateway binary on PATH");
+        return;
+    }
+
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let home = scratch.path();
+    let root = workspace_root();
+    let gateway_port = free_port();
+    let apps_toml = home.join("apps.toml");
+    // A model-pinned DeepSeek provider; the key is a bogus host env var (NOT a
+    // real key) so DeepSeek answers an auth error, not a completion.
+    std::fs::write(
+        &apps_toml,
+        format!(
+            r#"
+[gateway]
+enabled = true
+port = {gateway_port}
+
+[[gateway.llm]]
+name = "deepseek"
+provider = "deepseek"
+model = "deepseek-chat"
+key = "env://TANGRAM_TEST_LLM_KEY"
+
+[apps.notes]
+component = "{notes}"
+ui = "{notes_ui}"
+"#,
+            notes = component("notes").display(),
+            notes_ui = root.join("apps/notes/ui").display(),
+        ),
+    )
+    .expect("write apps.toml");
+
+    let port = free_port();
+    let base = format!("http://127.0.0.1:{port}");
+    let log = home.join("host.log");
+    unsafe {
+        std::env::set_var("TANGRAM_TEST_LLM_KEY", "bogus-not-a-real-key");
+    }
+    let _host = spawn_host(home, &apps_toml, &format!("127.0.0.1:{port}"), &log);
+    let client = reqwest::Client::new();
+
+    wait_for("gateway running", Duration::from_secs(120), || async {
+        fleet_gateway(&client, &base).await["running"] == serde_json::Value::Bool(true)
+    })
+    .await;
+
+    // (a) The generated config: the OpenAI-compatible DeepSeek route.
+    let config_path = home.join(".tangram-host/agentgateway.json");
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).expect("generated config"))
+            .expect("config json");
+    let routes = config["binds"][0]["listeners"][0]["routes"]
+        .as_array()
+        .expect("routes");
+    let ds = routes
+        .iter()
+        .find(|r| r["name"] == "llm-deepseek")
+        .expect("llm-deepseek route present");
+    assert_eq!(ds["matches"][0]["path"]["pathPrefix"], "/llm/deepseek");
+    assert_eq!(
+        ds["policies"]["backendAuth"]["key"],
+        "$TANGRAM_TEST_LLM_KEY"
+    );
+    assert!(
+        ds["policies"]["authorization"]["rules"][0]
+            .as_str()
+            .unwrap()
+            .contains("source.address"),
+        "loopback-only rule on the DeepSeek route: {ds}"
+    );
+    assert!(
+        ds["policies"]["backendTLS"].is_object(),
+        "openai-compatible route needs backendTLS: {ds}"
+    );
+    let ai = &ds["backends"][0]["ai"];
+    // Rendered onto the `openAI` provider (no native `deepseek` tag) and aimed
+    // at the DeepSeek host via the override.
+    assert_eq!(ai["provider"]["openAI"]["model"], "deepseek-chat");
+    assert!(ai["provider"].get("deepseek").is_none());
+    assert_eq!(ai["hostOverride"], "api.deepseek.com:443");
+    assert_eq!(ai["pathOverride"], "/v1/chat/completions");
+    let serialized = std::fs::read_to_string(&config_path).expect("config text");
+    assert!(
+        !serialized.contains("bogus-not-a-real-key"),
+        "the plaintext provider key must never land in the generated config"
+    );
+
+    // (b) Route wiring end to end: a POST to /llm/deepseek/v1/chat/completions is
+    // proxied through the gateway to api.deepseek.com, which answers an auth
+    // error (the bogus key WAS injected host-side and the host override + TLS
+    // reached DeepSeek). A 401/403 is the proof; a 404/502/503 would mean the
+    // route, the proxy, the host override, or TLS is broken.
+    let res = client
+        .post(format!("{base}/llm/deepseek/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "deepseek-chat",
+            "max_tokens": 8,
+            "messages": [{ "role": "user", "content": "hi" }]
+        }))
+        .send()
+        .await
+        .expect("deepseek proxy request");
+    let status = res.status();
+    assert!(
+        status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN,
+        "expected a DeepSeek-side auth error (proof the bogus key was injected, \
+         the host override hit api.deepseek.com, and the hop was TLS), got {status}"
+    );
+    let body = res.text().await.unwrap_or_default();
+    assert!(
+        body.contains("api key")
+            || body.contains("api_key")
+            || body.contains("authentication")
+            || body.contains("Authentication"),
+        "expected a DeepSeek auth-error body, got: {body}"
+    );
+}
+
 /// Phase 5 × the gateway: tenant MCP lives at `/t/<tenant>/<app>/mcp` plus a
 /// per-tenant aggregate `/t/<tenant>/mcp` that lists ONLY that tenant's
 /// tools; the global aggregate `/mcp` excludes tenant apps entirely; and the

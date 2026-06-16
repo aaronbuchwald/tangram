@@ -39,7 +39,9 @@ injection and a loopback-only default.**
 
 2. **Config-driven providers.** `LlmProvider { name, provider, model?, key }`.
    `provider` is validated at load against agentgateway's supported AI providers
-   (`openai | anthropic | gemini | vertex | bedrock | groq`); `name` is unique
+   (`openai | anthropic | gemini | vertex | bedrock | groq`) PLUS the
+   OpenAI-compatible providers Tangram maps onto the `openAI` provider via a host
+   override (`deepseek`; see the mechanism note below); `name` is unique
    and path-safe; `model` is optional (omit ⇒ passthrough, the client body's
    `model` is honored). This is operator startup config, consistent with the
    rest of `[gateway]` (read once; restart to change), not converged live.
@@ -78,6 +80,50 @@ so no provider tokens are spent in CI.
   ANY non-loopback exposure it MUST first gate **per-principal** — an `llm`
   scope plus the per-principal rate-limit from the auth work (ADR-0011 /
   `docs/design/auth.md`). This is a hard gate, not a v1 deliverable.
+
+## Addendum: OpenAI-compatible providers (host override)
+
+Many vendors expose an **OpenAI-shaped** `/v1/chat/completions` API without
+having a native agentgateway provider (DeepSeek, and the same shape covers
+mistral/together/fireworks/…). Rather than add a new provider per vendor, the
+host renders these onto agentgateway's existing **`openAI`** provider plus a
+**host override** at the vendor's endpoint. `KNOWN_PROVIDERS` includes them so
+validation still works; a small lookup
+(`gateway::openai_compatible_host(provider)`) returns the vendor's
+`"host:port"` + path for a compatible provider and `None` for a native one, so
+native providers keep their `{ "<provider>": { model } }` rendering unchanged.
+
+The exact standalone-config shape was **confirmed empirically** against the
+installed agentgateway (v1.2.1) — the K8s docs show `provider.openai` carrying
+host/port/path, but the standalone `-f` file config does NOT: the `openAI`
+provider block accepts only `model`, and the override lives on the `ai` backend
+itself. The working shape for DeepSeek (a bogus key returns a genuine
+DeepSeek-side `401 authentication_error` from `api.deepseek.com`, proving the
+override + host-side key injection):
+
+```json
+{
+  "name": "llm-deepseek",
+  "policies": {
+    "authorization": { "rules": ["<loopback-only>"] },
+    "backendAuth":  { "key": "$DEEPSEEK_API_KEY" },
+    "backendTLS":   {}
+  },
+  "matches":  [{ "path": { "pathPrefix": "/llm/deepseek" } }],
+  "backends": [{ "ai": {
+    "name": "deepseek",
+    "provider":     { "openAI": { "model": "deepseek-chat" } },
+    "hostOverride": "api.deepseek.com:443",
+    "pathOverride": "/v1/chat/completions"
+  } }]
+}
+```
+
+`hostOverride` is a `"host:port"` STRING (the port is required) and
+`pathOverride` a string. `backendTLS = {}` is **required** for the overridden
+hop — a native provider gets upstream TLS automatically, an overridden host does
+not. Everything else (loopback rule, `env://` → `$VAR` host-side key injection)
+is identical to a native provider.
 
 ## Alternatives considered
 

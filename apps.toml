@@ -44,9 +44,18 @@ enabled = true
 # the per-principal gate noted in ADR-0012.
 # [[gateway.llm]]
 # name     = "claude"                       # path segment + backend name (unique, path-safe)
-# provider = "anthropic"                    # openai|anthropic|gemini|vertex|bedrock|groq
+# provider = "anthropic"                    # openai|anthropic|gemini|vertex|bedrock|groq|deepseek
 # model    = "claude-3-5-haiku-20241022"    # OPTIONAL; omit ⇒ passthrough (client body's `model`)
 # key      = "env://ANTHROPIC_API_KEY"      # env-ref; lowered to agentgateway's "$VAR"
+
+# OpenAI-compatible providers (e.g. DeepSeek) have no native agentgateway
+# provider — they are an OpenAI-shaped API at a vendor host, so the host renders
+# them onto agentgateway's openAI provider with a host override (api.deepseek.com).
+# [[gateway.llm]]
+# name     = "deepseek"                      # → /llm/deepseek
+# provider = "deepseek"                      # OpenAI-compatible → openAI provider + api.deepseek.com override
+# model    = "deepseek-chat"                 # OPTIONAL; omit ⇒ passthrough (client body's `model`)
+# key      = "env://DEEPSEEK_API_KEY"        # env-ref; put DEEPSEEK_API_KEY=sk-… in .env
 
 # Browser task automation (host-side; ADR-0010, docs/design/task-automation-
 # browser.md). When enabled, tangram-host supervises a browser-driver child

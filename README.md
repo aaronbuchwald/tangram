@@ -503,12 +503,25 @@ under the same `[gateway]` section; each becomes a `/llm/<name>` route:
 ```toml
 [[gateway.llm]]
 name     = "claude"                       # path segment + backend name (unique, path-safe)
-provider = "anthropic"                    # openai | anthropic | gemini | vertex | bedrock | groq
+provider = "anthropic"                    # openai | anthropic | gemini | vertex | bedrock | groq | deepseek
 model    = "claude-3-5-haiku-20241022"    # OPTIONAL; omit ⇒ passthrough (client body's `model`)
 key      = "env://ANTHROPIC_API_KEY"      # env-ref; the plaintext key stays in .env, host-side
 ```
 
-Put the real key in `.env` (`ANTHROPIC_API_KEY=sk-…`) — the gateway child
+**OpenAI-compatible providers** (e.g. DeepSeek) have no native agentgateway
+provider but expose an OpenAI-shaped `/v1/chat/completions` API. Declare them the
+same way — the host renders `provider = "deepseek"` onto agentgateway's `openAI`
+provider with a host override at the vendor (`api.deepseek.com`):
+
+```toml
+[[gateway.llm]]
+name     = "deepseek"                      # → /llm/deepseek
+provider = "deepseek"                      # OpenAI-compatible: rendered to openAI + api.deepseek.com host override
+model    = "deepseek-chat"                 # OPTIONAL; omit ⇒ passthrough (client body's `model`)
+key      = "env://DEEPSEEK_API_KEY"        # env-ref; the plaintext key stays in .env, host-side
+```
+
+Put the real key in `.env` (`ANTHROPIC_API_KEY=sk-…`, `DEEPSEEK_API_KEY=sk-…`) — the gateway child
 inherits the host environment, so `key = "env://ANTHROPIC_API_KEY"` is lowered
 to agentgateway's `"$ANTHROPIC_API_KEY"` substitution and resolves host-side.
 A loopback client then picks the provider by URL and sends an OpenAI-style chat

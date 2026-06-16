@@ -104,10 +104,49 @@ pub struct LlmProvider {
 }
 
 /// agentgateway's supported AI providers (the `provider` tag set on an `ai`
-/// backend). Declared providers are validated against this at load so a typo is
-/// a clear config error, not a runtime route the gateway silently rejects.
-pub const KNOWN_PROVIDERS: &[&str] =
-    &["openai", "anthropic", "gemini", "vertex", "bedrock", "groq"];
+/// backend) PLUS the OpenAI-compatible providers Tangram renders onto
+/// agentgateway's `openAI` provider with a host override (see
+/// [`openai_compatible_host`]). Declared providers are validated against this at
+/// load so a typo is a clear config error, not a runtime route the gateway
+/// silently rejects.
+///
+/// The native providers (`openai`/`anthropic`/`gemini`/`vertex`/`bedrock`/
+/// `groq`) render to their own `{ "<provider>": { model } }` block. The
+/// OpenAI-compatible ones (`deepseek`, …) have NO native agentgateway provider —
+/// they expose an OpenAI-shaped `/v1/chat/completions` API, so they render to
+/// the `openAI` provider with `hostOverride`/`pathOverride`/`backendTLS` pointing
+/// at the vendor host (ADR-0012, OpenAI-compatible mechanism).
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "gemini",
+    "vertex",
+    "bedrock",
+    "groq",
+    "deepseek",
+];
+
+/// OpenAI-compatible providers that have NO native agentgateway provider: they
+/// expose an OpenAI-shaped chat-completions API at a vendor host, so the host
+/// renders them onto agentgateway's `openAI` provider with a host override
+/// (ADR-0012). Returns `Some((host_port, path))` for an OpenAI-compatible
+/// provider — `host_port` is the `"host:port"` string agentgateway's
+/// `hostOverride` wants and `path` the upstream chat-completions path
+/// (`pathOverride`) — or `None` for a NATIVE provider (which keeps the existing
+/// `{ "<provider>": { model } }` rendering, no override).
+///
+/// The empirically-confirmed standalone-config shape (agentgateway v1.2.1): the
+/// `ai` backend takes `provider: { openAI: { model } }`, a `hostOverride`
+/// `"host:port"` STRING (port required), a `pathOverride` string, and the route
+/// needs `policies.backendTLS = {}` so the upstream hop is TLS (the native
+/// providers get TLS automatically; an overridden host does not). Adding a new
+/// compatible vendor (mistral/together/fireworks/…) is one line here.
+pub fn openai_compatible_host(provider: &str) -> Option<(&'static str, &'static str)> {
+    match provider {
+        "deepseek" => Some(("api.deepseek.com:443", "/v1/chat/completions")),
+        _ => None,
+    }
+}
 
 impl LlmProvider {
     /// Validate this provider entry: a non-empty, path-safe, unique `name`
@@ -259,29 +298,67 @@ fn aggregate_route(route_name: &str, path: &str, apps: &[&AppKey], internal_port
 /// is unreachable from off the box (ADR-0012 §security; v1 is loopback-trusted,
 /// non-loopback exposure MUST first gate per-principal). A `model` is emitted
 /// only when pinned; omitted ⇒ passthrough (the client's body `model`).
+///
+/// An OpenAI-COMPATIBLE provider (one with NO native agentgateway provider —
+/// see [`openai_compatible_host`], e.g. `deepseek`) renders onto agentgateway's
+/// `openAI` provider with a `hostOverride`/`pathOverride` pointing at the vendor
+/// host plus `backendTLS` (the overridden hop needs TLS). A NATIVE provider
+/// keeps the existing `{ "<provider>": { model } }` rendering with no override.
 fn llm_route(provider: &LlmProvider) -> Value {
     let env_var = provider
         .env_var()
         .expect("validated at load: key is an env:// ref");
-    let mut provider_block = serde_json::Map::new();
+
+    // Loopback-only authorization + the host-injected key (the `$VAR` env ref —
+    // the plaintext key never lands in the rendered config).
+    let mut policies = serde_json::Map::new();
+    policies.insert(
+        "authorization".to_string(),
+        json!({ "rules": [LOOPBACK_RULE] }),
+    );
+    policies.insert(
+        "backendAuth".to_string(),
+        json!({ "key": format!("${env_var}") }),
+    );
+
+    // The model goes under the `openAI` block (compatible) or the native
+    // provider block; either way `{ "model": … }` only when pinned.
+    let mut model_block = serde_json::Map::new();
     if let Some(model) = &provider.model {
-        provider_block.insert("model".to_string(), json!(model));
+        model_block.insert("model".to_string(), json!(model));
     }
-    // `{ "<provider>": { "model": … } }` — the tag is dynamic, so build the
-    // one-key map directly (json! keys must be literals).
-    let mut provider_map = serde_json::Map::new();
-    provider_map.insert(provider.provider.clone(), Value::Object(provider_block));
+
+    let mut ai = serde_json::Map::new();
+    ai.insert("name".to_string(), json!(provider.name));
+
+    match openai_compatible_host(&provider.provider) {
+        // OpenAI-compatible: agentgateway's `openAI` provider + a host/path
+        // override at the vendor host, and `backendTLS` so the overridden hop is
+        // TLS (the native providers get TLS automatically; an override does not).
+        Some((host_port, path)) => {
+            ai.insert(
+                "provider".to_string(),
+                json!({ "openAI": Value::Object(model_block) }),
+            );
+            ai.insert("hostOverride".to_string(), json!(host_port));
+            ai.insert("pathOverride".to_string(), json!(path));
+            policies.insert("backendTLS".to_string(), json!({}));
+        }
+        // Native provider: `{ "<provider>": { "model": … } }` — the tag is
+        // dynamic, so build the one-key map directly (json! keys must be
+        // literals). No host override, no explicit backendTLS.
+        None => {
+            let mut provider_map = serde_json::Map::new();
+            provider_map.insert(provider.provider.clone(), Value::Object(model_block));
+            ai.insert("provider".to_string(), Value::Object(provider_map));
+        }
+    }
+
     json!({
         "name": format!("llm-{}", provider.name),
-        "policies": {
-            "authorization": { "rules": [LOOPBACK_RULE] },
-            "backendAuth": { "key": format!("${env_var}") }
-        },
+        "policies": Value::Object(policies),
         "matches": [{ "path": { "pathPrefix": format!("/llm/{}", provider.name) } }],
-        "backends": [{ "ai": {
-            "name": provider.name,
-            "provider": Value::Object(provider_map)
-        } }]
+        "backends": [{ "ai": Value::Object(ai) }]
     })
 }
 
@@ -733,6 +810,75 @@ mod tests {
             "omitted model ⇒ no model field (passthrough), got {openai:?}"
         );
         assert_eq!(gpt["policies"]["backendAuth"]["key"], "$OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn renders_openai_compatible_deepseek_with_host_override() {
+        // DeepSeek has no native agentgateway provider: it renders onto the
+        // `openAI` provider with a host/path override at api.deepseek.com plus
+        // backendTLS. The exact shape was confirmed empirically against
+        // agentgateway v1.2.1 (a bogus key returns a DeepSeek-side 401).
+        let llm = vec![LlmProvider {
+            name: "deepseek".into(),
+            provider: "deepseek".into(),
+            model: Some("deepseek-chat".into()),
+            key: "env://DEEPSEEK_API_KEY".into(),
+        }];
+        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300);
+        let routes = config["binds"][0]["listeners"][0]["routes"]
+            .as_array()
+            .expect("routes");
+        // 1 per-app MCP + 1 aggregate MCP + 1 LLM.
+        assert_eq!(routes.len(), 3);
+        let ds = &routes[2];
+        assert_eq!(ds["name"], "llm-deepseek");
+        assert_eq!(ds["matches"][0]["path"]["pathPrefix"], "/llm/deepseek");
+
+        let ai = &ds["backends"][0]["ai"];
+        assert_eq!(ai["name"], "deepseek");
+        // Rendered onto the `openAI` provider (NOT a `deepseek` provider tag —
+        // agentgateway has none), with the model under it.
+        assert_eq!(ai["provider"]["openAI"]["model"], "deepseek-chat");
+        assert!(
+            ai["provider"].get("deepseek").is_none(),
+            "must not emit a native `deepseek` provider tag: {ai}"
+        );
+        // The host/path override aim the OpenAI provider at the DeepSeek host.
+        assert_eq!(ai["hostOverride"], "api.deepseek.com:443");
+        assert_eq!(ai["pathOverride"], "/v1/chat/completions");
+
+        // backendTLS is present (the overridden upstream hop must be TLS).
+        assert!(
+            ds["policies"]["backendTLS"].is_object(),
+            "openai-compatible route needs backendTLS: {ds}"
+        );
+        // The key is still the host-injected env ref, loopback rule still there.
+        assert_eq!(ds["policies"]["backendAuth"]["key"], "$DEEPSEEK_API_KEY");
+        assert!(
+            ds["policies"]["authorization"]["rules"][0]
+                .as_str()
+                .unwrap()
+                .contains("source.address")
+        );
+
+        // A NATIVE provider gets NO host override and NO explicit backendTLS.
+        let native = vec![LlmProvider {
+            name: "gpt".into(),
+            provider: "openai".into(),
+            model: None,
+            key: "env://OPENAI_API_KEY".into(),
+        }];
+        let config = render_config(&[], &native, 1, 2);
+        let route = &config["binds"][0]["listeners"][0]["routes"][1];
+        let ai = &route["backends"][0]["ai"];
+        assert!(ai.get("hostOverride").is_none(), "native: no host override");
+        assert!(ai.get("pathOverride").is_none(), "native: no path override");
+        assert!(
+            route["policies"].get("backendTLS").is_none(),
+            "native: TLS is automatic, no explicit backendTLS"
+        );
+        // Native still uses the `{ "<provider>": {…} }` tag.
+        assert!(ai["provider"]["openai"].is_object());
     }
 
     #[test]

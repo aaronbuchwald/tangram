@@ -1290,16 +1290,29 @@ mod tests {
             name = "gpt"
             provider = "openai"
             key = "env://OPENAI_API_KEY"
+
+            [[gateway.llm]]
+            name = "deepseek"
+            provider = "deepseek"
+            model = "deepseek-chat"
+            key = "env://DEEPSEEK_API_KEY"
             "#,
         )
         .unwrap();
-        assert_eq!(config.gateway.llm.len(), 2);
+        assert_eq!(config.gateway.llm.len(), 3);
         assert_eq!(config.gateway.llm[0].name, "claude");
         assert_eq!(
             config.gateway.llm[0].model.as_deref(),
             Some("claude-3-5-haiku-20241022")
         );
         assert_eq!(config.gateway.llm[1].model, None, "model is optional");
+        // The OpenAI-compatible `deepseek` provider parses and validates (no
+        // native agentgateway provider, but it is a KNOWN_PROVIDERS member).
+        assert_eq!(config.gateway.llm[2].provider, "deepseek");
+        assert_eq!(
+            config.gateway.llm[2].model.as_deref(),
+            Some("deepseek-chat")
+        );
 
         // Duplicate name rejected at load.
         assert!(
