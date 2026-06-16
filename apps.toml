@@ -51,11 +51,11 @@ enabled = true
 # OpenAI-compatible providers (e.g. DeepSeek) have no native agentgateway
 # provider — they are an OpenAI-shaped API at a vendor host, so the host renders
 # them onto agentgateway's openAI provider with a host override (api.deepseek.com).
-# [[gateway.llm]]
-# name     = "deepseek"                      # → /llm/deepseek
-# provider = "deepseek"                      # OpenAI-compatible → openAI provider + api.deepseek.com override
-# model    = "deepseek-chat"                 # OPTIONAL; omit ⇒ passthrough (client body's `model`)
-# key      = "env://DEEPSEEK_API_KEY"        # env-ref; put DEEPSEEK_API_KEY=sk-… in .env
+[[gateway.llm]]
+name     = "deepseek"                       # → /llm/deepseek
+provider = "deepseek"                       # OpenAI-compatible → openAI provider + api.deepseek.com override
+model    = "deepseek-chat"                  # OPTIONAL; omit ⇒ passthrough (client body's `model`)
+key      = "env://DEEPSEEK_API_KEY"         # env-ref; put DEEPSEEK_API_KEY=sk-… in .env
 
 # Browser task automation (host-side; ADR-0010, docs/design/task-automation-
 # browser.md). When enabled, tangram-host supervises a browser-driver child
