@@ -48,6 +48,7 @@ import { registry } from "./manage";
 import { confirmAction, promptName, showError } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
+import { mountChatPanel, setActiveApp } from "./chatPanel";
 
 // ── icons ────────────────────────────────────────────────────────────────────
 // Inline 16px stroke icons (Lucide-style, currentColor) so vault affordances
@@ -235,9 +236,15 @@ root.innerHTML = `
         <div class="tabstrip" id="tabstrip"></div>
         <div class="content" id="content"></div>
       </main>
+      <div id="chat-slot"></div>
     </div>
   </div>
 `;
+
+// Right-sidebar app chat (DeepSeek + the active app's MCP tools). All of its
+// logic lives in chatPanel.ts / mcpClient.ts / llmChat.ts; main.ts only mounts
+// it and notifies it on active-tab changes (see tabs.subscribe below).
+mountChatPanel(document.getElementById("chat-slot")!);
 
 const treeEl = document.getElementById("tree")!;
 const applistEl = document.getElementById("applist")!;
@@ -1507,6 +1514,11 @@ tabs.subscribe(() => {
   renderTree();
   renderApps();
   renderAgentsBadge();
+  // Drive the right-sidebar app chat: connect to the active app's MCP server
+  // (and reset the chat) when an app tab is active; hide on note/home/agents.
+  const a = tabs.active;
+  if (a?.kind === "app") setActiveApp(a.app, displayName(a.app));
+  else setActiveApp(null, "");
 });
 
 // ── boot ─────────────────────────────────────────────────────────────────────
