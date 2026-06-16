@@ -105,6 +105,17 @@ require_auth = true
 [apps.tangram]
 component = "target/wasm32-wasip2/release/tangram_app.wasm"
 ui = "apps/tangram/ui/dist"
+# Agent triggers (P5): a cron-triggered agent note runs host-side via the
+# scheduler's `tick_agents` dispatch and calls DeepSeek to produce its output.
+# The component issues a BARE chat-completions request; the HOST injects the
+# DeepSeek bearer key at the http-fetch egress boundary (ADR-0005) so the
+# plaintext key never enters the component. `secret` is an env://NAME ref
+# resolved from the host environment (.env is loaded). The injected host must
+# also appear in allow_hosts.
+allow_hosts = ["api.deepseek.com"]
+
+[apps.tangram.inject]
+"api.deepseek.com" = { bearer = true, secret = "env://DEEPSEEK_API_KEY" }
 
 # Guided Learning (docs/design/guided-learning.md): a Make It Stick-driven
 # tutor — an AI-enabled component. Its ENTIRE outbound-network grant is the

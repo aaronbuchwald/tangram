@@ -2650,6 +2650,7 @@ dependencies = [
  "autosurgeon",
  "schemars",
  "serde",
+ "serde_json",
  "tangram",
  "tokio",
  "uuid",
