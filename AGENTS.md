@@ -22,7 +22,14 @@ symlink to `.agents/skills`.
   components per `apps.toml` with capability grants (WIT world in its `wit/`;
   README "Run apps as WASM components"); optional MCP plane through a
   supervised agentgateway child with generated config (`src/gateway.rs`,
-  `[gateway]` in apps.toml; README "MCP through agentgateway"); opt-in
+  `[gateway]` in apps.toml; README "MCP through agentgateway") — the same
+  child also fronts an LLM egress proxy at `/llm/<name>` with host-injected
+  provider keys (`[[gateway.llm]]`, ADR-0012) and emits OTLP gateway/LLM
+  telemetry into a one-command Langfuse stack (`deploy/observability/`,
+  `scripts/observability-{up,down}.sh`; `docs/design/gateway-observability-identity.md`);
+  the agent scheduler drives the `tangram` app's `tick_agents` on a fixed
+  cadence so scheduled agent invocations run with no browser open
+  (`src/scheduler.rs`); opt-in
   multi-tenancy — isolated, bearer-gated app sets under `/t/<tenant>/`
   (`src/tenant.rs` + the `Principal` seam in `src/auth.rs`, `[tenants]` in
   apps.toml; README "Multi-tenancy", RUNTIME_PLAN Phase 5); call-level egress —
@@ -90,7 +97,13 @@ symlink to `.agents/skills`.
 - `apps/tangram` — the Obsidian-style shell app (sidebar vault + live apps,
   tabbed main window); a wasm component whose `ui/` is the one app with a
   Vite build pipeline (ADR-0007). `tangram-host` serves it at `/tangram/` and
-  redirects `/` there (307)
+  redirects `/` there (307). In-app **agents/skills**: `/agent` defines a
+  saved agent (markdown + frontmatter), `/<name>` invokes it; a *scheduled*
+  invocation is a dark-blue `agent://<id>` inline link backed by a replicated
+  invocation index (the link is the handle, the index holds the trigger),
+  driven host-side by `src/scheduler.rs` (`docs/design/agents.md`). A
+  right-sidebar **app chat** wires DeepSeek to the active app's MCP tools via
+  a browser MCP client + tool-calling loop (`ui/src/{chatPanel,mcpClient,llmChat}.ts`)
 - Two execution paths to serve all apps on one port (README "Run them all in
   one server"): `cargo run -p tangram-shell` is the simple no-WASM Axum router
   with a card index — good for quick app dev; `tangram-host` driven by
