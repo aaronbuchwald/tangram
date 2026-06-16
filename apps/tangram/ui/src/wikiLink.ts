@@ -88,7 +88,21 @@ export function wikiLinkHighlight(resolve: WikiLinkResolver) {
   );
 }
 
-/** If `pos` falls within a `[[ ]]` token, return its target name + range. */
+/**
+ * True iff `pos` lands ON a `[from, to)` token — strictly inside, INCLUDING the
+ * opening boundary but EXCLUDING the closing one. The end boundary is excluded
+ * so a caret placed exactly *after* a trailing token (`pos === to`) is treated
+ * as "past the link", not "on the link": clamping `posAtCoords` resolves a click
+ * to the right of / below a trailing token onto its end, and we must let that
+ * fall through to normal caret placement rather than open the link. Pure +
+ * unit-tested (the rendered-rect refinement below is layout-dependent).
+ */
+export function posOnToken(pos: number, from: number, to: number): boolean {
+  return pos >= from && pos < to;
+}
+
+/** If `pos` lands ON a `[[ ]]` token, return its target name + range. Uses the
+ *  exclusive-end membership of {@link posOnToken}. */
 function wikiTokenAt(
   doc: string,
   pos: number,
@@ -98,7 +112,7 @@ function wikiTokenAt(
   while ((m = WIKILINK_TOKEN.exec(doc)) !== null) {
     const from = m.index;
     const to = from + m[0].length;
-    if (pos >= from && pos <= to) {
+    if (posOnToken(pos, from, to)) {
       const name = targetName(m[2]);
       if (name.length === 0) return null;
       return { name, from, to };
@@ -110,15 +124,30 @@ function wikiTokenAt(
 /**
  * mousedown handler: clicking a RESOLVED wikilink opens its target note. An
  * unresolved `[[ ]]` click is left alone (caret moves as usual) in v1.
+ *
+ * Hit-testing is non-clamping (`posAtCoords(coords, false)`): a click in empty
+ * space — to the right of the line or below the last line — returns null, so we
+ * fall through to CodeMirror's default caret placement (e.g. caret AFTER a
+ * trailing link) instead of clamping onto the nearest token. When a position is
+ * returned we additionally require it to land ON the token text (exclusive end,
+ * see {@link posOnToken}) and, defensively, that the click x/y is within the
+ * token's rendered box — only then open. A click at/after the token's end → not
+ * on the link → CM places the caret.
  */
 export function wikiLinkClick(resolve: WikiLinkResolver, open: WikiLinkOpener) {
   return EditorView.domEventHandlers({
     mousedown: (event, view) => {
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      const coords = { x: event.clientX, y: event.clientY };
+      // Non-clamping: null when the click is outside any text (right of / below
+      // the content) → let CM place the caret there.
+      const pos = view.posAtCoords(coords, false);
       if (pos == null) return false;
       const hit = wikiTokenAt(view.state.doc.toString(), pos);
       if (!hit) return false;
-      if (pos < hit.from || pos > hit.to) return false;
+      // Defensive rect check: confirm the click actually fell within the token's
+      // rendered box, not merely resolved into its range. Guards the edge where
+      // posAtCoords lands on an interior char but the cursor is past the glyphs.
+      if (!clickWithinRange(view, coords, hit.from, hit.to)) return false;
       const targetId = resolve(hit.name);
       if (!targetId) return false; // ghost link → normal caret placement
       event.preventDefault();
@@ -126,4 +155,32 @@ export function wikiLinkClick(resolve: WikiLinkResolver, open: WikiLinkOpener) {
       return true;
     },
   });
+}
+
+/**
+ * True iff the pixel `coords` fall within the rendered box of the document range
+ * `[from, to)`. Built from `coordsAtPos` of the endpoints (a single line spans a
+ * box; we union the two endpoint rects). Returns true when coords can't be
+ * resolved (e.g. jsdom has no layout) so the range-membership check stays the
+ * decisive gate in tests; in a real browser it tightens the on-link decision.
+ */
+export function clickWithinRange(
+  view: EditorView,
+  coords: { x: number; y: number },
+  from: number,
+  to: number,
+): boolean {
+  const a = view.coordsAtPos(from, 1);
+  const b = view.coordsAtPos(to, -1);
+  if (!a || !b) return true; // no layout (jsdom) → defer to range membership
+  const left = Math.min(a.left, b.left);
+  const right = Math.max(a.right, b.right);
+  const top = Math.min(a.top, b.top);
+  const bottom = Math.max(a.bottom, b.bottom);
+  return (
+    coords.x >= left &&
+    coords.x <= right &&
+    coords.y >= top &&
+    coords.y <= bottom
+  );
 }

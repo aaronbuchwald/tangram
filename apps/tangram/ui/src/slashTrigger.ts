@@ -32,6 +32,7 @@ import {
   type ViewUpdate,
   keymap,
 } from "@codemirror/view";
+import { clickWithinRange, posOnToken } from "./wikiLink";
 
 /** The reserved literal that opens the create/define popup. */
 export const CREATE_WORD = "agent";
@@ -224,6 +225,17 @@ export function slashAutoOpen(
  * mousedown handler: clicking a highlighted `/agent` or `/<name>` token
  * re-fires its trigger (reopen after a dismiss). Only `/agent` and resolvable
  * names react; an unknown `/word` click just moves the caret as usual.
+ *
+ * Same non-clamping hit-test as `wikiLinkClick` so a click to the right of /
+ * below a trailing `/<name>` token at EOF places the caret PAST it with one
+ * click instead of clamping onto the token and re-firing the popup:
+ *  - `posAtCoords(coords, false)` returns null for clicks in empty space → fall
+ *    through to CM's default caret placement;
+ *  - a resolved position must land ON the token (exclusive end, {@link
+ *    posOnToken}) — a click at/after `to` is "past the token", not on it; and
+ *  - a defensive rendered-rect check ({@link clickWithinRange}). `slashTokenAt`
+ *    keeps its inclusive-end membership (the Enter trigger / auto-open need the
+ *    caret to sit at `to`); the precise gating lives here, click-only.
  */
 export function slashClickToReopen(
   onTrigger: SlashTriggerHandler,
@@ -231,11 +243,13 @@ export function slashClickToReopen(
 ) {
   return EditorView.domEventHandlers({
     mousedown: (event, view) => {
-      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      const coords = { x: event.clientX, y: event.clientY };
+      const pos = view.posAtCoords(coords, false);
       if (pos == null) return false;
       const hit = slashTokenAt(view.state.doc.toString(), pos);
       if (!hit) return false;
-      if (pos < hit.from || pos > hit.to) return false;
+      if (!posOnToken(pos, hit.from, hit.to)) return false;
+      if (!clickWithinRange(view, coords, hit.from, hit.to)) return false;
       const kind = classify(hit.word, resolve);
       if (!kind) return false;
       event.preventDefault();
