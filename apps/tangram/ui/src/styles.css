@@ -139,7 +139,20 @@ body {
 .tree-row .label, .app-row .label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.twisty { width: 12px; color: var(--dim); font-size: 10px; }
+/* Obsidian-style folder disclosure chevron: a subtle, dim right-pointing
+   chevron (▶ collapsed) that rotates 90° to point down (▼) when the folder is
+   open via the `.open` class. File rows reuse `.twisty` as an empty spacer so
+   names line up with folder names at the same depth — they carry no glyph and
+   never rotate. */
+.twisty {
+  flex: none;
+  width: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--faint); font-size: 11px; line-height: 1;
+  transition: transform 0.12s ease, color 0.12s ease;
+}
+.twisty.open { transform: rotate(90deg); }
+.folder-row:hover .twisty { color: var(--dim); }
 .folder-row .label { color: var(--text); }
 
 /* Per-row vault actions (folder: new note / new folder / rename / delete;

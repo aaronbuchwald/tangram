@@ -297,7 +297,13 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
     const row = el("div", "tree-row folder-row");
     row.style.paddingLeft = `${depth * 20 + 8}px`;
     const isCollapsed = collapsed.has(node.path);
-    row.appendChild(el("span", "twisty", isCollapsed ? "▸" : "▾"));
+    // Obsidian-style disclosure chevron: a single right-pointing chevron that
+    // rotates 90° down when the folder is open (the `.open` class drives a CSS
+    // transform/transition in styles.css). Dim/subtle, tight to the name —
+    // clearly ▶ when collapsed, ▼ when expanded.
+    const twisty = el("span", "twisty", "›");
+    if (!isCollapsed) twisty.classList.add("open");
+    row.appendChild(twisty);
     row.appendChild(el("span", "label", node.name));
 
     // Hover-revealed folder actions, ordered by frequency: new note inside,
