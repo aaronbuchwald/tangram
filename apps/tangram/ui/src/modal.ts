@@ -155,6 +155,59 @@ export function promptName(opts: NamePromptOptions): Promise<string | null> {
   });
 }
 
+// ── transient error toast ─────────────────────────────────────────────────────
+//
+// A small themed failure surface replacing the native `window.alert` chrome
+// (which doesn't match the dark shell). Toasts stack bottom-right in a single
+// container appended to <body> (created lazily), auto-dismiss after a few
+// seconds, and can be dismissed early by clicking. The visual language reuses
+// the modal card tokens via the `.toast` styles in styles.css.
+
+let toastHost: HTMLElement | null = null;
+
+function ensureToastHost(): HTMLElement {
+  if (toastHost && document.body.contains(toastHost)) return toastHost;
+  const host = document.createElement("div");
+  host.className = "toast-host";
+  host.setAttribute("aria-live", "polite");
+  document.body.appendChild(host);
+  toastHost = host;
+  return host;
+}
+
+/**
+ * Show a transient, themed error toast — the shell's replacement for
+ * `window.alert` on a failed vault/registry/agent operation. Auto-dismisses
+ * after `ms` (default 6s) or on click. Keeps the failure message verbatim.
+ */
+export function showError(message: string, ms = 6000): void {
+  const host = ensureToastHost();
+  const toast = document.createElement("div");
+  toast.className = "toast toast-error";
+  toast.setAttribute("role", "alert");
+  toast.textContent = message;
+
+  let dismissed = false;
+  const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
+    window.clearTimeout(timer);
+    toast.classList.add("toast-leaving");
+    // Remove after the leave transition so it animates out cleanly.
+    window.setTimeout(() => {
+      toast.remove();
+      if (toastHost && toastHost.childElementCount === 0) {
+        toastHost.remove();
+        toastHost = null;
+      }
+    }, 200);
+  };
+  const timer = window.setTimeout(dismiss, ms);
+  toast.addEventListener("click", dismiss);
+
+  host.appendChild(toast);
+}
+
 export interface ConfirmOptions {
   /** Dialog title, e.g. "Delete note". */
   title: string;

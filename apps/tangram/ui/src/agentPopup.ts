@@ -476,15 +476,17 @@ function disabledRow(label: string, tooltip: string): HTMLElement {
 /** The recurring sub-modes the calendar-style picker handles. */
 type RecurringMode = "interval" | "daily" | "weekly";
 
-/** Day-of-week chip labels (single letters), aligned to `WEEKDAYS` order. */
+/** Day-of-week chip labels (two letters), aligned to `WEEKDAYS` order.
+ *  Two letters disambiguate Tue/Thu and Sat/Sun, which a single-letter label
+ *  collapsed (the `title` tooltip still carries the full token). */
 const DAY_LABELS: Record<Weekday, string> = {
-  mon: "M",
-  tue: "T",
-  wed: "W",
-  thu: "T",
-  fri: "F",
-  sat: "S",
-  sun: "S",
+  mon: "Mo",
+  tue: "Tu",
+  wed: "We",
+  thu: "Th",
+  fri: "Fr",
+  sat: "Sa",
+  sun: "Su",
 };
 
 /**

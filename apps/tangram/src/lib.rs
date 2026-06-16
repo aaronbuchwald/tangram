@@ -491,7 +491,7 @@ async fn run_definition(def: &agents::AgentDef, prompt: &str) -> Result<String, 
 /// The seeded welcome note — a deterministic genesis so a fresh vault is not
 /// empty (and proves rendering end to end). `Default` stays deterministic.
 fn welcome_body() -> String {
-    "# Welcome to tangram\n\nThis is the **tangram** shell — an Obsidian-style \
+    "# Welcome to Tangram\n\nThis is the **tangram** shell — an Obsidian-style \
 home for your device's apps (the *tangrams*).\n\n- The left sidebar lists your \
 markdown vault and the live apps on this host.\n- Click a `.md` file to open it \
 in a tab; click an app to embed it in a tab as an iframe.\n- Open as many tabs \

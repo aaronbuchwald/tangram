@@ -26,6 +26,7 @@
 import { vault, type MdFile } from "./api";
 import { type AgentDef, type AgentIndex } from "./agents";
 import { openAgentPopup } from "./agentPopup";
+import { showError } from "./modal";
 
 // ── sortable columns ─────────────────────────────────────────────────────────
 
@@ -477,7 +478,7 @@ async function applyEdit(
   try {
     await vault.writeFile(def.fileId, next);
   } catch (e) {
-    window.alert(String(e instanceof Error ? e.message : e));
+    showError(String(e instanceof Error ? e.message : e));
     // Re-render from the (unchanged) index so the inline input resets cleanly.
     renderAgentsView(host, index, cb);
   }

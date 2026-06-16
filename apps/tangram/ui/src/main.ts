@@ -22,7 +22,11 @@ import {
 } from "./agents";
 import { renderAgentsView } from "./agentsView";
 import { buildLinkIndex, type LinkIndex } from "./links";
-import { buildInvocationIndex, type InvocationIndex } from "./invocations";
+import {
+  buildInvocationIndex,
+  parseSchedule,
+  type InvocationIndex,
+} from "./invocations";
 import { wikiCandidatesFromFiles } from "./wikiComplete";
 import {
   type CreatedAgent,
@@ -33,7 +37,7 @@ import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
 import { CREATE_WORD } from "./slashTrigger";
 import { registry } from "./manage";
-import { confirmAction, promptName } from "./modal";
+import { confirmAction, promptName, showError } from "./modal";
 import { TabStore, type Tab } from "./tabs";
 import { buildTree, type TreeNode } from "./tree";
 
@@ -108,7 +112,32 @@ interface ActiveEditor {
 let activeEditor: ActiveEditor | null = null;
 
 // ── sidebar state ─────────────────────────────────────────────────────────────
-const collapsedSections = new Set<string>(["vault", "apps"]); // both collapsed by default
+// Vault/Apps default COLLAPSED (intentional), but the user's open/closed choice
+// persists across reloads (#12) — mirroring how `sidebar-width` is persisted.
+// A first-time user (no stored state) still gets the collapsed default; only an
+// explicit toggle writes the stored set, so the default is never overridden.
+const SECTION_COLLAPSE_KEY = "sidebar-collapsed-sections";
+function loadCollapsedSections(): Set<string> {
+  try {
+    const raw = localStorage.getItem(SECTION_COLLAPSE_KEY);
+    if (raw === null) return new Set(["vault", "apps"]); // first-time default
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return new Set(parsed.filter((s): s is string => typeof s === "string"));
+    }
+  } catch {
+    /* fall through to default on malformed/blocked storage */
+  }
+  return new Set(["vault", "apps"]);
+}
+const collapsedSections = loadCollapsedSections();
+function persistCollapsedSections() {
+  try {
+    localStorage.setItem(SECTION_COLLAPSE_KEY, JSON.stringify([...collapsedSections]));
+  } catch {
+    /* storage may be unavailable (private mode); persistence is best-effort */
+  }
+}
 let sidebarOpen = true;
 let sidebarWidth = parseInt(localStorage.getItem("sidebar-width") ?? "268", 10);
 
@@ -227,12 +256,14 @@ document.getElementById("vault-head")!.addEventListener("click", (e) => {
   if ((e.target as HTMLElement).closest(".head-action")) return;
   if (collapsedSections.has("vault")) collapsedSections.delete("vault");
   else collapsedSections.add("vault");
+  persistCollapsedSections();
   applySectionState();
 });
 document.getElementById("apps-head")!.addEventListener("click", (e) => {
   if ((e.target as HTMLElement).closest(".ghost")) return;
   if (collapsedSections.has("apps")) collapsedSections.delete("apps");
   else collapsedSections.add("apps");
+  persistCollapsedSections();
   applySectionState();
 });
 
@@ -444,8 +475,13 @@ function renderAgentsBadge() {
     // Surface the scheduled-invocation count (R1: ```agent blocks across the
     // vault) in the header tooltip — a small, honest read of the invocation
     // index so it stays in lockstep with the component's scheduler view.
-    const scheduled = invocationIndex.all.filter((inv) =>
-      inv.trigger.trim().startsWith("cron"),
+    // A scheduled invocation is one whose trigger parses to a RECURRING
+    // schedule (interval / daily / weekly / legacy `cron …`). The recurrence
+    // picker writes bare triggers (`2h`, `daily at … <tz>`, `weekly on … <tz>`)
+    // with no `cron` prefix, so a literal `startsWith("cron")` undercounted —
+    // route through the shared parser instead (one-time triggers don't parse).
+    const scheduled = invocationIndex.all.filter(
+      (inv) => parseSchedule(inv.trigger) !== null,
     ).length;
     head.title =
       scheduled > 0
@@ -456,14 +492,14 @@ function renderAgentsBadge() {
 
 // Run a registry mutation, then refresh the fleet so the change reflects in
 // the sidebar (and /api/fleet) without waiting for the 5s poll. Errors (most
-// commonly a missing/invalid token → 401) surface as an alert.
+// commonly a missing/invalid token → 401) surface as a themed toast.
 async function manageApp(action: () => Promise<unknown>) {
   try {
     await action();
     // The host converges in a beat; give it a moment, then refresh.
     window.setTimeout(() => void refreshFleet(), 800);
   } catch (e) {
-    window.alert(String(e instanceof Error ? e.message : e));
+    showError(String(e instanceof Error ? e.message : e));
   }
 }
 
@@ -485,9 +521,13 @@ function renderTabs() {
   home.title = "Home";
   home.addEventListener("click", () => tabs.openHome());
   tabstripEl.appendChild(home);
+  let activeChip: HTMLElement | null = null;
   for (const tab of tabs.tabs) {
     const chip = el("div", "tab");
-    if (tab.id === tabs.activeId) chip.classList.add("active");
+    if (tab.id === tabs.activeId) {
+      chip.classList.add("active");
+      activeChip = chip;
+    }
     chip.appendChild(el("span", "tab-title", tabTitle(tab)));
     const close = el("button", "tab-close", "✕");
     close.addEventListener("click", (e) => {
@@ -496,6 +536,17 @@ function renderTabs() {
     });
     chip.appendChild(close);
     chip.addEventListener("click", () => tabs.activate(tab.id));
+    // Middle-click (auxclick, button 1) closes the tab — browser-tab idiom.
+    chip.addEventListener("auxclick", (e) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      tabs.close(tab.id);
+    });
+    // Suppress the default middle-click autoscroll so the close reads cleanly.
+    chip.addEventListener("mousedown", (e) => {
+      if (e.button === 1) e.preventDefault();
+    });
 
     // Drag-to-reorder (browser-style). HTML5 DnD does not fire a click on
     // drop, so dragging never accidentally activates; a plain click still does.
@@ -541,6 +592,80 @@ function renderTabs() {
 
     tabstripEl.appendChild(chip);
   }
+
+  // Overflow affordance: when the strip can't show every tab, a trailing "⋯"
+  // button opens a menu listing all open tabs (each row activates / closes its
+  // tab). Pinned to the strip's right edge so it stays reachable. Only shown
+  // when the content actually overflows (measured post-layout).
+  const overflowBtn = el("button", "tab-overflow", "⋯");
+  overflowBtn.title = "All tabs";
+  overflowBtn.setAttribute("aria-label", "All open tabs");
+  overflowBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openTabOverflowMenu(overflowBtn);
+  });
+  tabstripEl.appendChild(overflowBtn);
+
+  // Defer to next frame so layout is settled before we measure overflow and
+  // scroll the active tab into view (it must never sit off-screen, #7a).
+  requestAnimationFrame(() => {
+    const overflowing = tabstripEl.scrollWidth > tabstripEl.clientWidth + 1;
+    overflowBtn.style.display = overflowing ? "" : "none";
+    if (activeChip) {
+      activeChip.scrollIntoView({ inline: "nearest", block: "nearest" });
+    }
+  });
+}
+
+// A lightweight popup listing every open tab — the overflow fallback when the
+// strip scrolls. Each row activates its tab (and closes the menu); a small ✕
+// closes the tab in place. Dismisses on outside-click / Esc. Single-instance.
+function openTabOverflowMenu(anchor: HTMLElement) {
+  document.getElementById("tab-overflow-menu")?.remove();
+  const menu = el("div", "tab-overflow-menu");
+  menu.id = "tab-overflow-menu";
+  const rect = anchor.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.style.right = `${window.innerWidth - rect.right}px`;
+
+  for (const tab of tabs.tabs) {
+    const row = el("div", "tab-overflow-row");
+    if (tab.id === tabs.activeId) row.classList.add("active");
+    const label = el("span", "tab-overflow-label", tabTitle(tab));
+    label.addEventListener("click", () => {
+      tabs.activate(tab.id);
+      close();
+    });
+    const x = el("button", "tab-overflow-close", "✕");
+    x.title = "Close tab";
+    x.addEventListener("click", (e) => {
+      e.stopPropagation();
+      tabs.close(tab.id);
+      // Re-render keeps the menu in sync; rebuild if any tabs remain.
+      close();
+      if (tabs.tabs.length > 0) openTabOverflowMenu(anchor);
+    });
+    row.append(label, x);
+    menu.appendChild(row);
+  }
+  if (tabs.tabs.length === 0) {
+    menu.appendChild(el("div", "tab-overflow-empty", "No open tabs"));
+  }
+
+  function close() {
+    menu.remove();
+    document.removeEventListener("mousedown", onDoc, true);
+    document.removeEventListener("keydown", onKey, true);
+  }
+  function onDoc(e: MouseEvent) {
+    if (!menu.contains(e.target as Node) && e.target !== anchor) close();
+  }
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") close();
+  }
+  document.addEventListener("mousedown", onDoc, true);
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(menu);
 }
 
 function disposeActiveEditor() {
@@ -950,7 +1075,7 @@ async function newNote(folder: string) {
     const id = await vault.createFile(path, `# ${title}\n\n`);
     tabs.openNote(id);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 
@@ -973,7 +1098,7 @@ async function newFolder(parent: string) {
   try {
     await vault.createFolder(path);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 
@@ -994,7 +1119,7 @@ async function renameFolder(path: string) {
   try {
     await vault.renameFolder(path, trimmed);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 
@@ -1012,7 +1137,7 @@ async function renameFile(file: MdFile) {
   try {
     await vault.renameFile(file.id, next);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 
@@ -1028,7 +1153,7 @@ async function deleteFile(id: string) {
   try {
     await vault.deleteFile(id);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 
@@ -1042,7 +1167,7 @@ async function deleteFolder(path: string) {
   try {
     await vault.deleteFolder(path);
   } catch (e) {
-    window.alert(String(e));
+    showError(String(e));
   }
 }
 

@@ -245,6 +245,43 @@ body {
 }
 .tab-close:hover { color: var(--red); }
 
+/* Tab-overflow affordance (#7c): a "⋯" button pinned to the right edge of the
+   strip (sticky so it stays reachable while the strip scrolls) that opens a
+   menu of every open tab. Hidden by main.ts unless the strip overflows. */
+.tab-overflow {
+  position: sticky; right: 0; align-self: center; flex-shrink: 0;
+  margin-left: auto; margin-bottom: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--dim); cursor: pointer; font-size: 14px; line-height: 1;
+  padding: 5px 8px;
+}
+.tab-overflow:hover { color: var(--text); border-color: var(--blue); }
+.tab-overflow-menu {
+  position: fixed; z-index: 1100;
+  min-width: 200px; max-width: min(320px, calc(100vw - 32px));
+  max-height: 60vh; overflow-y: auto;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  padding: 4px; display: flex; flex-direction: column; gap: 1px;
+  animation: modal-in 0.12s ease;
+}
+.tab-overflow-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; color: var(--dim);
+}
+.tab-overflow-row:hover { background: var(--panel); color: var(--text); }
+.tab-overflow-row.active { color: var(--text); box-shadow: inset 2px 0 0 var(--blue); }
+.tab-overflow-label {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px;
+}
+.tab-overflow-close {
+  background: transparent; border: 0; color: var(--faint);
+  cursor: pointer; font-size: 11px; padding: 0; flex-shrink: 0;
+}
+.tab-overflow-close:hover { color: var(--red); }
+.tab-overflow-empty { padding: 8px; color: var(--faint); font-size: 13px; }
+
 .content { flex: 1; min-height: 0; overflow: hidden; display: flex; }
 
 /* iframe app tab */
@@ -371,6 +408,38 @@ body {
 .modal-message { font-size: 13px; color: var(--dim); line-height: 1.5; }
 .modal-btn.danger { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
 .modal-btn.danger:hover { filter: brightness(1.08); color: #fff; }
+
+/* ── transient error toasts ──
+   Themed replacement for window.alert on a failed vault/registry/agent op.
+   Stacks bottom-right, reuses the modal card tokens, auto-dismisses (or click).
+   Wired in modal.ts (showError). */
+.toast-host {
+  position: fixed; right: 16px; bottom: 16px; z-index: 1100;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  max-width: min(380px, calc(100vw - 32px));
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: 13px; line-height: 1.45;
+  padding: 10px 13px;
+  cursor: pointer;
+  word-break: break-word; white-space: pre-wrap;
+  animation: toast-in 0.14s ease;
+}
+.toast-error { border-left-color: var(--red); }
+.toast:hover { border-color: var(--red); }
+.toast-leaving { opacity: 0; transform: translateY(6px); transition: opacity 0.2s ease, transform 0.2s ease; }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 /* ── inline "@agent" LLM popup (demo) ──
    Reuses the naming-modal overlay/card language (.modal-overlay / .modal): a
