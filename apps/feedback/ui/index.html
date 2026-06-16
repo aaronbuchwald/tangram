@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Feedback</title>
+  <style>
+    /* ── Dark performance-console language ─────────────────────────────────
+       Same system as the sibling notes/nutrition apps: near-black ground,
+       dark cards, thin dividers, white primary text, cool-gray secondary.
+       Feedback's signature is the strain blue; green marks a filed issue,
+       red the destructive "remove screenshot" affordance. */
+    :root {
+      color-scheme: dark;
+      --bg: #0c0d0f;
+      --panel: #15171b;
+      --panel-2: #1b1e23;
+      --line: #23262b;
+      --text: #f2f4f7;
+      --dim: #8d95a2;
+      --faint: #5d6470;
+      --blue: #009eee;
+      --green: #29c266;
+      --red: #ff4554;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 var(--sans);
+    }
+    .micro {
+      font-size: 10px; font-weight: 600; letter-spacing: .18em;
+      text-transform: uppercase; color: var(--dim);
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+    header { margin-bottom: 24px; }
+    h1 { font-size: 22px; font-weight: 650; margin: 4px 0 2px; }
+    .sub { color: var(--dim); font-size: 13px; }
+    .repo { font-family: var(--mono); color: var(--blue); }
+
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 20px;
+    }
+    label.field { display: block; margin-bottom: 16px; }
+    label.field > .micro { display: block; margin-bottom: 6px; }
+    input[type=text], textarea {
+      width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+      border-radius: 8px; color: var(--text); font: inherit; padding: 10px 12px;
+      resize: vertical;
+    }
+    input[type=text]:focus, textarea:focus {
+      outline: none; border-color: var(--blue);
+    }
+    textarea { min-height: 140px; font-family: var(--mono); font-size: 13px; }
+
+    /* drag-and-drop zone */
+    .drop {
+      border: 1.5px dashed var(--line); border-radius: 10px;
+      padding: 22px; text-align: center; color: var(--dim);
+      cursor: pointer; transition: border-color .12s, background .12s;
+      background: var(--panel-2);
+    }
+    .drop:hover { border-color: var(--faint); }
+    .drop.over { border-color: var(--blue); background: rgba(0,158,238,.08); color: var(--text); }
+    .drop .hint { font-size: 13px; }
+    .drop .hint b { color: var(--text); }
+
+    /* GitHub-style inline preview */
+    .preview { margin-top: 12px; display: none; }
+    .preview.show { display: block; }
+    .preview .frame {
+      border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+      background: var(--panel-2);
+    }
+    .preview img { display: block; max-width: 100%; max-height: 360px; margin: 0 auto; }
+    .preview .bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--dim);
+    }
+    .preview .bar .name { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button {
+      font: inherit; border-radius: 8px; border: 1px solid var(--line);
+      background: var(--panel-2); color: var(--text); padding: 9px 16px; cursor: pointer;
+    }
+    button:hover { border-color: var(--faint); }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #04222f; font-weight: 650; }
+    button.primary:disabled { opacity: .5; cursor: not-allowed; }
+    button.link { background: none; border: none; color: var(--red); padding: 2px 6px; }
+    .actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+
+    .status { margin-top: 14px; font-size: 13px; min-height: 20px; }
+    .status.err { color: var(--red); }
+    .status.ok { color: var(--green); }
+    .status a { color: var(--green); }
+
+    /* history */
+    .history { margin-top: 32px; }
+    .history h2 { font-size: 13px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin-bottom: 10px; }
+    .issue {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px;
+    }
+    .issue .num { font-family: var(--mono); color: var(--blue); flex: none; }
+    .issue .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .issue .t a { color: var(--text); text-decoration: none; }
+    .issue .t a:hover { text-decoration: underline; }
+    .issue .tag { flex: none; color: var(--faint); font-size: 11px; }
+    .empty { color: var(--faint); font-size: 13px; padding: 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="micro">Tangram · Feedback</div>
+      <h1>File an issue</h1>
+      <div class="sub">Opens a GitHub issue on <span class="repo" id="repo">this repository</span>. Drag a screenshot in — it's uploaded and rendered inline.</div>
+    </header>
+
+    <div class="card">
+      <label class="field">
+        <span class="micro">Title</span>
+        <input type="text" id="title" placeholder="Short summary of the issue" autocomplete="off" />
+      </label>
+
+      <label class="field">
+        <span class="micro">Description</span>
+        <textarea id="body" placeholder="What happened? What did you expect? Steps to reproduce…"></textarea>
+      </label>
+
+      <div class="field">
+        <span class="micro" style="display:block;margin-bottom:6px">Screenshot (optional)</span>
+        <div class="drop" id="drop" tabindex="0" role="button" aria-label="Add a screenshot">
+          <div class="hint">Drag &amp; drop an image here, or <b>click to choose</b></div>
+        </div>
+        <input type="file" id="file" accept="image/*" hidden />
+        <div class="preview" id="preview">
+          <div class="frame">
+            <img id="previewImg" alt="screenshot preview" />
+            <div class="bar">
+              <span class="name" id="previewName"></span>
+              <button type="button" class="link" id="removeImg">Remove</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="primary" id="submit">Submit issue</button>
+        <span class="micro" id="hint">Title required</span>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="history">
+      <h2>Submitted</h2>
+      <div id="list"><div class="empty">No issues filed from here yet.</div></div>
+    </div>
+  </div>
+
+  <script>
+    // Relative paths only — the app is prefix-mounted under the shell.
+    const $ = (id) => document.getElementById(id);
+    let imageDataUrl = null;
+
+    async function callAction(name, args) {
+      const res = await fetch(`api/actions/${name}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(args),
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const msg = (data && (data.error || data.message)) || text || res.statusText;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function setStatus(msg, cls) {
+      const el = $("status");
+      el.className = "status" + (cls ? " " + cls : "");
+      el.innerHTML = msg;
+    }
+
+    function showPreview(dataUrl, name) {
+      imageDataUrl = dataUrl;
+      $("previewImg").src = dataUrl;
+      $("previewName").textContent = name || "screenshot";
+      $("preview").classList.add("show");
+    }
+    function clearPreview() {
+      imageDataUrl = null;
+      $("previewImg").removeAttribute("src");
+      $("preview").classList.remove("show");
+      $("file").value = "";
+    }
+
+    function readImage(file) {
+      if (!file || !file.type.startsWith("image/")) {
+        setStatus("That doesn't look like an image.", "err");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => showPreview(reader.result, file.name);
+      reader.onerror = () => setStatus("Could not read that file.", "err");
+      reader.readAsDataURL(file);
+    }
+
+    // ── drag & drop + click-to-pick ─────────────────────────────────────────
+    const drop = $("drop");
+    drop.addEventListener("click", () => $("file").click());
+    drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("file").click(); } });
+    $("file").addEventListener("change", (e) => readImage(e.target.files[0]));
+    ["dragenter", "dragover"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+    ["dragleave", "drop"].forEach((ev) =>
+      drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+    drop.addEventListener("drop", (e) => {
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      readImage(file);
+    });
+    // Paste an image straight from the clipboard.
+    window.addEventListener("paste", (e) => {
+      const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+      if (item) readImage(item.getAsFile());
+    });
+    $("removeImg").addEventListener("click", clearPreview);
+
+    // ── submit ──────────────────────────────────────────────────────────────
+    $("submit").addEventListener("click", async () => {
+      const title = $("title").value.trim();
+      const body = $("body").value;
+      if (!title) { setStatus("Add a title first.", "err"); return; }
+      const btn = $("submit");
+      btn.disabled = true;
+      setStatus("Filing the issue…");
+      try {
+        const args = { title, body };
+        if (imageDataUrl) args.image_data_url = imageDataUrl;
+        const url = await callAction("create_issue", args);
+        setStatus(`Filed · <a href="${url}" target="_blank" rel="noopener">${url}</a>`, "ok");
+        $("title").value = "";
+        $("body").value = "";
+        clearPreview();
+        loadHistory();
+      } catch (err) {
+        setStatus("Could not file the issue: " + err.message, "err");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // ── history ───────────────────────────────────────────────────────────
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    async function loadHistory() {
+      try {
+        const rows = await callAction("list_submissions", {});
+        const list = $("list");
+        if (!rows || !rows.length) {
+          list.innerHTML = '<div class="empty">No issues filed from here yet.</div>';
+          return;
+        }
+        list.innerHTML = rows.map((r) => `
+          <div class="issue">
+            <span class="num">#${r.number}</span>
+            <span class="t"><a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a></span>
+            ${r.had_image ? '<span class="tag">📎 screenshot</span>' : ""}
+          </div>`).join("");
+      } catch (err) {
+        $("list").innerHTML = '<div class="empty">Could not load history: ' + escapeHtml(err.message) + "</div>";
+      }
+    }
+
+    loadHistory();
+  </script>
+</body>
+</html>

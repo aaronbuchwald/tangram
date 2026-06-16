@@ -214,8 +214,8 @@ builds the shell UI, then runs the host:
 rustup target add wasm32-wasip2                                       # once
 cargo build -p tangram-notes -p tangram-nutrition -p tangram-registry \
   -p tangram-marketplace -p tangram-app-tangram -p tangram-morning-brief \
-  -p tangram-guided-learning -p tangram-app-auto-todo --lib \
-  --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace,tangram_app,morning_brief,guided_learning,auto_todo}.wasm
+  -p tangram-guided-learning -p tangram-app-auto-todo -p tangram-app-feedback --lib \
+  --target wasm32-wasip2 --release       # → target/wasm32-wasip2/release/{notes,nutrition,registry,marketplace,tangram_app,morning_brief,guided_learning,auto_todo,feedback}.wasm
 (cd apps/tangram/ui && npm ci && npm run build)                      # the shell UI → apps/tangram/ui/dist
 cargo run -p tangram-host --release -- apps.toml
 # open http://127.0.0.1:8080/ — 307 → /tangram/ (the Obsidian-style shell)

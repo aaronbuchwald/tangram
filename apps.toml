@@ -148,6 +148,29 @@ allow_hosts = ["api.deepseek.com"]
 [apps.guided-learning.inject]
 "api.deepseek.com" = { bearer = true, secret = "env://DEEPSEEK_API_KEY" }
 
+# Feedback — file a GitHub issue (title + body + optional drag-drop screenshot)
+# straight from a sandboxed app. The user described "a tool that uses the gh
+# CLI", but apps are WASM components and a host shell-out would break the model,
+# so issue creation is HTTP egress to the GitHub REST API (the guided-learning
+# precedent). The component's ENTIRE outbound grant is api.github.com (the two
+# declared calls: PUT .../contents/... to upload a screenshot, POST .../issues
+# to file it). The HOST injects the GH_TOKEN bearer at the component's
+# http-fetch egress boundary (ADR-0005) — the write-capable token NEVER enters
+# the component or a replicated doc. GitHub's REST API accepts the token as
+# `Authorization: Bearer <token>`, the same inject form guided-learning uses.
+# FEEDBACK_REPO targets owner/repo (defaults to the build-time origin remote,
+# aaronbuchwald/tangram); override it to point at a fork without a rebuild.
+[apps.feedback]
+component = "target/wasm32-wasip2/release/feedback.wasm"
+ui = "apps/feedback/ui"
+allow_hosts = ["api.github.com"]
+
+[apps.feedback.env]
+FEEDBACK_REPO = "aaronbuchwald/tangram"
+
+[apps.feedback.inject]
+"api.github.com" = { bearer = true, secret = "env://GH_TOKEN" }
+
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"
 ui = "apps/notes/ui"

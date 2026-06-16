@@ -2676,6 +2676,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-app-feedback"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "base64",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tangram",
+ "tangram-core",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-app-tangram"
 version = "0.1.0"
 dependencies = [

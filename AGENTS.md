@@ -93,6 +93,14 @@ symlink to `.agents/skills`.
   and the plan-hash-bound approval + per-step `confirm()` UI. `execute()` is a
   no-op; `require_auth` gates the mutating actions. AC4-AC6 (credential/browser
   tier) intentionally NOT built — gated on the automation substrate + PR #1
+- `apps/feedback` — file a GitHub issue (title + body + optional drag-drop
+  screenshot) on this repo from a sandboxed app. NOT a `gh` shell-out: an
+  async `create_issue` action does HTTP egress to the GitHub REST API (the
+  guided-learning egress precedent) — a screenshot is uploaded via the
+  Contents API (a data URI doesn't render in markdown) then embedded, then
+  `POST /issues` files it; `GH_TOKEN` is host-injected at the egress boundary
+  (`[apps.feedback]` inject in `apps.toml`, ADR-0005). `FEEDBACK_REPO` targets
+  owner/repo. Static `ui/`; submission history in the doc
 - `apps/shell` — multi-app host serving every app under one port, prefixed
 - `apps/tangram` — the Obsidian-style shell app (sidebar vault + live apps,
   tabbed main window); a wasm component whose `ui/` is the one app with a
