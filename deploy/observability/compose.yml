@@ -1,0 +1,66 @@
+# One-command, observability-by-default Langfuse stack (observability O1;
+# docs/design/gateway-observability-identity.md §7). Brings up Langfuse + its
+# Postgres store, all bound to LOOPBACK by default (local-first; the deploy is
+# never exposed off-box without operator action). The host's generated
+# agentgateway config exports OTLP/HTTP traces to Langfuse's ingest endpoint at
+# http://127.0.0.1:3000/api/public/otel once `[gateway] otlp_endpoint` is set —
+# scripts/observability-up.sh provisions the ingest keys into .env so the host
+# picks them up with no further wiring.
+#
+# Bring up:  scripts/observability-up.sh   (compose up + first-run key provision)
+# Tear down: scripts/observability-down.sh
+#
+# Content capture stays OFF (tokens/cost/latency/model only); a non-loopback
+# Langfuse needs TLS + its own auth and flips identity claims to mandatory (§7).
+
+services:
+  langfuse:
+    image: langfuse/langfuse:latest
+    # Loopback-only: the trace/cost UI + OTLP ingest (/api/public/otel) are
+    # reachable from the box only. Expose off-box only behind TLS + auth (§7).
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      # Local-first secrets: these are NOT the OTLP ingest keys (those are the
+      # per-project public/secret pair provisioned into .env on first run). They
+      # encrypt Langfuse's own session/state. Override for any shared deploy.
+      NEXTAUTH_URL: http://127.0.0.1:3000
+      NEXTAUTH_SECRET: tangram-local-langfuse-nextauth-secret
+      SALT: tangram-local-langfuse-salt
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      TELEMETRY_ENABLED: "false"
+      # Headless first-run provisioning (Langfuse LANGFUSE_INIT_*): create a
+      # default org/project + an API key pair on startup, using the keys the
+      # provisioning script generated and exported. scripts/observability-up.sh
+      # writes the SAME pair to .env so the host's OTLP exporter authenticates
+      # with no manual UI step. Idempotent: re-running with the same keys is a
+      # no-op. A blank value (the bare `docker compose up`, no script) skips init.
+      LANGFUSE_INIT_ORG_ID: tangram
+      LANGFUSE_INIT_PROJECT_ID: tangram
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  langfuse-db:
+    image: postgres:16
+    # Internal only — no published port; reachable solely by the langfuse
+    # service over the compose network.
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  langfuse-db-data:

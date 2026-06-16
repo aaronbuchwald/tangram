@@ -69,6 +69,23 @@ pub struct GatewaySettings {
     /// the host). Empty (the default) → no LLM proxy, MCP-only behavior.
     #[serde(default)]
     pub llm: Vec<LlmProvider>,
+    /// OPTIONAL OTLP/HTTP endpoint the gateway exports GenAI traces to
+    /// (observability O1; `docs/design/gateway-observability-identity.md` §4).
+    /// `None` (the default) → NO tracing block is emitted, so the gateway never
+    /// fails over an unreachable target. Point this at the bundled one-command
+    /// Langfuse stack's ingest path, e.g.
+    /// `http://127.0.0.1:3000/api/public/otel` (see `scripts/observability-up.sh`,
+    /// which provisions the keys into `.env`). The token/cost/latency JSON
+    /// access log + the Prometheus metric are ALWAYS on, independent of this —
+    /// a missing endpoint degrades to host-local logs, never an error.
+    ///
+    /// The OTLP ingest CREDENTIAL is supplied out-of-band via the gateway
+    /// child's `OTEL_EXPORTER_OTLP_HEADERS` env var (it inherits the host env /
+    /// `.env`), NOT through this config — agentgateway evaluates `tracing.headers`
+    /// values as CEL, so a static secret there would be inline (ADR-0005).
+    /// `scripts/observability-up.sh` writes that env var.
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
 }
 
 /// One `[[gateway.llm]]` provider (ADR-0012). The host renders it into an
@@ -362,6 +379,93 @@ fn llm_route(provider: &LlmProvider) -> Value {
     })
 }
 
+/// The telemetry knobs `render_config` bakes into the generated config
+/// (observability O1; `docs/design/gateway-observability-identity.md` §4). The
+/// `stats_port` is ALWAYS present (a stable loopback slot the host mints with
+/// [`free_port()`] so Prometheus `/metrics` is scrapeable); the OTLP fields are
+/// present ONLY when an endpoint is configured — absent → no `config.tracing`
+/// block is emitted, so the gateway never fails over an unreachable target and
+/// `tests/gateway_lifecycle.rs` stays green with no Langfuse running.
+#[derive(Debug, Clone)]
+pub struct Telemetry {
+    /// Stable loopback port for the gateway's stats/`/metrics` listener.
+    pub stats_port: u16,
+    /// OTLP/HTTP trace endpoint, e.g. `http://127.0.0.1:3000/api/public/otel`.
+    /// `None` → no tracing block (the always-on logging + metric still ship).
+    pub otlp_endpoint: Option<String>,
+}
+
+impl Telemetry {
+    /// Build the telemetry config from the gateway settings + a freshly-minted
+    /// stable stats port. A blank/whitespace endpoint is treated as unset (so
+    /// the gateway never points its OTLP exporter at an empty target).
+    ///
+    /// The OTLP ingest CREDENTIAL is NOT rendered into the config — agentgateway
+    /// evaluates `tracing.headers` values as CEL, so a static secret there would
+    /// be inline, violating ADR-0005. Instead the host hands the gateway child
+    /// the standard `OTEL_EXPORTER_OTLP_HEADERS` env var (it inherits the host
+    /// env / `.env`), keeping the secret host-side. `scripts/observability-up.sh`
+    /// writes that var.
+    pub fn from_settings(settings: &GatewaySettings, stats_port: u16) -> Self {
+        Self {
+            stats_port,
+            otlp_endpoint: settings
+                .otlp_endpoint
+                .as_deref()
+                .filter(|e| !e.trim().is_empty())
+                .map(str::to_string),
+        }
+    }
+}
+
+/// The always-on access-log field map (observability O1, §4b), emitted under
+/// `config.logging.fields.add`: every request line carries the parsed `llm.*`
+/// token/cost/latency/model fields + the matched route name, so even with NO
+/// ingester the host's own logs (the child stdout→tracing pipe,
+/// [`forward_output`]) carry structured per-call usage. Content
+/// (`gen_ai.prompt`/`completion`) is NOT captured — counts/cost/latency/model
+/// only (§10 security checklist). Values are CEL refs over the gateway's
+/// per-request context; a missing `llm` object (a non-LLM MCP request) yields
+/// null, not a render error.
+fn logging_block() -> Value {
+    json!({
+        "fields": { "add": {
+            "route":         "route.name",
+            "request_model": "llm.requestModel",
+            "model":         "llm.responseModel",
+            "provider":      "llm.provider",
+            "input_tokens":  "llm.inputTokens",
+            "output_tokens": "llm.outputTokens",
+            "total_tokens":  "llm.totalTokens",
+            "cost":          "llm.cost.total",
+            "ttft":          "llm.timeToFirstToken"
+        } }
+    })
+}
+
+/// The OTLP tracing block (observability O1, §4a) — emitted under
+/// `config.tracing` ONLY when an endpoint is configured (caller-gated). GenAI
+/// semantic-convention field mappings from the `llm.*` object; content fields
+/// are omitted (opt-in, §10). The ingest credential is supplied to the gateway
+/// child via `OTEL_EXPORTER_OTLP_HEADERS` (host env), never inline here
+/// (ADR-0005). Langfuse ingest is OTLP/HTTP, not gRPC (§3 gotcha).
+fn tracing_block(endpoint: &str) -> Value {
+    json!({
+        "otlpEndpoint": endpoint,
+        "otlpProtocol": "http",
+        "randomSampling": true,
+        "fields": { "add": {
+            "gen_ai.operation.name":      "\"chat\"",
+            "gen_ai.system":              "llm.provider",
+            "gen_ai.request.model":       "llm.requestModel",
+            "gen_ai.response.model":      "llm.responseModel",
+            "gen_ai.usage.input_tokens":  "llm.inputTokens",
+            "gen_ai.usage.output_tokens": "llm.outputTokens",
+            "gen_ai.usage.total_tokens":  "llm.totalTokens"
+        } }
+    })
+}
+
 /// Render the full agentgateway config for the given RUNNING apps: one
 /// per-app route (`/<app>/mcp` or `/t/<tenant>/<app>/mcp` → the same path on
 /// the host's internal listener, tool names unchanged), the aggregate `/mcp`
@@ -381,6 +485,7 @@ pub fn render_config(
     llm: &[LlmProvider],
     gateway_port: u16,
     internal_port: u16,
+    telemetry: &Telemetry,
 ) -> Value {
     let mut apps: Vec<&AppKey> = apps.iter().collect();
     apps.sort();
@@ -441,14 +546,29 @@ pub fn render_config(
         routes.push(llm_route(provider));
     }
 
+    // Telemetry ON by default (observability O1): the stats listener is pinned
+    // to a STABLE loopback slot (so Prometheus `/metrics` —
+    // `agentgateway_gen_ai_client_token_usage` — is scrapeable), the access log
+    // (config.logging) always carries the llm.* token/cost/latency fields, and
+    // tracing is emitted ONLY when an OTLP endpoint is configured (absent → no
+    // tracing block, so the gateway never fails over an unreachable Langfuse).
+    // admin + readiness stay ephemeral (no scrape target).
+    let mut config = serde_json::Map::new();
+    config.insert("adminAddr".into(), json!("127.0.0.1:0"));
+    config.insert(
+        "statsAddr".into(),
+        json!(format!("127.0.0.1:{}", telemetry.stats_port)),
+    );
+    config.insert("readinessAddr".into(), json!("127.0.0.1:0"));
+    // The always-on access log rides the existing child-stdout→tracing pipe
+    // (forward_output): structured per-call usage even with no ingester.
+    config.insert("logging".into(), logging_block());
+    if let Some(endpoint) = &telemetry.otlp_endpoint {
+        config.insert("tracing".into(), tracing_block(endpoint));
+    }
+
     json!({
-        // The admin/stats/readiness listeners are pinned to ephemeral
-        // loopback ports — never a public surface, never a port conflict.
-        "config": {
-            "adminAddr": "127.0.0.1:0",
-            "statsAddr": "127.0.0.1:0",
-            "readinessAddr": "127.0.0.1:0"
-        },
+        "config": Value::Object(config),
         "binds": [{
             "port": gateway_port,
             "listeners": [{ "routes": routes }]
@@ -500,6 +620,9 @@ pub struct Gateway {
     /// `[[gateway.llm]]` providers rendered into `/llm/<name>` `ai` routes
     /// (ADR-0012). Fixed at startup (startup config, like the ports).
     llm: Vec<LlmProvider>,
+    /// Telemetry config (observability O1): the stable stats port + the optional
+    /// OTLP export target. Fixed at startup, baked into every render.
+    telemetry: Telemetry,
     config_path: PathBuf,
     client: reqwest::Client,
     running: AtomicBool,
@@ -513,6 +636,7 @@ impl Gateway {
         port: u16,
         internal_port: u16,
         llm: Vec<LlmProvider>,
+        telemetry: Telemetry,
         config_path: PathBuf,
     ) -> Self {
         Self {
@@ -520,6 +644,7 @@ impl Gateway {
             port,
             internal_port,
             llm,
+            telemetry,
             config_path,
             client: reqwest::Client::new(),
             running: AtomicBool::new(false),
@@ -542,7 +667,13 @@ impl Gateway {
     /// (tmp + rename) and only when the bytes changed — agentgateway watches
     /// the file and hot-reloads. Called by every converge pass.
     pub fn sync_apps(&self, apps: &[AppKey]) {
-        let rendered = render_config(apps, &self.llm, self.port, self.internal_port);
+        let rendered = render_config(
+            apps,
+            &self.llm,
+            self.port,
+            self.internal_port,
+            &self.telemetry,
+        );
         let bytes = serde_json::to_vec_pretty(&rendered).expect("static json renders");
         match write_if_changed(&self.config_path, &bytes) {
             Ok(true) => tracing::info!(
@@ -741,6 +872,16 @@ pub fn default_config_file() -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A telemetry config with a fixed stats port and NO OTLP endpoint — the
+    /// default-self-host posture (stable metrics, always-on access log, no
+    /// tracing block). Used by the render tests that don't exercise OTLP.
+    fn telem() -> Telemetry {
+        Telemetry {
+            stats_port: 19299,
+            otlp_endpoint: None,
+        }
+    }
+
     #[test]
     fn settings_parse_and_default_off() {
         let parsed: GatewaySettings = toml::from_str("enabled = true").unwrap();
@@ -771,7 +912,7 @@ mod tests {
                 key: "env://OPENAI_API_KEY".into(),
             },
         ];
-        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300);
+        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300, &telem());
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .expect("routes");
@@ -824,7 +965,7 @@ mod tests {
             model: Some("deepseek-chat".into()),
             key: "env://DEEPSEEK_API_KEY".into(),
         }];
-        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300);
+        let config = render_config(&[AppKey::top("notes")], &llm, 19200, 19300, &telem());
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .expect("routes");
@@ -868,7 +1009,7 @@ mod tests {
             model: None,
             key: "env://OPENAI_API_KEY".into(),
         }];
-        let config = render_config(&[], &native, 1, 2);
+        let config = render_config(&[], &native, 1, 2, &telem());
         let route = &config["binds"][0]["listeners"][0]["routes"][1];
         let ai = &route["backends"][0]["ai"];
         assert!(ai.get("hostOverride").is_none(), "native: no host override");
@@ -930,20 +1071,102 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_default_is_metrics_and_access_log_no_tracing() {
+        // The default self-host posture (no OTLP endpoint): stable stats port +
+        // always-on access log, and CRITICALLY no tracing block — so the gateway
+        // never fails over an unreachable Langfuse (gateway_lifecycle stays
+        // green with nothing running).
+        let settings = GatewaySettings {
+            enabled: true,
+            ..Default::default()
+        };
+        let telemetry = Telemetry::from_settings(&settings, 40123);
+        assert_eq!(telemetry.stats_port, 40123);
+        assert!(telemetry.otlp_endpoint.is_none());
+        let config = render_config(&[], &[], 1, 2, &telemetry);
+        assert_eq!(config["config"]["statsAddr"], "127.0.0.1:40123");
+        assert!(config["config"].get("tracing").is_none());
+        // The access log lives under config.logging and carries the llm.* fields.
+        let add = &config["config"]["logging"]["fields"]["add"];
+        assert_eq!(add["total_tokens"], "llm.totalTokens");
+        // Content is NEVER captured (tokens/cost/latency/model only, §10).
+        assert!(add.get("prompt").is_none() && add.get("completion").is_none());
+    }
+
+    #[test]
+    fn telemetry_emits_tracing_only_when_endpoint_configured() {
+        let settings = GatewaySettings {
+            enabled: true,
+            otlp_endpoint: Some("http://127.0.0.1:3000/api/public/otel".into()),
+            ..Default::default()
+        };
+        let telemetry = Telemetry::from_settings(&settings, 40123);
+        let config = render_config(&[], &[], 1, 2, &telemetry);
+        let tracing = &config["config"]["tracing"];
+        assert_eq!(
+            tracing["otlpEndpoint"],
+            "http://127.0.0.1:3000/api/public/otel"
+        );
+        assert_eq!(tracing["otlpProtocol"], "http", "Langfuse ingest is HTTP");
+        assert_eq!(
+            tracing["fields"]["add"]["gen_ai.usage.total_tokens"],
+            "llm.totalTokens"
+        );
+        // The ingest credential is NEVER rendered into the config (agentgateway
+        // evaluates tracing.headers as CEL; the secret flows via the gateway
+        // child's OTEL_EXPORTER_OTLP_HEADERS env instead — ADR-0005).
+        assert!(
+            tracing.get("headers").is_none(),
+            "no inline credential header in the config: {tracing}"
+        );
+        // Content fields are NOT mapped (opt-in only, §10).
+        assert!(tracing["fields"]["add"].get("gen_ai.prompt").is_none());
+    }
+
+    #[test]
+    fn telemetry_blank_endpoint_emits_no_tracing() {
+        // A blank/whitespace endpoint is treated as unset (degrade to logs +
+        // metric, never a tracing block at an empty target).
+        let settings = GatewaySettings {
+            enabled: true,
+            otlp_endpoint: Some("   ".into()),
+            ..Default::default()
+        };
+        let telemetry = Telemetry::from_settings(&settings, 1);
+        assert!(telemetry.otlp_endpoint.is_none());
+        let config = render_config(&[], &[], 1, 2, &telemetry);
+        assert!(config["config"].get("tracing").is_none());
+    }
+
+    #[test]
     fn renders_per_app_and_aggregate_routes() {
         let apps = vec![
             AppKey::top("nutrition"),
             AppKey::top("notes"),
             AppKey::top("registry"),
         ];
-        let config = render_config(&apps, &[], 19200, 19300);
+        let config = render_config(&apps, &[], 19200, 19300, &telem());
 
-        // One public-ish surface knob: the bind port; admin planes pinned to
-        // ephemeral loopback.
+        // One public-ish surface knob: the bind port; admin + readiness pinned
+        // to ephemeral loopback, the STATS port pinned to a STABLE slot
+        // (observability O1: Prometheus `/metrics` must be scrapeable).
         assert_eq!(config["binds"][0]["port"], 19200);
         assert_eq!(config["config"]["adminAddr"], "127.0.0.1:0");
-        assert_eq!(config["config"]["statsAddr"], "127.0.0.1:0");
+        assert_eq!(config["config"]["statsAddr"], "127.0.0.1:19299");
         assert_eq!(config["config"]["readinessAddr"], "127.0.0.1:0");
+        // Telemetry is ON by default: the always-on access log (config.logging)
+        // carries the llm.* token/cost/latency fields; with no OTLP endpoint, NO
+        // tracing block is emitted (so the gateway never fails over an
+        // unreachable Langfuse).
+        assert_eq!(
+            config["config"]["logging"]["fields"]["add"]["total_tokens"],
+            "llm.totalTokens"
+        );
+        assert!(
+            config["config"].get("tracing").is_none(),
+            "no OTLP endpoint ⇒ no tracing block: {}",
+            config["config"]
+        );
 
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
@@ -997,7 +1220,7 @@ mod tests {
             AppKey::tenant("alice", "todo"),
             AppKey::tenant("bob", "notes"),
         ];
-        let config = render_config(&apps, &[], 19200, 19300);
+        let config = render_config(&apps, &[], 19200, 19300, &telem());
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .expect("routes");
@@ -1067,7 +1290,7 @@ mod tests {
     #[test]
     fn render_sanitizes_underscores_and_dedupes_collisions() {
         let apps = vec![AppKey::top("my_app"), AppKey::top("my-app")];
-        let config = render_config(&apps, &[], 1, 2);
+        let config = render_config(&apps, &[], 1, 2, &telem());
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .unwrap();
@@ -1090,7 +1313,7 @@ mod tests {
 
     #[test]
     fn render_with_no_apps_keeps_the_aggregate_bind() {
-        let config = render_config(&[], &[], 19200, 19300);
+        let config = render_config(&[], &[], 19200, 19300, &telem());
         let routes = config["binds"][0]["listeners"][0]["routes"]
             .as_array()
             .unwrap();
@@ -1104,12 +1327,13 @@ mod tests {
 
     #[test]
     fn render_is_deterministic_for_unsorted_input() {
-        let a = render_config(&[AppKey::top("b"), AppKey::top("a")], &[], 1, 2);
+        let a = render_config(&[AppKey::top("b"), AppKey::top("a")], &[], 1, 2, &telem());
         let b = render_config(
             &[AppKey::top("a"), AppKey::top("b"), AppKey::top("a")],
             &[],
             1,
             2,
+            &telem(),
         );
         assert_eq!(a, b);
     }

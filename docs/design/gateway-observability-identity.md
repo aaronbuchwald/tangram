@@ -1,6 +1,8 @@
 # Design: agentgateway observability + per-(user, component, invocation) identity & authorization
 
-**Status:** PROPOSED — approved direction. This is the **canonical design for
+**Status:** PROPOSED — approved direction; **O1 SHIPPED** (gateway telemetry on
+by default + the one-command Langfuse stack — see §7 usage note + §8). O2–O4
+remain held-for-review checkpoints. This is the **canonical design for
 agentgateway observability and identity** (design-of-record). Two LOCKED choices
 up front: (1) **observability is ON by default**, shipped as a **one-command,
 self-hostable Langfuse stack** the host's generated config points at; (2)
@@ -359,6 +361,30 @@ The script:
 > is born exporting to a live Langfuse. Tearing down:
 > `scripts/observability-down.sh`.
 
+> **O1 usage (SHIPPED).** The access log (under agentgateway's `config.logging`,
+> carrying the `llm.*` token/cost/latency/model fields — no content) + the
+> stable Prometheus `/metrics` listener are ON for any `[gateway] enabled = true`
+> host, zero config. To add OTLP traces: (1) `scripts/observability-up.sh` —
+> brings up Langfuse on `127.0.0.1:3000` and writes `LANGFUSE_PUBLIC_KEY`/
+> `LANGFUSE_SECRET_KEY` + the standard `OTEL_EXPORTER_OTLP_ENDPOINT`/`_HEADERS`/
+> `_PROTOCOL` exporter env into `.env`; (2) set
+> `[gateway] otlp_endpoint = "http://127.0.0.1:3000/api/public/otel"` in
+> `apps.toml`; (3) restart `tangram-host` — traces appear at
+> `http://127.0.0.1:3000`. The ingest CREDENTIAL flows via the gateway child's
+> `OTEL_EXPORTER_OTLP_HEADERS` env (inherited from `.env`), never inline in the
+> generated config — agentgateway evaluates `tracing.headers` as CEL, so a
+> static secret there would be inline (ADR-0005). Stack code:
+> `deploy/observability/compose.yml`, `scripts/observability-{up,down}.sh`; host
+> render: `tangram-host::gateway` (`Telemetry`, `render_config`). Content capture
+> stays OFF.
+
+> **Schema note (agentgateway v1.2.1).** Telemetry lands under the top-level
+> `config` object: the access log is `config.logging.fields.add` (NOT a
+> top-level `accessLog` key — v1.2.1 rejects unknown top-level fields), and
+> tracing is `config.tracing`. The §4 examples above are illustrative; the
+> shipped render targets the v1.2.1 schema (verified with
+> `agentgateway --validate-only`).
+
 **Defaults & exposure.** Everything binds loopback; the deploy is local-first.
 For a non-loopback ingester (a shared team Langfuse), the doc notes: bind it
 behind TLS + auth (Langfuse has its own auth), point `otlpEndpoint` at it, keep
@@ -376,7 +402,7 @@ Each has a one-line **review gate**.
 
 | # | Checkpoint | Review gate |
 |---|---|---|
-| **O1** | **Gateway telemetry ON + one-command Langfuse stack.** Emit `config.tracing` (OTLP→Langfuse) + a JSON `accessLog` with `llm.*` fields from `render_config`; pin `statsAddr` to a `free_port()` slot; ship `deploy/observability/compose.yml` + `scripts/observability-up.sh`. | `scripts/observability-up.sh` then a `/llm/<name>` call → a GenAI trace appears in Langfuse and `agentgateway_gen_ai_client_token_usage` is scrapeable; ingester down ⇒ host still logs structured usage |
+| **O1 — SHIPPED** | **Gateway telemetry ON + one-command Langfuse stack.** Emit `config.tracing` (OTLP→Langfuse) + a JSON `accessLog` with `llm.*` fields from `render_config`; pin `statsAddr` to a `free_port()` slot; ship `deploy/observability/compose.yml` + `scripts/observability-up.sh`. | `scripts/observability-up.sh` then a `/llm/<name>` call → a GenAI trace appears in Langfuse and `agentgateway_gen_ai_client_token_usage` is scrapeable; ingester down ⇒ host still logs structured usage |
 | **O2** | **Host→gateway composite-identity propagation + authorize/label.** Mint a short-lived JWT per call at `Gateway::proxy` with `sub`/`component`/`invocation`/`scope`; gateway CEL authorizes (loopback ∧ jwt ∧ ADR-0008 grant) and labels traces/logs/metrics by the claims. | a call with the wrong `(user, component)` scope is denied at the gateway; a permitted call's trace/log/metric carries `tangram.user` + `tangram.component` + `tangram.invocation` labels |
 | **O3** | **Per-run telemetry in History/Agents.** Extend `AgentRun` (additive `Option<…>`) with model/tokens/cost/latency/status; record from the gateway feed keyed by the `invocation` label; Agents-view columns + sort/filter + optional Langfuse deep-link (§6). | a finished agent run shows tokens/cost/latency/status in the Agents view; the row deep-links to its Langfuse trace; `cost>…` / `status:error` filter the table |
 | **O4** | **Prometheus / dashboards / cost budgets.** Bundle a Prometheus scrape of `statsAddr` + a starter dashboard; per-principal/per-agent **cost budget** that trips on `agentgateway_gen_ai_client_token_usage` (reuses the per-principal rate-limit, ADR-0011). | a dashboard shows per-(user,component) token spend; a budget cap denies further `/llm` calls for a principal over budget and recovers when the window rolls |

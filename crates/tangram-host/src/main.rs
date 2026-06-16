@@ -796,10 +796,24 @@ async fn main() -> anyhow::Result<()> {
                     None => gateway::free_port()?,
                 };
                 let config_file = gateway::default_config_file();
+                // Telemetry ON by default (observability O1): mint a STABLE
+                // loopback stats port so Prometheus `/metrics`
+                // (`agentgateway_gen_ai_client_token_usage`) is scrapeable. OTLP
+                // tracing is emitted only when `[gateway] otlp_endpoint` is set
+                // (absent → no tracing block; the always-on JSON access log +
+                // the metric still ship). Run `scripts/observability-up.sh` to
+                // stand up the bundled Langfuse stack + provision its keys.
+                let stats_port = gateway::free_port()?;
+                let telemetry = gateway::Telemetry::from_settings(&gateway_settings, stats_port);
                 tracing::info!(
                     "gateway: MCP through agentgateway ({}) on 127.0.0.1:{port} — internal \
-                     app listener 127.0.0.1:{internal_port}, generated config {}",
+                     app listener 127.0.0.1:{internal_port}, metrics 127.0.0.1:{stats_port}/metrics{}, \
+                     generated config {}",
                     binary.display(),
+                    match &telemetry.otlp_endpoint {
+                        Some(endpoint) => format!(", OTLP traces → {endpoint}"),
+                        None => String::new(),
+                    },
                     config_file.display()
                 );
                 internal_listener = Some(listener);
@@ -808,6 +822,7 @@ async fn main() -> anyhow::Result<()> {
                     port,
                     internal_port,
                     gateway_settings.llm.clone(),
+                    telemetry,
                     config_file,
                 )))
             }

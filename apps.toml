@@ -34,6 +34,20 @@ enabled = true
 # binary = "/usr/local/bin/agentgateway"  # default: `agentgateway` on $PATH
 # port = 19200                            # internal port; default: auto
 
+# Observability is ON by default (observability O1; docs/design/gateway-
+# observability-identity.md). The gateway always emits a per-call access log with
+# the llm.* fields (tokens/cost/latency/model — NOT prompt/completion content)
+# into the host log, and pins its Prometheus /metrics listener to a stable
+# loopback port (scrape agentgateway_gen_ai_client_token_usage). To ALSO export
+# OTLP traces to a Langfuse stack, run scripts/observability-up.sh (it stands up
+# Langfuse on 127.0.0.1:3000 and writes the ingest keys + OTEL_EXPORTER_OTLP_*
+# vars into .env), set otlp_endpoint below, and restart the host — traces appear
+# at http://127.0.0.1:3000. Absent otlp_endpoint → NO tracing block is emitted
+# (the gateway never fails over an unreachable target; logs + metrics still
+# ship). The ingest CREDENTIAL is supplied via the gateway child's
+# OTEL_EXPORTER_OTLP_HEADERS env (from .env), never inline in the config.
+# otlp_endpoint = "http://127.0.0.1:3000/api/public/otel"  # OTLP/HTTP; default: none
+
 # LLM proxy through agentgateway (ADR-0012). Each [[gateway.llm]] becomes a
 # route at /llm/<name>: a loopback client POSTs an OpenAI-style chat request to
 # /llm/<name>/v1/chat/completions and the host proxies it → agentgateway → the
