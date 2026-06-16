@@ -164,17 +164,32 @@ export function openCreateAgentPopup(opts: CreateAgentOptions): void {
   nameInput.placeholder = "e.g. summarize";
   grid.append(fieldLabel("Name"), nameInput);
 
-  // kind
-  const kindSelect = document.createElement("select");
-  kindSelect.className = "modal-input agent-create-select";
-  for (const k of ["skill", "agent"] as const) {
-    const opt = document.createElement("option");
-    opt.value = k;
-    opt.textContent = k;
-    kindSelect.appendChild(opt);
+  // kind — a small segmented toggle (no native <select> chrome). Default skill.
+  let kind: Kind = "skill";
+  const kindSeg = document.createElement("div");
+  kindSeg.className = "agent-seg agent-create-kind";
+  kindSeg.setAttribute("role", "group");
+  kindSeg.setAttribute("aria-label", "Kind");
+  const kindBtns: Record<Kind, HTMLButtonElement> = {
+    skill: kindSegButton("skill"),
+    agent: kindSegButton("agent"),
+  };
+  function applyKind() {
+    for (const k of ["skill", "agent"] as const) {
+      const active = k === kind;
+      kindBtns[k].classList.toggle("active", active);
+      kindBtns[k].setAttribute("aria-pressed", String(active));
+    }
   }
-  kindSelect.value = "skill"; // default skill
-  grid.append(fieldLabel("Kind"), kindSelect);
+  for (const k of ["skill", "agent"] as const) {
+    kindBtns[k].addEventListener("click", () => {
+      kind = k;
+      applyKind();
+    });
+    kindSeg.append(kindBtns[k]);
+  }
+  applyKind();
+  grid.append(fieldLabel("Kind"), kindSeg);
 
   // model
   const modelInput = document.createElement("input");
@@ -247,7 +262,6 @@ export function openCreateAgentPopup(opts: CreateAgentOptions): void {
   async function create() {
     const name = refresh();
     if (!name) return;
-    const kind = kindSelect.value as Kind;
     const model = modelInput.value.trim() || "deepseek-chat";
     const labels = labelsInput.value
       .split(",")
@@ -306,4 +320,14 @@ function fieldLabel(text: string): HTMLElement {
   el.className = "agent-create-label micro";
   el.textContent = text;
   return el;
+}
+
+/** A segmented-control button for the kind toggle (a focusable pill). */
+function kindSegButton(text: string): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "agent-seg-btn";
+  b.textContent = text;
+  b.setAttribute("aria-pressed", "false");
+  return b;
 }

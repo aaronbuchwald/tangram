@@ -8,17 +8,19 @@
 // R1 — the trigger belongs to the INVOCATION, not the definition. This popup is
 // where the user picks how a def runs (the OPTIONS PASS), below the prompt:
 //
-//   - Trigger: One-time (default) · Cron (reveals a schedule input) · Event
-//     (disabled, future — issue #33).
-//   - MCP / Tools, Multi-step, Tags / Labels: disabled placeholders (tooltips).
+//   - Trigger: One-time (default) · Schedule · Event (disabled, future — #33).
+//     Schedule reveals a recurrence sub-selector — Daily (default) · Weekly ·
+//     Interval — that drives the calendar-style picker.
+//   - MCP / Tools, Multi-step, Tags / Labels: disabled "Coming soon"
+//     placeholders (grouped under a divider, tooltips kept).
 //
 // Submit behavior:
 //   - One-time → run NOW via DeepSeek through the host's `/llm/deepseek` proxy
 //     (relative `../llm/deepseek/...`; the host injects the key, never the
 //     browser), show the chat, and on Save replace the `/<name>` token with the
 //     `> Agent:` Input/Output block (unchanged behavior). No durable block.
-//   - Cron → write a durable ```agent block (use/trigger/prompt) by replacing
-//     the `/<name>` token; do NOT run now — the host scheduler picks it up.
+//   - Schedule → write a durable ```agent block (use/trigger/prompt) by
+//     replacing the `/<name>` token; do NOT run now — the scheduler picks it up.
 //
 // The call is BOUND to the def: its `model` is passed through and its
 // `instructions` become the system message.
@@ -42,15 +44,16 @@ export interface AgentPopupCallbacks {
   /** Replace the triggering `/<name>` range with the given markdown block and
    *  refocus the editor. Wired by main.ts onto the live MdEditor. Used for both
    *  the one-time Output block (on Save) and the durable ```agent block (on a
-   *  Cron submit). */
+   *  Schedule submit). */
   onSave: (block: string) => void;
   /** Close with no document change (Exit / dismiss); refocus the editor. */
   onClose: () => void;
 }
 
-/** The trigger mode the user chose in the options pass. `event` is greyed
- *  (future, #33); the recurring modes drive the calendar-style picker. */
-type TriggerMode = "one-time" | "interval" | "daily" | "weekly" | "event";
+/** The top-level trigger the user chose in the options pass. `schedule` reveals
+ *  the recurrence sub-selector (Daily/Weekly/Interval); `event` is greyed
+ *  (future, #33). */
+type TriggerMode = "one-time" | "schedule" | "event";
 
 // Only one popup at a time (like promptName/confirmAction). Re-opening while one
 // is up closes the previous instance first.
@@ -220,36 +223,41 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     const opts = document.createElement("div");
     opts.className = "agent-options";
 
-    // ── Trigger mode (active): One-time · Interval · Daily · Weekly · Event ──
+    // ── Top-level trigger (active): One-time · Schedule · Event ──
     let mode: TriggerMode = "one-time";
     const trigRow = optionRow("Trigger");
-    const seg = document.createElement("div");
-    seg.className = "agent-trigger-seg";
+    const seg = segGroup("Trigger");
     const modeBtns: Record<Exclude<TriggerMode, "event">, HTMLButtonElement> = {
       "one-time": segButton("One-time"),
-      interval: segButton("Interval"),
-      daily: segButton("Daily"),
-      weekly: segButton("Weekly"),
+      schedule: segButton("Schedule"),
     };
     const eventBtn = segButton("Event");
     eventBtn.disabled = true;
     eventBtn.classList.add("disabled");
     eventBtn.title =
       "Run when a vault event occurs — note created, label added, another agent's output. Future feature (#33).";
-    seg.append(modeBtns["one-time"], modeBtns.interval, modeBtns.daily, modeBtns.weekly, eventBtn);
+    seg.append(modeBtns["one-time"], modeBtns.schedule, eventBtn);
     trigRow.append(seg);
 
-    // The recurrence picker (revealed for the recurring modes). Owns its
-    // sub-controls and exposes the chosen trigger + validity via closures.
+    // The recurrence picker (revealed when Schedule is selected). It owns the
+    // recurrence sub-selector (Daily/Weekly/Interval, default Daily) plus the
+    // calendar sub-controls, and exposes the chosen trigger + validity.
     const picker = buildRecurrencePicker(() => refresh());
     opts.append(trigRow, picker.el);
 
-    // ── Disabled placeholders (future phases) ──
-    opts.append(
+    // ── Coming-soon placeholders (future phases), grouped under a divider ──
+    const soon = document.createElement("div");
+    soon.className = "agent-soon-group";
+    const soonHead = document.createElement("div");
+    soonHead.className = "agent-soon-head micro";
+    soonHead.textContent = "Coming soon";
+    soon.append(
+      soonHead,
       disabledRow("MCP / Tools", "Connect MCP servers/tools the agent may call. Coming in the Tools phase."),
       disabledRow("Multi-step", "Multi-step / graph workflows (LangGraph-style). Future feature."),
       disabledRow("Tags / Labels", "Tag this invocation/run for filtering. Coming soon."),
     );
+    opts.append(soon);
 
     const actions = document.createElement("div");
     actions.className = "modal-actions";
@@ -263,11 +271,13 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
 
     function applyMode() {
       for (const [m, btn] of Object.entries(modeBtns)) {
-        btn.classList.toggle("active", m === mode);
+        const active = m === mode;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", String(active));
       }
-      const recurring =
-        mode === "interval" || mode === "daily" || mode === "weekly" ? mode : null;
-      picker.show(recurring);
+      // The picker reveals its recurrence sub-selector only under Schedule;
+      // when shown it defaults its sub-mode to Daily.
+      picker.show(mode === "schedule");
       refresh();
     }
     for (const [m, btn] of Object.entries(modeBtns) as [
@@ -451,12 +461,24 @@ function optionRow(label: string): HTMLElement {
   return row;
 }
 
-/** A segmented-control button (One-time / Interval / Daily / Weekly / Event). */
+/** A segmented-control container (pill toggle group). `label` names the group
+ *  for assistive tech. Keyboard-operable via its focusable child buttons. */
+function segGroup(label: string): HTMLElement {
+  const g = document.createElement("div");
+  g.className = "agent-seg";
+  g.setAttribute("role", "group");
+  g.setAttribute("aria-label", label);
+  return g;
+}
+
+/** A segmented-control button (a focusable pill toggle). Defaults to the
+ *  unpressed state; callers toggle `.active` + `aria-pressed`. */
 function segButton(text: string): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
   b.className = "agent-seg-btn";
   b.textContent = text;
+  b.setAttribute("aria-pressed", "false");
   return b;
 }
 
@@ -489,11 +511,21 @@ const DAY_LABELS: Record<Weekday, string> = {
   sun: "Su",
 };
 
+/** Recurrence sub-modes, in the order they appear in the sub-selector, with
+ *  Daily first so it is the default-selected mode when Schedule is chosen. */
+const RECURRING_MODES: readonly { mode: RecurringMode; label: string }[] = [
+  { mode: "daily", label: "Daily" },
+  { mode: "weekly", label: "Weekly" },
+  { mode: "interval", label: "Interval" },
+];
+
 /**
- * Build the calendar-style recurrence picker (Google-Calendar / Apple-Reminders
- * feel). Returns the wrapper element plus:
- *  - `show(mode)` — reveal the controls for the given recurring mode, or hide
- *    all (mode `null`, i.e. the One-time trigger).
+ * Build the Schedule tab's contents (calendar-style, Google-Calendar /
+ * Apple-Reminders feel): a recurrence sub-selector (Daily · Weekly · Interval,
+ * default Daily) followed by the calendar sub-controls for the chosen sub-mode.
+ * Returns the wrapper element plus:
+ *  - `show(visible)` — reveal the Schedule contents (and reset the sub-mode to
+ *    the default, Daily) or hide them (the One-time / Event triggers).
  *  - `trigger()` — the emitted `trigger:` string for the current selection (via
  *    the shared `buildTrigger`), or `null` if the selection is incomplete.
  *  - `isValid()` — whether `trigger()` would round-trip through `parseSchedule`.
@@ -505,15 +537,32 @@ const DAY_LABELS: Record<Weekday, string> = {
  */
 function buildRecurrencePicker(onChange: () => void): {
   el: HTMLElement;
-  show: (mode: RecurringMode | null) => void;
+  show: (visible: boolean) => void;
   trigger: () => string | null;
   isValid: () => boolean;
 } {
   const tz = browserTz();
-  let mode: RecurringMode | null = null;
+  // The default recurrence sub-mode when Schedule is selected.
+  const DEFAULT_MODE: RecurringMode = "daily";
+  let mode: RecurringMode = DEFAULT_MODE;
 
   const el = document.createElement("div");
   el.className = "agent-recur";
+
+  // ── Recurrence sub-selector (segmented): Daily · Weekly · Interval ──
+  const subRow = document.createElement("div");
+  subRow.className = "agent-recur-sub";
+  const subSeg = segGroup("Recurrence");
+  const subBtns: Record<RecurringMode, HTMLButtonElement> = {
+    interval: segButton("Interval"),
+    daily: segButton("Daily"),
+    weekly: segButton("Weekly"),
+  };
+  for (const { mode: m, label } of RECURRING_MODES) {
+    subBtns[m].textContent = label;
+    subSeg.append(subBtns[m]);
+  }
+  subRow.append(subSeg);
 
   // ── Interval row: "Every [N] [minutes/hours/days]" ──
   const intervalRow = document.createElement("div");
@@ -526,20 +575,31 @@ function buildRecurrencePicker(onChange: () => void): {
   nInput.min = "1";
   nInput.value = "2";
   nInput.className = "modal-input agent-recur-n";
-  const unitSel = document.createElement("select");
-  unitSel.className = "modal-input agent-recur-unit";
-  for (const [val, label] of [
-    ["m", "minutes"],
-    ["h", "hours"],
-    ["d", "days"],
-  ] as const) {
-    const o = document.createElement("option");
-    o.value = val;
-    o.textContent = label;
-    unitSel.append(o);
+  // Interval unit as a segmented toggle (no native <select> chrome).
+  let unitVal: "m" | "h" | "d" = "h";
+  const unitSeg = segGroup("Interval unit");
+  const unitBtns: Record<"m" | "h" | "d", HTMLButtonElement> = {
+    m: segButton("minutes"),
+    h: segButton("hours"),
+    d: segButton("days"),
+  };
+  for (const u of ["m", "h", "d"] as const) {
+    unitBtns[u].addEventListener("click", () => {
+      unitVal = u;
+      applyUnit();
+      onChange();
+    });
+    unitSeg.append(unitBtns[u]);
   }
-  unitSel.value = "h";
-  intervalRow.append(everyLabel, nInput, unitSel);
+  function applyUnit() {
+    for (const u of ["m", "h", "d"] as const) {
+      const active = u === unitVal;
+      unitBtns[u].classList.toggle("active", active);
+      unitBtns[u].setAttribute("aria-pressed", String(active));
+    }
+  }
+  applyUnit();
+  intervalRow.append(everyLabel, nInput, unitSeg);
 
   // ── Daily row: "Every day at [time]" ──
   const dailyRow = document.createElement("div");
@@ -558,6 +618,8 @@ function buildRecurrencePicker(onChange: () => void): {
   weeklyRow.className = "agent-recur-row agent-recur-weekly";
   const chips = document.createElement("div");
   chips.className = "agent-day-chips";
+  chips.setAttribute("role", "group");
+  chips.setAttribute("aria-label", "Days of week");
   const selectedDays = new Set<Weekday>();
   for (const d of WEEKDAYS) {
     const chip = document.createElement("button");
@@ -565,10 +627,14 @@ function buildRecurrencePicker(onChange: () => void): {
     chip.className = "agent-day-chip";
     chip.textContent = DAY_LABELS[d];
     chip.title = d;
+    chip.setAttribute("aria-label", d);
+    chip.setAttribute("aria-pressed", "false");
     chip.addEventListener("click", () => {
       if (selectedDays.has(d)) selectedDays.delete(d);
       else selectedDays.add(d);
-      chip.classList.toggle("active", selectedDays.has(d));
+      const on = selectedDays.has(d);
+      chip.classList.toggle("active", on);
+      chip.setAttribute("aria-pressed", String(on));
       onChange();
     });
     chips.append(chip);
@@ -587,9 +653,9 @@ function buildRecurrencePicker(onChange: () => void): {
   tzHint.className = "agent-recur-tz micro";
   tzHint.textContent = `times in ${tz}`;
 
-  el.append(intervalRow, dailyRow, weeklyRow, tzHint);
+  el.append(subRow, intervalRow, dailyRow, weeklyRow, tzHint);
 
-  for (const ctrl of [nInput, unitSel, dailyTime, weeklyTime]) {
+  for (const ctrl of [nInput, dailyTime, weeklyTime]) {
     ctrl.addEventListener("input", onChange);
     ctrl.addEventListener("change", onChange);
   }
@@ -598,7 +664,7 @@ function buildRecurrencePicker(onChange: () => void): {
     if (mode === "interval") {
       const n = Number(nInput.value);
       if (!Number.isInteger(n) || n <= 0) return null;
-      return { mode: "interval", n, unit: unitSel.value as "m" | "h" | "d" };
+      return { mode: "interval", n, unit: unitVal };
     }
     if (mode === "daily") {
       if (!/^\d{2}:\d{2}$/.test(dailyTime.value)) return null;
@@ -621,16 +687,37 @@ function buildRecurrencePicker(onChange: () => void): {
     return parseSchedule(t) ? t : null;
   }
 
-  function show(next: RecurringMode | null) {
-    mode = next;
-    intervalRow.style.display = next === "interval" ? "" : "none";
-    dailyRow.style.display = next === "daily" ? "" : "none";
-    weeklyRow.style.display = next === "weekly" ? "" : "none";
-    tzHint.style.display = next === "daily" || next === "weekly" ? "" : "none";
-    el.style.display = next === null ? "none" : "";
+  // Reflect the chosen sub-mode: highlight its segment + reveal only its
+  // calendar sub-controls. The tz hint shows for the time-of-day modes.
+  function applyMode() {
+    for (const { mode: m } of RECURRING_MODES) {
+      const active = m === mode;
+      subBtns[m].classList.toggle("active", active);
+      subBtns[m].setAttribute("aria-pressed", String(active));
+    }
+    intervalRow.style.display = mode === "interval" ? "" : "none";
+    dailyRow.style.display = mode === "daily" ? "" : "none";
+    weeklyRow.style.display = mode === "weekly" ? "" : "none";
+    tzHint.style.display = mode === "daily" || mode === "weekly" ? "" : "none";
+  }
+  for (const { mode: m } of RECURRING_MODES) {
+    subBtns[m].addEventListener("click", () => {
+      mode = m;
+      applyMode();
+      onChange();
+    });
   }
 
-  show(null);
+  // Reveal the Schedule contents (resetting the sub-mode to Daily) or hide.
+  function show(visible: boolean) {
+    if (visible) {
+      mode = DEFAULT_MODE;
+      applyMode();
+    }
+    el.style.display = visible ? "" : "none";
+  }
+
+  show(false);
   return { el, show, trigger, isValid: () => trigger() !== null };
 }
 

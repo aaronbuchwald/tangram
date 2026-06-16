@@ -503,11 +503,13 @@ body {
 }
 
 /* ── run-popup options pass (R1: trigger lives on the invocation) ──
-   The trigger selector is active; MCP/Tools, Multi-step and Tags/Labels are
-   greyed placeholders with hover tooltips. Styled to match the modal card. */
+   The top-level trigger (One-time · Schedule · Event) is a segmented pill
+   group; the Schedule tab reveals a recurrence sub-selector + calendar
+   controls. MCP/Tools, Multi-step and Tags/Labels are greyed "Coming soon"
+   placeholders grouped under a divider. Styled to match the modal card. */
 .agent-options {
-  display: flex; flex-direction: column; gap: 8px;
-  margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 2px; padding-top: 12px; border-top: 1px solid var(--line);
 }
 .agent-option-row { display: flex; align-items: center; gap: 10px; }
 .agent-option-label { color: var(--dim); letter-spacing: 0.03em; min-width: 88px; }
@@ -517,40 +519,74 @@ body {
   margin-left: auto; color: var(--faint); letter-spacing: 0.04em;
   border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
 }
-.agent-trigger-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-.agent-seg-btn {
-  font: 12px/1.4 var(--mono); color: var(--dim);
-  background: var(--bg); border: none; padding: 4px 11px; cursor: pointer;
-  border-right: 1px solid var(--line);
-}
-.agent-seg-btn:last-child { border-right: none; }
-.agent-seg-btn:hover:not(.disabled):not(.active) { color: var(--text); }
-.agent-seg-btn.active { background: var(--blue); color: #fff; }
-.agent-seg-btn.disabled { color: var(--faint); cursor: not-allowed; }
-.agent-cron-wrap { display: flex; flex-direction: column; gap: 4px; padding-left: 98px; }
-.agent-cron-input { font: 13px/1.4 var(--mono); }
-.agent-cron-hint { color: var(--faint); }
-.agent-cron-hint.error { color: var(--red); }
 
-/* ── calendar-style recurrence picker (Interval / Daily / Weekly) ──
-   Revealed below the trigger segmented control. Aligned under the controls
-   (label gutter = 98px), with a row per mode and a shared tz hint. */
-.agent-recur { display: flex; flex-direction: column; gap: 8px; padding-left: 98px; }
+/* ── themed inputs (shared across both popups) ──
+   Rounded, blue focus ring, themed placeholder. Applies to the modal-input
+   text/number/time controls used in the agent popups. */
+.agent-popup .modal-input,
+.agent-create .modal-input {
+  border-radius: 7px;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.agent-popup .modal-input::placeholder,
+.agent-create .modal-input::placeholder { color: var(--faint); }
+.agent-popup .modal-input:focus,
+.agent-popup .modal-input:focus-visible,
+.agent-create .modal-input:focus,
+.agent-create .modal-input:focus-visible {
+  outline: none; border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(0, 158, 238, 0.25);
+}
+
+/* ── segmented controls (pill toggle groups) ──
+   Used for the top-level trigger, the recurrence sub-selector, the interval
+   unit, and the create-popup kind toggle. Active = blue-accent filled. */
+.agent-seg {
+  display: inline-flex; gap: 3px; padding: 3px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--bg);
+}
+.agent-seg-btn {
+  font: 12px/1.4 var(--sans); color: var(--dim);
+  background: transparent; border: none; border-radius: 6px;
+  padding: 4px 11px; cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.agent-seg-btn:hover:not(.disabled):not(.active) { color: var(--text); background: var(--panel-2); }
+.agent-seg-btn.active { background: var(--blue); color: #fff; font-weight: 600; }
+.agent-seg-btn.disabled { color: var(--faint); cursor: not-allowed; }
+.agent-seg-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* ── Coming-soon group (future-phase placeholders) ──
+   A divider + heading above the reduced-opacity, not-yet-available rows. */
+.agent-soon-group {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 2px; padding-top: 10px; border-top: 1px dashed var(--line);
+}
+.agent-soon-head { color: var(--faint); letter-spacing: 0.1em; }
+.agent-soon-group .agent-option-row { opacity: 0.6; }
+
+/* ── Schedule tab: recurrence sub-selector + calendar controls ──
+   Revealed below the trigger when Schedule is selected. Aligned under the
+   controls (label gutter = 98px); a sub-selector, a row per sub-mode, tz hint. */
+.agent-recur { display: flex; flex-direction: column; gap: 9px; padding-left: 98px; }
+.agent-recur-sub { display: flex; }
 .agent-recur-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .agent-recur-text { color: var(--dim); }
-.agent-recur-n { width: 56px; font: 13px/1.4 var(--mono); text-align: right; }
-.agent-recur-unit { font: 13px/1.4 var(--sans, inherit); padding: 3px 6px; }
-.agent-recur-time { font: 13px/1.4 var(--mono); padding: 3px 6px; }
-.agent-day-chips { display: inline-flex; gap: 4px; }
+.agent-recur-n {
+  width: 56px; font: 13px/1.4 var(--mono); text-align: right; padding: 4px 7px;
+}
+.agent-recur-time { font: 13px/1.4 var(--mono); padding: 4px 7px; }
+.agent-day-chips { display: inline-flex; gap: 5px; }
 .agent-day-chip {
-  width: 26px; height: 26px; border-radius: 50%;
+  width: 28px; height: 28px; border-radius: 50%;
   border: 1px solid var(--line); background: var(--bg);
   color: var(--dim); font: 12px/1 var(--sans, inherit); cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 0; transition: background 0.1s ease, color 0.1s ease;
+  padding: 0; transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
 .agent-day-chip:hover:not(.active) { color: var(--text); border-color: var(--dim); }
 .agent-day-chip.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+.agent-day-chip:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .agent-recur-tz { color: var(--faint); letter-spacing: 0.02em; }
 
 /* ── `/agent` create/define popup (P1) ──
@@ -559,15 +595,13 @@ body {
 .agent-create { width: min(540px, calc(100vw - 32px)); }
 .agent-create-grid {
   display: grid; grid-template-columns: max-content 1fr;
-  gap: 8px 12px; align-items: center;
+  gap: 9px 12px; align-items: center;
 }
 .agent-create-label { color: var(--dim); letter-spacing: 0.03em; text-align: right; }
 /* The instructions textarea stretches to fill its row height. */
 .agent-create-grid .agent-input { align-self: stretch; }
-.agent-create-select {
-  font: 13px/1.4 var(--mono); cursor: pointer;
-  appearance: none; -webkit-appearance: none;
-}
+/* The kind toggle sits left-aligned in its grid cell (not stretched). */
+.agent-create-kind { justify-self: start; }
 
 /* ── auth UI (auth.md §9 C5) ──────────────────────────────────────────────── */
 .topbar-right { display: flex; align-items: center; gap: 14px; }
