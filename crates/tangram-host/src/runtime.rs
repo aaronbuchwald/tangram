@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use secrecy::ExposeSecret as _;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use wasmtime::{Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::config::EnforcementMode;
@@ -39,11 +39,119 @@ use bindings::tangram::app::host;
 
 pub use bindings::exports::tangram::app::guest::DispatchResult;
 
+// ── Resource limits (marketplace-security-audit M2) ─────────────────────────
+// Every component runs in a `Store` whose linear memory + table/instance growth
+// is bounded by a `StoreLimits`, and whose CPU is bounded by epoch interruption.
+// Without these a single buggy/malicious component can OOM or spin the whole
+// host process (the audit's #1 MUST-FIX). The defaults are global, picked to be
+// invisible to the real first-party apps (notes/nutrition/registry/marketplace/
+// tangram/guided-learning/morning-brief/auto-todo) while still trapping a
+// runaway as a clean per-instance error.
+
+/// Default per-component linear-memory ceiling: 512 MiB. Generous for the
+/// real apps (their working set is a single Automerge doc + transient JSON,
+/// well under this) yet a hard wall against an unbounded `memory.grow` OOM.
+/// A component that tries to grow past this gets an allocation failure inside
+/// the guest (a clean trap surfaced as a per-instance error), not a host OOM.
+pub const DEFAULT_MAX_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
+/// Max wasm tables per store. A component world legitimately uses a small,
+/// fixed number; this is a sane upper bound that no real app approaches.
+const DEFAULT_MAX_TABLES: usize = 64;
+
+/// Max total table elements per store — bounds funcref/externref table growth
+/// (another unbounded-allocation vector). Comfortably above any real app.
+const DEFAULT_MAX_TABLE_ELEMENTS: usize = 1_000_000;
+
+/// Max concurrent instances within a single component instantiation (a
+/// component may internally instantiate sub-modules). One app = one top-level
+/// component; this bounds nested instantiation without affecting real apps.
+const DEFAULT_MAX_INSTANCES: usize = 1_000;
+
+/// How often the host bumps the global epoch counter. Combined with
+/// [`EPOCH_DEADLINE_TICKS`] this sets the slice of *guest CPU* a component may
+/// burn before the epoch callback fires. 100ms keeps the ticker cheap.
+pub const EPOCH_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Per-slice epoch budget, in ticks. At a 100ms tick this is a ~1s slice of
+/// *guest CPU execution* between epoch-callback firings. Crucially this counts
+/// only time the guest is ON-CPU: while a component awaits an injected
+/// `http-fetch` (or any host call) the guest is NOT executing, so the counter
+/// does not advance — legitimate async waits never push toward the deadline, no
+/// matter how long the I/O takes.
+pub const EPOCH_DEADLINE_TICKS: u64 = 10;
+
+/// How many consecutive CPU slices a single guest call may consume before it is
+/// trapped as a runaway. Each slice is [`EPOCH_DEADLINE_TICKS`] of on-CPU time,
+/// so this is a total *guest-CPU* budget of ~[`MAX_EPOCH_SLICES`] × 1s ≈ 10s
+/// per call. Below the cap the callback yields-and-continues (cooperatively
+/// timeslicing so one app can't starve the tokio runtime); at the cap it traps.
+///
+/// This is the line between "legitimately busy" and "runaway": every real
+/// Tangram dispatch is either a fast pure-state transition or work that spends
+/// its wall-clock time in `http-fetch` awaits (which don't count) — none burns
+/// ~10s of *pure CPU* in a single call. A component that does (a tight infinite
+/// loop, the M2 DoS) trips the cap and dies as a clean per-instance trap while
+/// every other app keeps serving.
+pub const MAX_EPOCH_SLICES: u64 = 10;
+
+/// The single host-wide epoch ticker: one tokio task that increments the shared
+/// `Engine` epoch on a fixed interval so every component store's epoch deadline
+/// advances. Modeled on the gateway supervisor — a `watch` shutdown channel and
+/// a joinable handle, stopped cleanly on host shutdown. There is exactly one of
+/// these per host (the engine is shared by all component instances).
+pub struct EpochTicker {
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+impl EpochTicker {
+    /// Spawn the ticker against the shared engine. Returns the ticker handle
+    /// (call [`EpochTicker::shutdown`] / await the returned [`JoinHandle`] at
+    /// host shutdown) — the same lifecycle shape as the gateway supervisor.
+    pub fn spawn(engine: Engine) -> (Self, tokio::task::JoinHandle<()>) {
+        let (shutdown, mut rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(EPOCH_TICK_INTERVAL);
+            // Skip catch-up ticks if the runtime ever stalls — we want a steady
+            // cadence, not a burst.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => engine.increment_epoch(),
+                    _ = rx.changed() => {
+                        if *rx.borrow() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        (Self { shutdown }, handle)
+    }
+
+    /// Signal the ticker task to stop (idempotent). The returned join handle
+    /// from [`EpochTicker::spawn`] completes shortly after.
+    pub fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+}
+
 /// Per-instance host state: the WASI plumbing plus the app's capability
 /// grants.
 pub struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
+    /// The Wasmtime resource limiter for THIS store (M2): bounds linear memory,
+    /// tables, table elements, and nested instances. Installed via
+    /// `Store::limiter`; its accessor closure returns `&mut self.limits`.
+    limits: StoreLimits,
+    /// Consecutive epoch CPU-slices the current guest call has consumed (M2).
+    /// Bumped each time the epoch-deadline callback fires (i.e. the guest burned
+    /// another [`EPOCH_DEADLINE_TICKS`] of on-CPU time without finishing); reset
+    /// to zero at the start of every dispatch. At [`MAX_EPOCH_SLICES`] the
+    /// callback traps the runaway. A host call (`http-fetch`) is NOT guest CPU,
+    /// so an async wait never advances this — only sustained spinning does.
+    epoch_slices: u64,
     app: String,
     /// The coarse outer host fence (the cheap first gate): an outbound request
     /// whose canonical host is not here is denied before any call match
@@ -541,9 +649,20 @@ impl ComponentHandle {
         for (key, value) in env {
             wasi.env(key, value);
         }
+        // The per-store resource limiter (M2). Built once with the global
+        // defaults; bounds linear memory + table/instance growth so a runaway
+        // allocation fails as a clean guest trap, not a host OOM.
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(DEFAULT_MAX_MEMORY_BYTES)
+            .tables(DEFAULT_MAX_TABLES)
+            .table_elements(DEFAULT_MAX_TABLE_ELEMENTS)
+            .instances(DEFAULT_MAX_INSTANCES)
+            .build();
         let state = HostState {
             wasi: wasi.build(),
             table: ResourceTable::new(),
+            limits,
+            epoch_slices: 0,
             app: app.to_string(),
             allow_hosts: allow_hosts.to_vec(),
             calls,
@@ -553,6 +672,42 @@ impl ComponentHandle {
             client: reqwest::Client::new(),
         };
         let mut store = Store::new(engine, state);
+        // Install the memory/table/instance limiter (M2): the closure hands the
+        // store-owned `StoreLimits` back to Wasmtime on every allocation check.
+        store.limiter(|state| &mut state.limits);
+        // Bound CPU via epoch interruption (M2). The deadline fires after each
+        // slice of GUEST CPU (`EPOCH_DEADLINE_TICKS`); the callback then either
+        // YIELDS-and-continues (cooperatively timeslicing so one app can't
+        // starve the runtime, and refreshing the deadline) or, once the call
+        // has burned `MAX_EPOCH_SLICES` slices of pure CPU, TRAPS the runaway.
+        // Because the epoch advances on guest-CPU time only, a component
+        // awaiting an injected `http-fetch` is not executing and never pushes
+        // toward the cap — async I/O is never trapped, only sustained spinning.
+        // `Yield` requires the `*_async` call path (the component path is async)
+        // and the host-wide `EpochTicker`; needs `epoch_interruption(true)`
+        // (set in `engine()`).
+        store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+        store.epoch_deadline_callback(|mut ctx| {
+            let state = ctx.data_mut();
+            state.epoch_slices += 1;
+            if state.epoch_slices >= MAX_EPOCH_SLICES {
+                let app = state.app.clone();
+                tracing::warn!(
+                    %app,
+                    "component trapped: guest call exceeded the CPU budget \
+                     ({MAX_EPOCH_SLICES} epoch slices) — likely an infinite loop \
+                     (M2 runaway-CPU bound). The instance dies; other apps keep serving."
+                );
+                Err(wasmtime::Error::msg(format!(
+                    "guest CPU budget exceeded ({MAX_EPOCH_SLICES} epoch slices): \
+                     the call ran too long without completing (runaway/infinite loop)"
+                )))
+            } else {
+                // Yield to the async executor and extend the deadline by one
+                // more slice.
+                Ok(wasmtime::UpdateDeadline::Yield(EPOCH_DEADLINE_TICKS))
+            }
+        });
         let bindings = App::instantiate_async(&mut store, &component, &linker).await?;
         Ok(Self {
             inner: tokio::sync::Mutex::new(Inner { store, bindings }),
@@ -566,9 +721,21 @@ impl ComponentHandle {
         &self.audited
     }
 
+    /// Re-arm the per-call CPU budget (M2) before each guest call: zero the
+    /// consumed-slice counter and reset the epoch deadline. The budget is
+    /// per-call, not per-instance — a long-lived component handles many
+    /// dispatches over its life, and each one gets the full `MAX_EPOCH_SLICES`
+    /// of guest CPU. Without this reset the counter would accumulate across
+    /// calls and eventually trap a perfectly healthy instance.
+    fn arm_cpu_budget(store: &mut Store<HostState>) {
+        store.data_mut().epoch_slices = 0;
+        store.set_epoch_deadline(EPOCH_DEADLINE_TICKS);
+    }
+
     pub async fn describe(&self) -> anyhow::Result<String> {
         let mut inner = self.inner.lock().await;
         let Inner { store, bindings } = &mut *inner;
+        Self::arm_cpu_budget(store);
         Ok(bindings.tangram_app_guest().call_describe(store).await?)
     }
 
@@ -586,6 +753,7 @@ impl ComponentHandle {
     pub async fn genesis(&self) -> anyhow::Result<Vec<u8>> {
         let mut inner = self.inner.lock().await;
         let Inner { store, bindings } = &mut *inner;
+        Self::arm_cpu_budget(store);
         Ok(bindings.tangram_app_guest().call_genesis(store).await?)
     }
 
@@ -599,6 +767,7 @@ impl ComponentHandle {
     ) -> anyhow::Result<Result<DispatchResult, String>> {
         let mut inner = self.inner.lock().await;
         let Inner { store, bindings } = &mut *inner;
+        Self::arm_cpu_budget(store);
         Ok(bindings
             .tangram_app_guest()
             .call_dispatch(store, action, args_json, doc)
@@ -608,6 +777,7 @@ impl ComponentHandle {
     pub async fn state_json(&self, doc: &[u8]) -> anyhow::Result<String> {
         let mut inner = self.inner.lock().await;
         let Inner { store, bindings } = &mut *inner;
+        Self::arm_cpu_budget(store);
         Ok(bindings
             .tangram_app_guest()
             .call_state_json(store, doc)
@@ -629,6 +799,14 @@ pub fn engine() -> anyhow::Result<Engine> {
         Err(_) => std::path::PathBuf::from("data/tangram-host/wasmtime-cache"),
     };
     let mut config = wasmtime::Config::new();
+    // Epoch-based interruption is the CPU/hang bound (M2): cheap to instrument
+    // (the guest just watches a global counter). Each component store installs
+    // an `epoch_deadline_callback` that yields-and-continues under the per-call
+    // CPU budget (cooperating with async host calls instead of trapping them)
+    // and traps once a single call burns `MAX_EPOCH_SLICES` of pure guest CPU.
+    // The host-wide `EpochTicker` advances the counter; each store sets its own
+    // deadline per call.
+    config.epoch_interruption(true);
     let mut cache = wasmtime::CacheConfig::new();
     cache.with_directory(&cache_dir);
     match wasmtime::Cache::new(cache) {
