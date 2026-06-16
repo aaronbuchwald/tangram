@@ -307,6 +307,58 @@ fn aggregate_route(route_name: &str, path: &str, apps: &[&AppKey], internal_port
     })
 }
 
+/// A CURATED aggregate route: an MCP route whose `mcp.targets` list is exactly
+/// the named `servers` (a SUBSET of the running apps), so a client of this route
+/// can reach those servers' tools and NO others. This is the gateway-level seam
+/// for the Tools/MCP T2 curated subset (the architecture's "a gateway route
+/// curated via `mcp.targets` to exactly the granted set"): a server NOT in
+/// `servers` has no target on the route and is therefore unreachable through it.
+///
+/// `servers` are matched against the running top-level `apps` (case as stored);
+/// an entry naming no running app is skipped (it cannot be a target). Carries the
+/// same loopback-only authorization rule every route does. Tools keep their real
+/// names (single-target-style), so a single granted server's tools are
+/// un-namespaced — the agent loop's [`crate::gateway`]-independent client speaks
+/// the same wire shape either way.
+///
+/// NOTE: the per-AGENT subset is enforced at the egress allow-list today (the
+/// tangram app's call-level `[[calls]]` are the curated universe; the approved
+/// grant narrows component-side). This helper is the gateway arm of the same
+/// idea, ready for a future per-agent MCP plane that mints one curated route per
+/// agent run — it is unit-tested but not yet wired into [`render_config`], which
+/// stays per-app/per-tenant. See `apps/tangram/src/lib.rs` (T2).
+///
+/// Gated to the test build until the per-agent gateway plane wires it in — the
+/// mechanism (subset → `mcp.targets`) is proven by `curated_route_*` tests so a
+/// follow-up can adopt it without re-deriving the render shape.
+#[cfg(test)]
+fn curated_route(
+    route_name: &str,
+    path: &str,
+    servers: &[&str],
+    apps: &[&AppKey],
+    internal_port: u16,
+) -> Value {
+    let mut seen = std::collections::BTreeSet::new();
+    let targets: Vec<Value> = servers
+        .iter()
+        .filter_map(|server| {
+            // Only a RUNNING top-level app can be a target — the grant cannot
+            // open reach to a server that is not on this host.
+            apps.iter()
+                .find(|key| key.tenant.is_none() && key.app == *server)
+                .filter(|key| seen.insert(target_name(&key.app)))
+                .map(|key| mcp_target(&key.route_prefix(), &key.app, internal_port))
+        })
+        .collect();
+    json!({
+        "name": route_name,
+        "policies": loopback_policy(),
+        "matches": [{ "path": { "pathPrefix": path } }],
+        "backends": [{ "mcp": { "targets": targets } }]
+    })
+}
+
 /// One LLM proxy route (ADR-0012): `/llm/<name>` → agentgateway's native `ai`
 /// backend for the provider, with the provider API key injected host-side via
 /// `backendAuth` (`key="env://VAR"` lowered to `"$VAR"`; the gateway child
@@ -1309,6 +1361,55 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(targets.len(), 1);
+    }
+
+    #[test]
+    fn curated_route_lists_only_the_granted_servers() {
+        // Tools/MCP T2 gateway seam: a curated route's `mcp.targets` is EXACTLY
+        // the granted subset — an un-granted running server is NOT a target, so
+        // it is unreachable through this route.
+        let running = [
+            AppKey::top("notes"),
+            AppKey::top("nutrition"),
+            AppKey::top("registry"),
+        ];
+        let apps: Vec<&AppKey> = running.iter().collect();
+        let route = curated_route("agent-7-mcp", "/agents/7/mcp", &["nutrition"], &apps, 19300);
+
+        assert_eq!(route["matches"][0]["path"]["pathPrefix"], "/agents/7/mcp");
+        let targets = route["backends"][0]["mcp"]["targets"]
+            .as_array()
+            .expect("targets");
+        let names: Vec<&str> = targets.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(names, ["nutrition"], "ONLY the granted server is a target");
+        // The host points at the internal listener's /<app>/mcp.
+        assert_eq!(
+            targets[0]["mcp"]["host"],
+            "http://127.0.0.1:19300/nutrition/mcp"
+        );
+        // Loopback-gated like every route.
+        assert!(
+            route["policies"]["authorization"]["rules"][0]
+                .as_str()
+                .unwrap()
+                .contains("source.address")
+        );
+    }
+
+    #[test]
+    fn curated_route_skips_a_server_that_is_not_running() {
+        // A grant naming a server NOT on this host yields no target — the grant
+        // cannot conjure reach to a server that does not exist here.
+        let running = [AppKey::top("notes")];
+        let apps: Vec<&AppKey> = running.iter().collect();
+        let route = curated_route("c", "/c/mcp", &["nutrition", "notes"], &apps, 1);
+        let names: Vec<&str> = route["backends"][0]["mcp"]["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names, ["notes"], "the non-running `nutrition` is dropped");
     }
 
     #[test]

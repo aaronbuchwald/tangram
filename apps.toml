@@ -126,10 +126,50 @@ ui = "apps/tangram/ui/dist"
 # plaintext key never enters the component. `secret` is an env://NAME ref
 # resolved from the host environment (.env is loaded). The injected host must
 # also appear in allow_hosts.
-allow_hosts = ["api.deepseek.com"]
+#
+# Tools/MCP T2 (the host-enforced curated MCP subset). The tangram app's
+# agents may CALL MCP tools, so the component also reaches the other apps' MCP
+# endpoints over loopback (`http://127.0.0.1:8080/<server>/mcp`). The egress is
+# expressed as CALL-LEVEL grants (`[[apps.tangram.calls]]`, ADR-0008): with any
+# `[[calls]]` declared, enforcement defaults to `enforce`, so the reachable set
+# is EXACTLY these declared calls — an MCP endpoint NOT listed here is DENIED at
+# the http-fetch boundary (no parallel enforcement path; the same egress fence
+# every app uses). This is the operator-curated UNIVERSE of grantable servers;
+# the PER-AGENT approved subset (the user's `approve_mcp` grant) narrows within
+# it, enforced component-side in `run_definition`. Add a `[[apps.tangram.calls]]`
+# block per app whose tools you want tangram agents to be able to use; remove one
+# and that server becomes physically unreachable from any agent.
+allow_hosts = ["api.deepseek.com", "127.0.0.1"]
 
-[apps.tangram.inject]
-"api.deepseek.com" = { bearer = true, secret = "env://DEEPSEEK_API_KEY" }
+# The LLM call (system+user+tools → DeepSeek). The key is injected on THIS call
+# (call-level inject replaces the old host-keyed `[apps.tangram.inject]` table,
+# which `[[calls]]` supersedes).
+[[apps.tangram.calls]]
+method = "POST"
+host = "api.deepseek.com"
+path = "/v1/chat/completions"
+inject = { bearer = true, secret = "env://DEEPSEEK_API_KEY" }
+
+# The curated MCP subset: one declared call per app whose tools agents may use.
+# An app's `/<app>/mcp` not listed here is unreachable (denied in enforce mode).
+[[apps.tangram.calls]]
+method = "POST"
+host = "127.0.0.1"
+path = "/nutrition/mcp"
+
+[[apps.tangram.calls]]
+method = "POST"
+host = "127.0.0.1"
+path = "/notes/mcp"
+
+# The AUTHORITY (host:port) the agent tool-loop addresses an app's MCP endpoint
+# under — the loop builds `http://<authority>/<server>/mcp`. Defaults to the
+# host's default bind; set it to match BIND_ADDR if you change the public listen
+# address. The host fence above is on `127.0.0.1` (port-agnostic), so only the
+# port here needs to track BIND_ADDR. NOTE: it is an authority (no scheme) on
+# purpose — a value containing `://` is read by the host as a secret reference.
+[apps.tangram.env]
+TANGRAM_MCP_AUTHORITY = "127.0.0.1:8080"
 
 # Guided Learning (docs/design/guided-learning.md): a Make It Stick-driven
 # tutor — an AI-enabled component. Its ENTIRE outbound-network grant is the

@@ -25,6 +25,7 @@
 use tangram::prelude::*;
 
 mod agents;
+mod mcp_client;
 
 #[model]
 pub struct Vault {
@@ -507,8 +508,10 @@ impl Vault {
 
         let mut ran = Vec::new();
         for (inv, def) in due {
+            // The per-agent approved MCP subset (T2), from the same snapshot.
+            let servers = state.approved_servers_for(&def);
             // Resolve the model response OUTSIDE the lock, then commit.
-            match run_definition(&def, &inv.prompt).await {
+            match run_definition(&def, &inv.prompt, &servers).await {
                 Ok(output) => {
                     ctx.mutate("tick_agents", |m| {
                         m.append_invocation_output(&inv, &def, &output, now_ms(), STATUS_RAN);
@@ -544,7 +547,11 @@ impl Vault {
             .find(|d| d.name.to_ascii_lowercase() == needle)
             .ok_or_else(|| format!("no agent or skill named {name:?} in the vault"))?;
 
-        let output = run_definition(&def, "Run now.").await?;
+        // The per-agent approved MCP subset (T2): only servers the user granted
+        // (and the grant is fresh) get a tool plane. Resolved from a snapshot
+        // before the (lock-free) run.
+        let servers = state.approved_servers_for(&def);
+        let output = run_definition(&def, "Run now.", &servers).await?;
         ctx.mutate("run_agent", |m| {
             m.append_manual_output(&def, &output, now_ms());
         })
@@ -665,6 +672,34 @@ impl Vault {
             .as_ref()?
             .iter()
             .find(|g| g.agent.to_ascii_lowercase() == needle)
+    }
+
+    /// The MCP servers an agent definition may CURRENTLY use in a run: the
+    /// servers it requests, intersected with a FRESH `approved` grant (Tools/MCP
+    /// T2 — the grant is the thing that opens the tool plane). Returns empty
+    /// when the agent requests nothing, has no grant, the grant is denied, or
+    /// the grant is STALE (the def's request changed since the decision — the
+    /// same staleness rule [`Vault::mcp_status`] surfaces). Canonicalized order
+    /// (the grant stores canonical names). This is the per-agent subset the
+    /// tool-loop offers; an un-granted server never appears here, so the loop
+    /// never constructs a client for it.
+    fn approved_servers_for(&self, def: &agents::AgentDef) -> Vec<String> {
+        if def.kind != "agent" || def.mcp_servers.is_empty() {
+            return Vec::new();
+        }
+        let live_hash = agents::mcp_request_hash(&def.mcp_servers);
+        match self.grant_for(&def.name) {
+            Some(g) if g.status == STATUS_APPROVED && g.requested_hash == live_hash => {
+                // Intersect with the live request so a server the def no longer
+                // asks for can never sneak through a stale-but-same-hash grant.
+                g.approved
+                    .iter()
+                    .filter(|s| def.mcp_servers.contains(s))
+                    .cloned()
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The live (canonical) MCP-server request for the `kind: agent` definition
@@ -871,30 +906,110 @@ fn now_ms() -> i64 {
     tangram::time::now_ms()
 }
 
-/// The DeepSeek chat-completions endpoint. Overridable via `TANGRAM_AGENT_LLM_URL`
-/// so a test/CI run can point the call at a local recorded-fixture server (no
-/// live key, no real egress).
+/// The DeepSeek chat-completions endpoint (the default LLM target).
 const DEEPSEEK_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 
+/// The chat-completions URL the agent run POSTs to. Default: DeepSeek. A
+/// CI/test run points the call at a local fixture server via
+/// `TANGRAM_AGENT_LLM_AUTHORITY` — a scheme-free `host:port` (the loop builds
+/// `http://<authority>/v1/chat/completions`). It is an authority, not a full
+/// URL, for the same reason as `TANGRAM_MCP_AUTHORITY`: an app-`env` value
+/// containing `://` is read by the host as a `scheme://locator` secret
+/// reference and an unknown scheme blanks it. When the fixture is loopback, the
+/// declared `[[apps.tangram.calls]]` must permit `POST 127.0.0.1
+/// /v1/chat/completions` (the live config grants only the real DeepSeek host).
 fn agent_llm_url() -> String {
-    std::env::var("TANGRAM_AGENT_LLM_URL").unwrap_or_else(|_| DEEPSEEK_URL.to_string())
+    match std::env::var("TANGRAM_AGENT_LLM_AUTHORITY")
+        .ok()
+        .filter(|a| !a.trim().is_empty())
+    {
+        Some(authority) => format!("http://{authority}/v1/chat/completions"),
+        None => DEEPSEEK_URL.to_string(),
+    }
 }
 
-/// Run one agent definition with a `prompt`: issue a BARE chat-completions call
-/// to DeepSeek (system = the definition's instructions, user = the invocation's
-/// `prompt`) and return the assistant's text. The request carries NO API key —
-/// the HOST injects the DeepSeek credential at the component's http-fetch egress
-/// boundary (ADR-0005), so the key never enters the component's address space.
-async fn run_definition(def: &agents::AgentDef, prompt: &str) -> Result<String, String> {
+/// The AUTHORITY (`host:port`) the agent tool-loop addresses an app's MCP
+/// endpoint under — the loop builds `http://<authority>/<server>/mcp`. The
+/// host's public listener is the same origin the shell is served from; the
+/// component reaches it over loopback (always plain HTTP). Overridable via
+/// `TANGRAM_MCP_AUTHORITY` (set in `[apps.tangram.env]`) so the operator pins
+/// the host's bind address, and a test can point it at a fixture. Default
+/// `127.0.0.1:8080` (the host's default bind).
+///
+/// It is an AUTHORITY, not a full URL, on purpose: a spec/env value containing
+/// `://` is interpreted by the host secret-resolver as a `scheme://locator`
+/// reference (an unknown scheme resolves to empty), so a `http://…` literal
+/// would be silently blanked. The loop supplies the `http://` scheme.
+///
+/// IMPORTANT (host enforcement): the egress to `<authority>/<server>/mcp` is
+/// itself gated by the tangram app's `allow_hosts` + call-level `[[apps.tangram.calls]]`
+/// grant — an MCP endpoint the operator did NOT declare is denied at the
+/// `http-fetch` boundary (`enforcement = "enforce"`). So the universe of
+/// reachable servers is the operator's declared call list; the PER-AGENT
+/// approved subset (the `servers` arg below) narrows within it. See
+/// `mcp_client.rs` and the apps.toml `[[apps.tangram.calls]]` block.
+#[cfg(not(test))]
+const DEFAULT_MCP_AUTHORITY: &str = "127.0.0.1:8080";
+
+#[cfg(not(test))]
+fn agent_mcp_base() -> String {
+    let authority = std::env::var("TANGRAM_MCP_AUTHORITY")
+        .ok()
+        .filter(|a| !a.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_MCP_AUTHORITY.to_string());
+    format!("http://{authority}")
+}
+
+/// The maximum number of model round-trips in one agent run (the tool-loop
+/// cap). Each iteration is one DeepSeek call; tool calls in between do not
+/// count against this — they advance toward a final answer. A run that never
+/// settles is stopped with a clear note rather than looping unbounded.
+#[cfg(not(test))]
+const MAX_TOOL_ITERATIONS: usize = 6;
+
+/// Run one agent definition with a `prompt` (Tools/MCP T2). The system message
+/// is the definition's instructions; the user message is `prompt`. `servers` is
+/// the PER-AGENT approved MCP subset (from [`Vault::approved_servers_for`]) —
+/// only these servers' tools are offered, and the loop never constructs a
+/// client for a server outside this list, so an un-granted server is never
+/// reached. When `servers` is empty this is exactly the prior bare call.
+///
+/// The request carries NO API key — the HOST injects the DeepSeek credential at
+/// the component's http-fetch egress boundary (ADR-0005), so the key never
+/// enters the component's address space.
+async fn run_definition(
+    def: &agents::AgentDef,
+    prompt: &str,
+    servers: &[String],
+) -> Result<String, String> {
+    let messages = vec![
+        serde_json::json!({ "role": "system", "content": def.instructions }),
+        serde_json::json!({ "role": "user", "content": prompt }),
+    ];
+    if servers.is_empty() {
+        // No approved tools → the prior bare chat-completions call (one round).
+        let message = post_chat(&def.model, &messages, &[]).await?;
+        return message_text(&message);
+    }
+    run_tool_loop(def, messages, servers).await
+}
+
+/// POST one OpenAI-style chat-completions request and return `choices[0].message`
+/// (the assistant turn, which may carry `tool_calls`). `tools` is the
+/// function-tool schema list (empty ⇒ no `tools`/`tool_choice` keys, identical
+/// to the prior bare call).
+async fn post_chat(
+    model: &str,
+    messages: &[serde_json::Value],
+    tools: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
     use tangram::http;
 
-    let body = serde_json::json!({
-        "model": def.model,
-        "messages": [
-            { "role": "system", "content": def.instructions },
-            { "role": "user", "content": prompt },
-        ],
-    });
+    let mut body = serde_json::json!({ "model": model, "messages": messages });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools.to_vec());
+        body["tool_choice"] = serde_json::json!("auto");
+    }
 
     let req = http::Request::post(agent_llm_url()).json(&body);
     let resp = http::fetch(req).await.map_err(|e| e.to_string())?;
@@ -905,16 +1020,174 @@ async fn run_definition(def: &agents::AgentDef, prompt: &str) -> Result<String, 
             resp.status
         ));
     }
-    // OpenAI-shaped response: choices[0].message.content.
     payload
         .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|choices| choices.first())
         .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
+        .cloned()
+        .ok_or_else(|| format!("DeepSeek response had no message: {payload}"))
+}
+
+/// The assistant text from a chat-completions `message` (the `content` field),
+/// or an error if it is absent.
+fn message_text(message: &serde_json::Value) -> Result<String, String> {
+    message
+        .get("content")
         .and_then(|t| t.as_str())
         .map(str::to_string)
-        .ok_or_else(|| format!("DeepSeek response had no message content: {payload}"))
+        .ok_or_else(|| format!("DeepSeek response had no message content: {message}"))
+}
+
+/// The tool-calling loop over the agent's APPROVED MCP servers (T2). Lists each
+/// approved server's tools, offers them to DeepSeek, and on `tool_calls`
+/// executes each via MCP `tools/call` (routing the namespaced tool name back to
+/// its server), feeds the results back, and re-asks — capped at
+/// [`MAX_TOOL_ITERATIONS`] model round-trips. Returns the final answer with a
+/// compact tool-call trace appended. A failure listing one server's tools is
+/// non-fatal (that server is dropped, the run continues with the rest).
+#[cfg(not(test))]
+async fn run_tool_loop(
+    def: &agents::AgentDef,
+    mut messages: Vec<serde_json::Value>,
+    servers: &[String],
+) -> Result<String, String> {
+    use std::collections::BTreeMap;
+
+    let base = agent_mcp_base();
+    let namespaced = servers.len() > 1;
+
+    // One client per approved server; list its tools. A server that fails to
+    // list is skipped (logged), not fatal.
+    let mut clients: BTreeMap<String, mcp_client::McpClient> = BTreeMap::new();
+    let mut openai_tools: Vec<serde_json::Value> = Vec::new();
+    let mut trace: Vec<String> = Vec::new();
+    for server in servers {
+        let mut client = mcp_client::McpClient::new(&base, server);
+        match client.list_tools().await {
+            Ok(tools) => {
+                openai_tools.extend(mcp_client::tools_to_openai(server, &tools, namespaced));
+                clients.insert(server.clone(), client);
+            }
+            // A server that fails to list (denied egress, unreachable, …) is
+            // dropped from this run rather than aborting it — the trace records
+            // it so the operator sees which server was unavailable.
+            Err(e) => trace.push(format!("{server} (unavailable): {}", truncate(&e, 160))),
+        }
+    }
+
+    let default_server = servers.first().cloned().unwrap_or_default();
+
+    for _ in 0..MAX_TOOL_ITERATIONS {
+        let message = post_chat(&def.model, &messages, &openai_tools).await?;
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // No tool calls → a final answer.
+        if tool_calls.is_empty() {
+            let reply = message_text(&message)?;
+            return Ok(with_trace(reply, &trace));
+        }
+
+        // Record the assistant turn verbatim (content may be null), then execute
+        // each requested call and append a `tool` result message.
+        messages.push(message.clone());
+        for call in &tool_calls {
+            let call_id = call.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            let function = call.get("function");
+            let raw_name = function
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let args: serde_json::Value = function
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let (server, tool) = mcp_client::split_tool_name(raw_name, &default_server);
+            let result = match clients.get_mut(server) {
+                Some(client) => client
+                    .call_tool(tool, args.clone())
+                    .await
+                    .unwrap_or_else(|e| mcp_client::McpCallResult {
+                        text: format!("[tool error] {e}"),
+                        is_error: true,
+                    }),
+                // The model named a server outside the approved set (it cannot,
+                // since we only offered approved tools — but defend anyway): the
+                // un-granted server is NOT reached.
+                None => mcp_client::McpCallResult {
+                    text: format!("[tool error] tool {raw_name:?} is not in the approved set"),
+                    is_error: true,
+                },
+            };
+            trace.push(format!(
+                "{}{tool}{} → {}",
+                if server.is_empty() {
+                    String::new()
+                } else {
+                    format!("{server}.")
+                },
+                if result.is_error { " [error]" } else { "" },
+                truncate(&result.text, 200)
+            ));
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": raw_name,
+                "content": result.text,
+            }));
+        }
+    }
+
+    // Hit the iteration cap without a final answer.
+    Ok(with_trace(
+        "(stopped after the maximum number of tool steps without a final answer)".to_string(),
+        &trace,
+    ))
+}
+
+/// In tests the loop is exercised only at the pure-helper level (no live MCP
+/// server / no `http-fetch`); the live loop is `#[cfg(not(test))]` so the test
+/// build stays I/O-free. `run_definition` with an empty `servers` (the common
+/// path) does not call this.
+#[cfg(test)]
+async fn run_tool_loop(
+    _def: &agents::AgentDef,
+    _messages: Vec<serde_json::Value>,
+    _servers: &[String],
+) -> Result<String, String> {
+    Err("tool-loop is not exercised in unit tests (needs a live MCP server)".to_string())
+}
+
+/// Append a compact tool-call trace to the answer (one line per call), or the
+/// answer unchanged when no tools were called.
+#[cfg(not(test))]
+fn with_trace(reply: String, trace: &[String]) -> String {
+    if trace.is_empty() {
+        return reply;
+    }
+    let lines = trace
+        .iter()
+        .map(|t| format!("- {t}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{reply}\n\n_Tools used:_\n{lines}")
+}
+
+/// Truncate a string to `max` chars with an ellipsis (for the compact trace).
+#[cfg(not(test))]
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max).collect();
+    format!("{truncated}…")
 }
 
 /// The seeded welcome note — a deterministic genesis so a fresh vault is not
@@ -1297,6 +1570,115 @@ mod tests {
         let st = v.mcp_status();
         assert_eq!(st[0].status, "denied");
         assert!(st[0].approved.is_empty());
+    }
+
+    // ── Tools/MCP T2: the per-agent approved subset offered to the tool-loop ──
+
+    /// Resolve the def for the named agent in a vault (test helper).
+    fn def_of(v: &Vault, name: &str) -> agents::AgentDef {
+        v.files
+            .iter()
+            .filter_map(|f| agents::parse_agent(&f.body))
+            .find(|d| d.name == name)
+            .expect("agent def present")
+    }
+
+    #[test]
+    fn approved_servers_offered_only_after_a_fresh_grant() {
+        let mut v = vault_with_agent("planner", &["nutrition", "notes"]);
+        let def = def_of(&v, "planner");
+        // Pending (no decision) → NOTHING is offered.
+        assert!(
+            v.approved_servers_for(&def).is_empty(),
+            "no grant ⇒ no servers offered"
+        );
+
+        // Approve → exactly the approved (canonical) set is offered.
+        let hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+        assert_eq!(
+            v.approved_servers_for(&def),
+            vec!["notes", "nutrition"],
+            "approved ⇒ the granted set is the tool plane"
+        );
+    }
+
+    #[test]
+    fn denied_grant_offers_no_servers() {
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        v.deny_mcp("planner".into()).unwrap();
+        let def = def_of(&v, "planner");
+        assert!(
+            v.approved_servers_for(&def).is_empty(),
+            "denied ⇒ un-granted ⇒ unreachable (no server offered)"
+        );
+    }
+
+    #[test]
+    fn an_ungranted_server_is_never_offered_even_after_an_edit() {
+        // Approve {nutrition}; then edit the def to ALSO request {notes}. The
+        // grant is now STALE (hash changed) → the whole tool plane closes until
+        // re-approval. Critically, `notes` (never approved) is never offered.
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        let hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+
+        let file = v
+            .files
+            .iter()
+            .find(|f| f.path == "agents/planner.md")
+            .unwrap()
+            .clone();
+        let edited = file.body.replace(
+            "mcp_servers: [nutrition]",
+            "mcp_servers: [nutrition, notes]",
+        );
+        v.write_file(file.id, edited).unwrap();
+
+        let def = def_of(&v, "planner");
+        assert!(
+            v.approved_servers_for(&def).is_empty(),
+            "a stale grant closes the tool plane — notes was never granted, nutrition is now stale"
+        );
+
+        // Re-approve the NEW request → both are offered.
+        let new_hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), new_hash).unwrap();
+        assert_eq!(
+            v.approved_servers_for(&def_of(&v, "planner")),
+            vec!["notes", "nutrition"]
+        );
+    }
+
+    #[test]
+    fn approved_subset_is_what_the_loop_offers_to_the_model() {
+        // The loop offers ONLY the approved servers' tools. Simulate the
+        // conversion the loop does and assert an un-granted server's tools never
+        // appear in the function-tool list handed to the model.
+        let mut v = vault_with_agent("planner", &["nutrition"]);
+        let hash = v.mcp_status()[0].requested_hash.clone();
+        v.approve_mcp("planner".into(), hash).unwrap();
+        let servers = v.approved_servers_for(&def_of(&v, "planner"));
+        assert_eq!(servers, vec!["nutrition"]);
+
+        // Pretend each approved server listed one tool; build the offer.
+        let mut offered: Vec<serde_json::Value> = Vec::new();
+        let namespaced = servers.len() > 1;
+        for server in &servers {
+            let tools = vec![mcp_client::McpTool {
+                name: format!("{server}_tool"),
+                description: None,
+                input_schema: None,
+            }];
+            offered.extend(mcp_client::tools_to_openai(server, &tools, namespaced));
+        }
+        let names: Vec<&str> = offered
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["nutrition_tool"]);
+        // The un-granted `notes` server contributes NOTHING.
+        assert!(!names.iter().any(|n| n.contains("notes")));
     }
 
     #[test]
