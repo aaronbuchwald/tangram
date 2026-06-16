@@ -20,7 +20,14 @@ export interface HomeTab {
   id: string;
 }
 
-export type Tab = NoteTab | AppTab | HomeTab;
+// The Agents view (P2): a single-instance tab rendering the sortable/filterable
+// table of every indexed agent/skill. Like home, it carries no target id.
+export interface AgentsTab {
+  kind: "agents";
+  id: string;
+}
+
+export type Tab = NoteTab | AppTab | HomeTab | AgentsTab;
 
 let counter = 0;
 const nextId = () => `tab-${++counter}`;
@@ -72,6 +79,14 @@ export class TabStore {
     this.openOrFocus(
       (t) => t.kind === "home",
       (): HomeTab => ({ kind: "home", id: nextId() }),
+    );
+  }
+
+  /** Open (or focus, if already open) the Agents view tab. */
+  openAgents() {
+    this.openOrFocus(
+      (t) => t.kind === "agents",
+      (): AgentsTab => ({ kind: "agents", id: nextId() }),
     );
   }
 

@@ -13,8 +13,22 @@ import {
   type MdFile,
   type VaultState,
 } from "./api";
+import { isAgentPopupOpen, openAgentPopup } from "./agentPopup";
+import {
+  DEFAULT_MODEL,
+  buildAgentIndex,
+  type AgentDef,
+  type AgentIndex,
+} from "./agents";
+import { renderAgentsView } from "./agentsView";
+import {
+  type CreatedAgent,
+  isCreateAgentPopupOpen,
+  openCreateAgentPopup,
+} from "./createAgentPopup";
 import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
+import { CREATE_WORD } from "./slashTrigger";
 import { registry } from "./manage";
 import { confirmAction, promptName } from "./modal";
 import { TabStore, type Tab } from "./tabs";
@@ -60,6 +74,11 @@ function displayFileName(name: string): string {
 let files: MdFile[] = [];
 const filesById = new Map<string, MdFile>();
 let fleet: FleetApp[] = [];
+// The agent/skill index, rebuilt over the vault on every state frame. The
+// editor's `/<name>` resolver reads through this live reference (a stable
+// closure), so a freshly-created definition becomes invocable on the next
+// vault state without re-mounting the editor.
+let agentIndex: AgentIndex = buildAgentIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -149,6 +168,12 @@ root.innerHTML = `
             <div class="applist" id="applist"></div>
           </div>
         </section>
+        <section class="side-section">
+          <div class="side-head" id="agents-head" title="Open the Agents view">
+            <span class="micro">Agents</span>
+            <span class="agents-badge" id="agents-count-badge">0</span>
+          </div>
+        </section>
         <div class="sidebar-resizer" id="sidebar-resizer"></div>
       </aside>
       <main class="main">
@@ -194,6 +219,13 @@ document.getElementById("apps-head")!.addEventListener("click", (e) => {
   if (collapsedSections.has("apps")) collapsedSections.delete("apps");
   else collapsedSections.add("apps");
   applySectionState();
+});
+
+// The Agents section header is an entry point, not a collapsible list — clicking
+// it opens the Agents table tab (the sortable/filterable view; P2). The badge
+// shows the indexed count and updates on each vault state.
+document.getElementById("agents-head")!.addEventListener("click", () => {
+  tabs.openAgents();
 });
 
 // Drag-to-resize the sidebar
@@ -379,6 +411,16 @@ function renderApps() {
   }
 }
 
+// Reflect the indexed agent/skill count in the sidebar "Agents" header badge,
+// and mark the header active when the Agents tab is the active one (mirrors the
+// vault/app row active styling).
+function renderAgentsBadge() {
+  const badge = document.getElementById("agents-count-badge");
+  if (badge) badge.textContent = String(agentIndex.all.length);
+  const head = document.getElementById("agents-head");
+  if (head) head.classList.toggle("active", tabs.active?.kind === "agents");
+}
+
 // Run a registry mutation, then refresh the fleet so the change reflects in
 // the sidebar (and /api/fleet) without waiting for the 5s poll. Errors (most
 // commonly a missing/invalid token → 401) surface as an alert.
@@ -396,6 +438,7 @@ async function manageApp(action: () => Promise<unknown>) {
 
 function tabTitle(tab: Tab): string {
   if (tab.kind === "home") return "Tangram";
+  if (tab.kind === "agents") return "Agents";
   if (tab.kind === "app") return displayName(tab.app);
   const file = filesById.get(tab.fileId);
   if (!file) return "(Missing)";
@@ -496,6 +539,16 @@ function renderContent() {
     renderHome();
     return;
   }
+  if (tab.kind === "agents") {
+    // The Agents view reads through the live index (rebuilt on each vault
+    // state); onVaultState re-renders it so new/edited agents appear without a
+    // manual refresh. Row actions open the source note / the bound run popup.
+    renderAgentsView(contentEl, agentIndex, {
+      openNote: (fileId) => tabs.openNote(fileId),
+      fileById: (fileId) => filesById.get(fileId),
+    });
+    return;
+  }
   if (tab.kind === "app") {
     const frame = document.createElement("iframe");
     frame.className = "app-frame";
@@ -581,14 +634,83 @@ function renderNoteTab(fileId: string) {
     fileId,
     editor: undefined as unknown as MdEditor,
   };
-  const editor = new MdEditor(editorHost, file.body, (doc) => {
-    if (state.saveTimer) window.clearTimeout(state.saveTimer);
-    state.saveTimer = window.setTimeout(() => {
-      editor.markWritten(doc); // expect this body to echo back over SSE
-      void vault.writeFile(fileId, doc).catch((e) => console.error(e));
-      maybeRenameFromHeading(fileId, doc);
-    }, 400);
-  });
+  const editor = new MdEditor(
+    editorHost,
+    file.body,
+    (doc) => {
+      if (state.saveTimer) window.clearTimeout(state.saveTimer);
+      state.saveTimer = window.setTimeout(() => {
+        editor.markWritten(doc); // expect this body to echo back over SSE
+        void vault.writeFile(fileId, doc).catch((e) => console.error(e));
+        maybeRenameFromHeading(fileId, doc);
+      }, 400);
+    },
+    // Inline `/` trigger (P1, +P1 fixes): the editor hands us the kind, the
+    // word, and the matched token's [from, to). `/agent` opens the CREATE popup;
+    // on Create we (Fix 2) swap the `/agent` token for `/<new-name>` and chain
+    // straight into the RUN popup bound to the new def. A resolved `/<name>`
+    // opens the RUN popup bound to that def; on Save we replace the token with
+    // the prompt+response block (the debounced onChange persists it), on
+    // Exit/dismiss we just refocus (the `/<name>` reference is left untouched).
+    (kind, word, from, to) => {
+      // Open the RUN popup for `def`, with its `/<name>` token at [tokFrom,
+      // tokTo). Save swaps that token for the completion block (Fix 3 backlink);
+      // Exit/dismiss leaves the live `/<name>` reference in place.
+      const openRun = (def: AgentDef, tokFrom: number, tokTo: number) => {
+        openAgentPopup(def, {
+          onSave: (block) => editor.replaceRange(tokFrom, tokTo, block),
+          onClose: () => editor.focus(),
+        });
+      };
+
+      if (kind === "create") {
+        openCreateAgentPopup({
+          isNameTaken: (name) => agentIndex.has(name),
+          // Fix 2: keep the reference inline as `/<new-name>` and chain into its
+          // run popup, bound to the just-saved fields (works before the vault
+          // round-trip rebuilds the index).
+          onCreated: (created: CreatedAgent) => {
+            const replacement = `/${created.name}`;
+            editor.replaceRange(from, to, replacement);
+            const def: AgentDef = {
+              kind: created.kind,
+              name: created.name,
+              model: created.model || DEFAULT_MODEL,
+              labels: created.labels,
+              meta: {},
+              version: null,
+              instructions: created.instructions,
+              fileId: "",
+              path: created.path,
+            };
+            openRun(def, from, from + replacement.length);
+          },
+          onClose: () => editor.focus(),
+        });
+        return;
+      }
+      const def = agentIndex.findAgent(word);
+      if (!def) {
+        editor.focus();
+        return;
+      }
+      openRun(def, from, to);
+    },
+    // The `/<name>` resolver reads through the live index (rebuilt each vault
+    // state), so newly-created definitions resolve without re-mounting.
+    (word) => agentIndex.findAgent(word) !== null,
+    // Auto-open guard (Fix 1): don't re-pop the create popup while either agent
+    // popup (create or run) is already up.
+    () => isCreateAgentPopupOpen() || isAgentPopupOpen(),
+    // Live candidates for the `/<partial>` autocomplete popup: every indexed
+    // agent/skill (kind from its def) plus the reserved `agent` create command.
+    // Reads through the live index (rebuilt each vault state) so new defs show
+    // up without re-mounting — same pattern as the resolver above.
+    () => [
+      { name: CREATE_WORD, kind: "create" as const },
+      ...agentIndex.all.map((d) => ({ name: d.name, kind: d.kind })),
+    ],
+  );
   state.editor = editor;
 
   wrap.appendChild(editorHost);
@@ -835,8 +957,13 @@ function onVaultState(state: VaultState) {
   files = state.files ?? [];
   filesById.clear();
   for (const f of files) filesById.set(f.id, f);
+  // Rebuild the agent/skill index so `/<name>` resolution reflects the current
+  // vault (newly-created definitions become invocable here). The editor's
+  // resolver closes over `agentIndex`, so no editor re-mount is needed.
+  agentIndex = buildAgentIndex(files);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
+  renderAgentsBadge();
   // A header-driven rename re-derives the active tab's title from the new path,
   // so refresh the tab strip too (otherwise it would go stale after a rename).
   renderTabs();
@@ -874,6 +1001,7 @@ tabs.subscribe(() => {
   renderContent();
   renderTree();
   renderApps();
+  renderAgentsBadge();
 });
 
 // ── boot ─────────────────────────────────────────────────────────────────────
@@ -888,6 +1016,7 @@ function startShell() {
   renderContent();
   renderTree();
   renderApps();
+  renderAgentsBadge();
 
   subscribeVault(onVaultState);
   void refreshFleet();
