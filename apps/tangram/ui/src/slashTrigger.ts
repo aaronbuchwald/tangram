@@ -165,6 +165,61 @@ export function slashTrigger(
   return Prec.highest(keymap.of([binding]));
 }
 
+/** True if the char at `idx` (or end-of-doc) is a token boundary — used by the
+ *  auto-open listener to require a *complete* `/agent` token (so `/agentic`
+ *  doesn't fire while it's still being typed). */
+function boundaryAfter(doc: string, idx: number): boolean {
+  if (idx >= doc.length) return true;
+  return /\s/.test(doc[idx]);
+}
+
+/**
+ * Auto-open extension (Fix 1): an updateListener that fires `onTrigger("create",
+ * …)` the instant the caret lands immediately after a *complete* `/agent` token
+ * — no Enter or click required. "Complete" means the char after the caret is a
+ * word boundary or end-of-line, so `/agentic` (still being typed) never fires.
+ *
+ * It is `create`-only by design: a `/<name>` run popup would be intrusive to
+ * pop the moment the caret brushes the token, whereas `/agent` is an explicit
+ * "I want to make one" gesture. Re-fire is guarded two ways:
+ *   - `isOpen()` — never fire while a popup is already up; and
+ *   - a per-token-instance latch keyed on the token's [from,to) range, so it
+ *     fires once per `/agent` occurrence and won't re-fire as the caret moves
+ *     around within/after the same token.
+ * The latch disarms whenever the caret leaves the token (or the token's range
+ * shifts via an edit), so a later, distinct `/agent` still auto-opens.
+ */
+export function slashAutoOpen(
+  onTrigger: SlashTriggerHandler,
+  isOpen: () => boolean,
+) {
+  // The [from,to) of the token instance we last auto-fired for. Null = armed.
+  let firedFor: { from: number; to: number } | null = null;
+  return EditorView.updateListener.of((update: ViewUpdate) => {
+    // Only react to caret moves / edits, not pure viewport scrolls.
+    if (!update.docChanged && !update.selectionSet) return;
+    const sel = update.state.selection.main;
+    if (!sel.empty) {
+      firedFor = null;
+      return;
+    }
+    const doc = update.state.doc.toString();
+    const hit = slashTokenAt(doc, sel.head);
+    // Caret not on an `/agent` token → disarm so the next one can fire.
+    if (!hit || hit.word.toLowerCase() !== CREATE_WORD) {
+      firedFor = null;
+      return;
+    }
+    // The caret must sit at the END of a complete token (boundary/EOL after).
+    if (sel.head !== hit.to || !boundaryAfter(doc, hit.to)) return;
+    // Already fired for this exact token instance, or a popup is open → skip.
+    if (firedFor && firedFor.from === hit.from && firedFor.to === hit.to) return;
+    if (isOpen()) return;
+    firedFor = { from: hit.from, to: hit.to };
+    onTrigger("create", hit.word, hit.from, hit.to);
+  });
+}
+
 /**
  * mousedown handler: clicking a highlighted `/agent` or `/<name>` token
  * re-fires its trigger (reopen after a dismiss). Only `/agent` and resolvable

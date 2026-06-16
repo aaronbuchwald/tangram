@@ -15,24 +15,45 @@
 
 import { vault } from "./api";
 
+/** The kind of definition the create popup just saved. */
+export type Kind = "agent" | "skill";
+
+/** Details of the agent/skill the create popup just saved (Fix 2): enough for
+ *  the caller to swap the `/agent` token for `/<name>` AND build the new def's
+ *  run popup immediately — without waiting for the vault-state round-trip that
+ *  rebuilds the index. Mirrors the fields `parseAgent` would recover. */
+export interface CreatedAgent {
+  name: string;
+  kind: Kind;
+  model: string;
+  labels: string[];
+  /** The system prompt / task body (trimmed) — the run popup's `instructions`. */
+  instructions: string;
+  /** Where the def was saved (so the caller can locate/open the note). */
+  path: string;
+}
+
 /** Constraints/hooks the create popup needs from the caller. */
 export interface CreateAgentOptions {
   /** True if `name` is already taken in the index (case-insensitive). */
   isNameTaken: (name: string) => boolean;
-  /** Called after a successful create; closes/refocuses the editor. The popup
-   *  passes the document text that should replace the triggering `/agent`
-   *  token (P1 strips it — passes the empty string). */
-  onCreated: (replacement: string) => void;
+  /** Called after a successful create with the new def's name+kind (Fix 2). The
+   *  caller replaces the triggering `/agent` token with `/<name>` and opens the
+   *  run popup bound to the new def so the user can prompt it right away. */
+  onCreated: (created: CreatedAgent) => void;
   /** Close with no document change (Cancel / dismiss); refocus the editor. */
   onClose: () => void;
 }
-
-type Kind = "agent" | "skill";
 
 // Only one popup at a time (shared single-instance discipline with the run
 // popup is unnecessary — each is its own overlay — but we still close the
 // previous create popup if one is somehow open).
 let current: { dismiss: () => void } | null = null;
+
+/** True while the create popup is open (used by the editor's auto-open guard). */
+export function isCreateAgentPopupOpen(): boolean {
+  return current !== null;
+}
 
 // A name must be a path-safe basename: no slashes (the path is derived), no
 // path-hostile/control/wildcard chars, no `.`/`..`.
@@ -247,9 +268,18 @@ export function openCreateAgentPopup(opts: CreateAgentOptions): void {
       createBtn.textContent = "Create";
       return;
     }
-    // Done: strip the triggering `/agent` token (cleanest) and close.
+    // Done: hand the new def back so the caller swaps the `/agent` token for
+    // `/<name>` and chains into its run popup (Fix 2) — bound to these exact
+    // fields, so it works before the index round-trip rebuilds. Close first.
     teardown();
-    opts.onCreated("");
+    opts.onCreated({
+      name,
+      kind,
+      model,
+      labels,
+      instructions: instructions.trim(),
+      path,
+    });
   }
 
   nameInput.addEventListener("input", () => refresh());

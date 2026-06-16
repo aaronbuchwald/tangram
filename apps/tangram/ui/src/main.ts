@@ -13,9 +13,18 @@ import {
   type MdFile,
   type VaultState,
 } from "./api";
-import { openAgentPopup } from "./agentPopup";
-import { buildAgentIndex, type AgentIndex } from "./agents";
-import { openCreateAgentPopup } from "./createAgentPopup";
+import { isAgentPopupOpen, openAgentPopup } from "./agentPopup";
+import {
+  DEFAULT_MODEL,
+  buildAgentIndex,
+  type AgentDef,
+  type AgentIndex,
+} from "./agents";
+import {
+  type CreatedAgent,
+  isCreateAgentPopupOpen,
+  openCreateAgentPopup,
+} from "./createAgentPopup";
 import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
 import { registry } from "./manage";
@@ -600,17 +609,46 @@ function renderNoteTab(fileId: string) {
         maybeRenameFromHeading(fileId, doc);
       }, 400);
     },
-    // Inline `/` trigger (P1): the editor hands us the kind, the word, and the
-    // matched token's [from, to). `/agent` opens the CREATE popup (save a new
-    // definition to the vault, then strip the `/agent` token). A resolved
-    // `/<name>` opens the RUN popup bound to that def; on Save we replace the
-    // token with the prompt+response block (the debounced onChange persists it),
-    // on Exit/dismiss we just refocus (the token is left untouched).
+    // Inline `/` trigger (P1, +P1 fixes): the editor hands us the kind, the
+    // word, and the matched token's [from, to). `/agent` opens the CREATE popup;
+    // on Create we (Fix 2) swap the `/agent` token for `/<new-name>` and chain
+    // straight into the RUN popup bound to the new def. A resolved `/<name>`
+    // opens the RUN popup bound to that def; on Save we replace the token with
+    // the prompt+response block (the debounced onChange persists it), on
+    // Exit/dismiss we just refocus (the `/<name>` reference is left untouched).
     (kind, word, from, to) => {
+      // Open the RUN popup for `def`, with its `/<name>` token at [tokFrom,
+      // tokTo). Save swaps that token for the completion block (Fix 3 backlink);
+      // Exit/dismiss leaves the live `/<name>` reference in place.
+      const openRun = (def: AgentDef, tokFrom: number, tokTo: number) => {
+        openAgentPopup(def, {
+          onSave: (block) => editor.replaceRange(tokFrom, tokTo, block),
+          onClose: () => editor.focus(),
+        });
+      };
+
       if (kind === "create") {
         openCreateAgentPopup({
           isNameTaken: (name) => agentIndex.has(name),
-          onCreated: (replacement) => editor.replaceRange(from, to, replacement),
+          // Fix 2: keep the reference inline as `/<new-name>` and chain into its
+          // run popup, bound to the just-saved fields (works before the vault
+          // round-trip rebuilds the index).
+          onCreated: (created: CreatedAgent) => {
+            const replacement = `/${created.name}`;
+            editor.replaceRange(from, to, replacement);
+            const def: AgentDef = {
+              kind: created.kind,
+              name: created.name,
+              model: created.model || DEFAULT_MODEL,
+              labels: created.labels,
+              meta: {},
+              version: null,
+              instructions: created.instructions,
+              fileId: "",
+              path: created.path,
+            };
+            openRun(def, from, from + replacement.length);
+          },
           onClose: () => editor.focus(),
         });
         return;
@@ -620,14 +658,14 @@ function renderNoteTab(fileId: string) {
         editor.focus();
         return;
       }
-      openAgentPopup(def, {
-        onSave: (block) => editor.replaceRange(from, to, block),
-        onClose: () => editor.focus(),
-      });
+      openRun(def, from, to);
     },
     // The `/<name>` resolver reads through the live index (rebuilt each vault
     // state), so newly-created definitions resolve without re-mounting.
     (word) => agentIndex.findAgent(word) !== null,
+    // Auto-open guard (Fix 1): don't re-pop the create popup while either agent
+    // popup (create or run) is already up.
+    () => isCreateAgentPopupOpen() || isAgentPopupOpen(),
   );
   state.editor = editor;
 

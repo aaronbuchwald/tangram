@@ -30,6 +30,7 @@ import { tags as t } from "@lezer/highlight";
 import {
   type SlashResolver,
   type SlashTriggerHandler,
+  slashAutoOpen,
   slashClickToReopen,
   slashTagHighlight,
   slashTrigger,
@@ -146,14 +147,21 @@ export class MdEditor {
     // Resolves whether a bare word names a saved agent/skill. Defaults to "no
     // names known", so only `/agent` (create) reacts until an index is wired.
     resolveAgent: SlashResolver = () => false,
+    // True while an agent popup (create or run) is already open. The auto-open
+    // listener uses this to avoid re-firing the create popup over an open one.
+    // Defaults to "never open" so the auto-open is unguarded if not wired.
+    isPopupOpen: () => boolean = () => false,
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
-    // supplied; the highlight is harmless and always on.
+    // supplied; the highlight is harmless and always on. The auto-open listener
+    // (Fix 1) pops the create popup the instant the caret lands after a complete
+    // `/agent` token — Enter/click remain as fallbacks.
     const agentExtensions = onSlashTrigger
       ? [
           slashTrigger(onSlashTrigger, resolveAgent),
           slashClickToReopen(onSlashTrigger, resolveAgent),
+          slashAutoOpen(onSlashTrigger, isPopupOpen),
         ]
       : [];
     const state = EditorState.create({
