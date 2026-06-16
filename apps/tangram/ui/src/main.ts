@@ -21,6 +21,7 @@ import {
   type AgentIndex,
 } from "./agents";
 import { renderAgentsView } from "./agentsView";
+import { buildLinkIndex, type LinkIndex } from "./links";
 import {
   type CreatedAgent,
   isCreateAgentPopupOpen,
@@ -79,6 +80,12 @@ let fleet: FleetApp[] = [];
 // closure), so a freshly-created definition becomes invocable on the next
 // vault state without re-mounting the editor.
 let agentIndex: AgentIndex = buildAgentIndex([]);
+// The vault wikilink/backlink index (Connected Vault, G1), rebuilt over the
+// vault on every state frame alongside `agentIndex` — the single rebuild point.
+// The editor's `[[ ]]` resolver and the backlinks panel read through this live
+// reference (a stable closure), so links re-resolve and backlinks refresh on
+// the next vault state without re-mounting the editor.
+let linkIndex: LinkIndex = buildLinkIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -710,12 +717,72 @@ function renderNoteTab(fileId: string) {
       { name: CREATE_WORD, kind: "create" as const },
       ...agentIndex.all.map((d) => ({ name: d.name, kind: d.kind })),
     ],
+    // `[[ ]]` wikilink resolver — reads through the live `linkIndex` (rebuilt
+    // each vault state), so links re-resolve as notes are added/renamed without
+    // re-mounting the editor (resolution is by stable id, not link text).
+    (name) => linkIndex.resolve(name),
+    // Click a resolved `[[name]]` → open its target note in a tab.
+    (targetId) => tabs.openNote(targetId),
   );
   state.editor = editor;
 
   wrap.appendChild(editorHost);
+  // Backlinks panel (Connected Vault, G1): the notes that link TO this one,
+  // from the persisted reverse map. Built here, then patched in place by
+  // refreshBacklinksPanel on each vault state — renderContent reuses the
+  // mounted editor (early-returns), so it would otherwise leave this stale.
+  wrap.appendChild(renderBacklinksPanel(fileId));
   contentEl.appendChild(wrap);
   activeEditor = state;
+}
+
+// Repopulate the active note's Backlinks panel from the live index, in place
+// (the note tab's editor is reused across vault states, so the panel must be
+// refreshed rather than rebuilt). No-op when no note tab is mounted.
+function refreshBacklinksPanel() {
+  if (!activeEditor) return;
+  const existing = contentEl.querySelector(".note .backlinks");
+  if (!existing) return;
+  existing.replaceWith(renderBacklinksPanel(activeEditor.fileId));
+}
+
+// Render the Backlinks panel for the note `fileId`: a collapsible section below
+// the editor listing every note that links to it (source name + the raw `[[ ]]`
+// snippet), each row opening that source note. Reads the persisted reverse map
+// (`linkIndex.backlinks`) — no on-demand re-scan. Shows an empty state when
+// nothing links here yet.
+function renderBacklinksPanel(fileId: string): HTMLElement {
+  const panel = el("div", "backlinks");
+  const head = el("div", "backlinks-head");
+  const links = linkIndex.backlinksFor(fileId);
+  head.appendChild(el("span", "backlinks-title micro", "Linked mentions"));
+  head.appendChild(el("span", "backlinks-count", String(links.length)));
+  panel.appendChild(head);
+
+  const list = el("div", "backlinks-list");
+  if (links.length === 0) {
+    list.appendChild(el("div", "backlinks-empty", "No backlinks yet"));
+  } else {
+    // One row per backlink occurrence. A note may link here more than once;
+    // each occurrence is its own row so the snippet/position is preserved.
+    for (const link of links) {
+      const source = filesById.get(link.sourceId);
+      const name = source
+        ? (source.path.split("/").pop() ?? source.path).replace(/\.md$/i, "")
+        : "(missing note)";
+      const row = el("div", "backlinks-row");
+      row.appendChild(el("span", "backlinks-name", name));
+      row.appendChild(el("span", "backlinks-snippet", link.original));
+      if (source) {
+        row.addEventListener("click", () => tabs.openNote(link.sourceId));
+      } else {
+        row.classList.add("disabled");
+      }
+      list.appendChild(row);
+    }
+  }
+  panel.appendChild(list);
+  return panel;
 }
 
 // Apply a fresh vault snapshot to the live note editor, if any. Echo-safe:
@@ -961,6 +1028,11 @@ function onVaultState(state: VaultState) {
   // vault (newly-created definitions become invocable here). The editor's
   // resolver closes over `agentIndex`, so no editor re-mount is needed.
   agentIndex = buildAgentIndex(files);
+  // Rebuild the wikilink/backlink index here too (the single rebuild point).
+  // The editor's `[[ ]]` resolver closes over `linkIndex`, and the backlinks
+  // panel re-renders from it via renderContent below, so both reflect the new
+  // vault without an editor re-mount.
+  linkIndex = buildLinkIndex(files);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();
@@ -972,6 +1044,10 @@ function onVaultState(state: VaultState) {
   // active note, so this never clobbers an in-progress edit.
   syncActiveNote();
   renderContent();
+  // renderContent reuses the mounted note editor (early return), so the
+  // backlinks panel — which lives in that retained DOM — won't be rebuilt;
+  // refresh it from the freshly-built link index here.
+  refreshBacklinksPanel();
 }
 
 async function refreshFleet() {

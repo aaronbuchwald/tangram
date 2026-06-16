@@ -39,6 +39,12 @@ import {
   type SlashCandidateProvider,
   slashAutocomplete,
 } from "./slashComplete";
+import {
+  type WikiLinkOpener,
+  type WikiLinkResolver,
+  wikiLinkClick,
+  wikiLinkHighlight,
+} from "./wikiLink";
 import { livePreview } from "./livePreview";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
@@ -119,6 +125,22 @@ const theme = EditorView.theme(
       fontWeight: "600",
       cursor: "pointer",
     },
+    // `[[ ]]` wikilinks (Connected Vault, G1). A resolved link reads as a
+    // clickable blue link (the same accent family as `.cm-agent-tag`, but
+    // underlined like a link rather than chipped); an unresolved "ghost" target
+    // is dimmed/dashed so a typo or a not-yet-created note is visibly distinct.
+    ".cm-wikilink": {
+      color: "var(--blue)",
+      textDecoration: "underline",
+      textDecorationStyle: "dotted",
+      cursor: "pointer",
+    },
+    ".cm-wikilink-unresolved": {
+      color: "var(--dim)",
+      textDecoration: "underline",
+      textDecorationStyle: "dashed",
+      opacity: "0.75",
+    },
     // Blockquote: a left bar + dim text, drawn on the line so it survives the
     // concealed `>` marker.
     ".cm-lp-quote": {
@@ -160,6 +182,14 @@ export class MdEditor {
     // keystroke so newly-created defs appear without re-mounting. Defaults to an
     // empty list so the autocomplete is a harmless no-op when not wired.
     slashCandidates: SlashCandidateProvider = () => [],
+    // `[[ ]]` wikilink support (Connected Vault, G1). `resolveWikiLink` maps a
+    // link name to a target file id (or null = ghost); it reads through the
+    // live link index so links re-resolve as the vault changes without a
+    // re-mount. `onOpenWikiLink` opens a resolved link's target note on click.
+    // Defaults make the highlight a harmless ghost-everything no-op and clicks
+    // inert, so non-vault editors are unchanged.
+    resolveWikiLink: WikiLinkResolver = () => null,
+    onOpenWikiLink: WikiLinkOpener = () => {},
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -192,6 +222,10 @@ export class MdEditor {
         syntaxHighlighting(mdHighlight),
         livePreview,
         slashTagHighlight(resolveAgent),
+        // `[[ ]]` wikilink decorations + click-to-open (G1). Always on; with the
+        // default resolver every link is a harmless ghost and clicks are inert.
+        wikiLinkHighlight(resolveWikiLink),
+        wikiLinkClick(resolveWikiLink, onOpenWikiLink),
         theme,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {

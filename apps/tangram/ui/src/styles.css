@@ -262,6 +262,50 @@ body {
    letting the editor (and its scroller) span the full pane. */
 .editor-host .cm-content { max-width: 48rem; margin: 0 auto; width: 100%; }
 
+/* ── Backlinks panel (Connected Vault, G1) ──
+   A quiet section below the editor listing the notes that link TO the active
+   note (the persisted reverse map). Same writing-column measure as the editor
+   so it reads as part of the note, unobtrusive — a hairline top divider, a
+   small header with a count, then click-to-open rows (source name + the raw
+   `[[ ]]` snippet). The panel never grows the editor's scroll area: it sits
+   below in the .note flex column and only takes the height it needs. */
+.backlinks {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 12px 18px 18px;
+  border-top: 1px solid var(--line);
+}
+.backlinks-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px;
+}
+.backlinks-title { color: var(--dim); }
+.backlinks-count {
+  min-width: 18px; height: 18px; padding: 0 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; line-height: 1;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+  color: var(--dim);
+}
+.backlinks-list { display: flex; flex-direction: column; gap: 4px; }
+.backlinks-empty { color: var(--faint); font-size: 12px; padding: 4px 0; }
+.backlinks-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 8px; border-radius: 7px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  cursor: pointer;
+}
+.backlinks-row:hover { background: var(--panel); border-color: var(--blue); }
+.backlinks-row.disabled { cursor: default; opacity: 0.55; }
+.backlinks-row.disabled:hover { background: var(--panel-2); border-color: var(--line); }
+.backlinks-name { color: var(--text); font-weight: 600; font-size: 13px; white-space: nowrap; }
+.backlinks-snippet {
+  color: var(--faint); font-family: var(--mono); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+
 /* ── naming modal (issue #16) ──
    A minimal, Obsidian-style naming dialog that replaces the browser's native
    prompt(): a centered card with a title, a single autofocused input, and a
