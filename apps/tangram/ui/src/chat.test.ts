@@ -3,11 +3,69 @@
 // response parser (mcpClient), which must handle BOTH a single JSON body and
 // an SSE `data:`-framed stream (the live nutrition server answers with SSE).
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mcpToolsToOpenAi, renderToolResult } from "./llmChat";
 import { __test } from "./mcpClient";
+import { resetSessionState, type PanelState } from "./chatPanel";
 
 const { parseMcpBody } = __test;
+
+describe("resetSessionState (New-chat / app-switch reset)", () => {
+  it("flushes message state and bumps the epoch so a new session re-inits clean", () => {
+    const state: PanelState = {
+      app: "nutrition",
+      label: "Nutrition",
+      mcp: {} as unknown as PanelState["mcp"],
+      tools: [{ type: "function", function: { name: "x", parameters: {} } }],
+      history: [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+      noTools: false,
+      sending: true,
+      epoch: 3,
+    };
+
+    const epoch = resetSessionState(state);
+
+    // Message state is cleared...
+    expect(state.history).toEqual([]);
+    expect(state.tools).toEqual([]);
+    expect(state.mcp).toBeNull();
+    expect(state.noTools).toBe(false);
+    expect(state.sending).toBe(false);
+    // ...the active app is preserved (New-chat stays in the same place)...
+    expect(state.app).toBe("nutrition");
+    expect(state.label).toBe("Nutrition");
+    // ...and the epoch advanced so a stale in-flight turn is ignored and the
+    // returned epoch is what the caller hands to a fresh connect() (re-init).
+    expect(epoch).toBe(4);
+    expect(state.epoch).toBe(4);
+  });
+
+  it("the returned epoch invalidates a turn captured under the old epoch", () => {
+    const state: PanelState = {
+      app: "notes",
+      label: "Notes",
+      mcp: null,
+      tools: [],
+      history: [{ role: "user", content: "q" }],
+      noTools: true,
+      sending: true,
+      epoch: 0,
+    };
+    const capturedByInflightTurn = state.epoch;
+    // A New-chat happens while a turn is mid-flight.
+    resetSessionState(state);
+    // The in-flight turn's epoch guard (epoch !== state.epoch) now trips.
+    expect(capturedByInflightTurn).not.toBe(state.epoch);
+    // And a fresh connect would be invoked with the new epoch.
+    const reinit = vi.fn();
+    reinit(state.app, state.label, state.epoch);
+    expect(reinit).toHaveBeenCalledWith("notes", "Notes", 1);
+  });
+});
 
 describe("mcpToolsToOpenAi", () => {
   it("maps an MCP tool's inputSchema straight onto function.parameters", () => {

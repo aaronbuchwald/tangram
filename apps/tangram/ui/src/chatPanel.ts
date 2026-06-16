@@ -22,7 +22,7 @@ import {
 const OPEN_KEY = "chat-sidebar-open";
 const WIDTH_KEY = "chat-sidebar-width";
 
-interface PanelState {
+export interface PanelState {
   app: string | null;
   label: string;
   mcp: McpClient | null;
@@ -55,7 +55,25 @@ let logEl: HTMLElement | null = null;
 let inputEl: HTMLTextAreaElement | null = null;
 let sendBtn: HTMLButtonElement | null = null;
 let titleEl: HTMLElement | null = null;
+let newBtn: HTMLButtonElement | null = null;
 let toggleBtn: HTMLButtonElement | null = null;
+
+/**
+ * Reset the conversation state in place: drop the MCP client, tools and
+ * message history, clear the sending flag, and bump the epoch so any in-flight
+ * init/turn for the old session is ignored before it touches the DOM. Returns
+ * the new epoch (the caller hands it to `connect`). Pure w.r.t. the DOM, so the
+ * shared reset path used by both app-switch and New-chat is unit-testable.
+ */
+export function resetSessionState(s: PanelState): number {
+  const epoch = ++s.epoch;
+  s.mcp = null;
+  s.tools = [];
+  s.history = [];
+  s.noTools = false;
+  s.sending = false;
+  return epoch;
+}
 
 function esc(s: string): string {
   return s
@@ -83,6 +101,7 @@ export function mountChatPanel(slot: HTMLElement): void {
       <div class="chat-resizer" id="chat-resizer"></div>
       <div class="chat-head">
         <span class="chat-title" id="chat-title">Chat</span>
+        <button class="chat-new" id="chat-new" title="New chat" aria-label="New chat">＋</button>
         <button class="chat-close" id="chat-close" title="Hide chat" aria-label="Hide chat">×</button>
       </div>
       <div class="chat-log" id="chat-log"></div>
@@ -99,8 +118,10 @@ export function mountChatPanel(slot: HTMLElement): void {
   inputEl = slot.querySelector("#chat-input");
   sendBtn = slot.querySelector("#chat-send");
   titleEl = slot.querySelector("#chat-title");
+  newBtn = slot.querySelector("#chat-new");
   toggleBtn = slot.querySelector("#chat-fab");
 
+  newBtn!.addEventListener("click", () => newChat());
   slot.querySelector("#chat-close")!.addEventListener("click", () => setOpen(false));
   toggleBtn!.addEventListener("click", () => setOpen(true));
   sendBtn!.addEventListener("click", () => void send());
@@ -166,18 +187,28 @@ export function setActiveApp(app: string | null, label: string): void {
     applyLayout();
     return;
   }
-  const epoch = ++state.epoch;
   state.app = app;
   state.label = label;
-  state.mcp = null;
-  state.tools = [];
-  state.history = [];
-  state.noTools = false;
-  state.sending = false;
+  const epoch = resetSessionState(state);
   if (titleEl) titleEl.textContent = app ? `${label} · chat` : "Chat";
   if (logEl) logEl.replaceChildren();
   applyLayout();
   if (app) void connect(app, label, epoch);
+}
+
+/**
+ * New-chat: flush the current conversation and start a fresh one in place for
+ * the currently-active app. Resets message state AND re-initializes the MCP
+ * session (the same reset path as switching apps), without navigating or
+ * closing the panel. No-op when no app tab is active.
+ */
+export function newChat(): void {
+  if (state.app === null) return;
+  const epoch = resetSessionState(state);
+  if (logEl) logEl.replaceChildren();
+  if (inputEl) inputEl.value = "";
+  if (sendBtn) sendBtn.disabled = false;
+  void connect(state.app, state.label, epoch);
 }
 
 // Initialize the MCP client + tools for an app, degrading to plain chat if the
