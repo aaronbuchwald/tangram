@@ -14,6 +14,8 @@ import {
   type VaultState,
 } from "./api";
 import { openAgentPopup } from "./agentPopup";
+import { buildAgentIndex, type AgentIndex } from "./agents";
+import { openCreateAgentPopup } from "./createAgentPopup";
 import { loadAuthState, renderLogin, renderPrincipalChip } from "./auth";
 import { MdEditor } from "./editor";
 import { registry } from "./manage";
@@ -61,6 +63,11 @@ function displayFileName(name: string): string {
 let files: MdFile[] = [];
 const filesById = new Map<string, MdFile>();
 let fleet: FleetApp[] = [];
+// The agent/skill index, rebuilt over the vault on every state frame. The
+// editor's `/<name>` resolver reads through this live reference (a stable
+// closure), so a freshly-created definition becomes invocable on the next
+// vault state without re-mounting the editor.
+let agentIndex: AgentIndex = buildAgentIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -593,16 +600,34 @@ function renderNoteTab(fileId: string) {
         maybeRenameFromHeading(fileId, doc);
       }, 400);
     },
-    // Inline "@agent" trigger (demo): the editor hands us the matched token's
-    // [from, to). Open the popup; on Save, replace exactly that range with the
-    // prompt+response block (the debounced onChange above then persists it). On
-    // Exit/dismiss, just refocus — the @agent token is left untouched.
-    (from, to) => {
-      openAgentPopup({
+    // Inline `/` trigger (P1): the editor hands us the kind, the word, and the
+    // matched token's [from, to). `/agent` opens the CREATE popup (save a new
+    // definition to the vault, then strip the `/agent` token). A resolved
+    // `/<name>` opens the RUN popup bound to that def; on Save we replace the
+    // token with the prompt+response block (the debounced onChange persists it),
+    // on Exit/dismiss we just refocus (the token is left untouched).
+    (kind, word, from, to) => {
+      if (kind === "create") {
+        openCreateAgentPopup({
+          isNameTaken: (name) => agentIndex.has(name),
+          onCreated: (replacement) => editor.replaceRange(from, to, replacement),
+          onClose: () => editor.focus(),
+        });
+        return;
+      }
+      const def = agentIndex.findAgent(word);
+      if (!def) {
+        editor.focus();
+        return;
+      }
+      openAgentPopup(def, {
         onSave: (block) => editor.replaceRange(from, to, block),
         onClose: () => editor.focus(),
       });
     },
+    // The `/<name>` resolver reads through the live index (rebuilt each vault
+    // state), so newly-created definitions resolve without re-mounting.
+    (word) => agentIndex.findAgent(word) !== null,
   );
   state.editor = editor;
 
@@ -850,6 +875,10 @@ function onVaultState(state: VaultState) {
   files = state.files ?? [];
   filesById.clear();
   for (const f of files) filesById.set(f.id, f);
+  // Rebuild the agent/skill index so `/<name>` resolution reflects the current
+  // vault (newly-created definitions become invocable here). The editor's
+  // resolver closes over `agentIndex`, so no editor re-mount is needed.
+  agentIndex = buildAgentIndex(files);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   // A header-driven rename re-derives the active tab's title from the new path,

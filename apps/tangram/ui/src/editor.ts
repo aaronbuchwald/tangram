@@ -28,11 +28,12 @@ import {
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
-  type AgentTriggerHandler,
-  agentClickToReopen,
-  agentTagHighlight,
-  agentTrigger,
-} from "./agentTag";
+  type SlashResolver,
+  type SlashTriggerHandler,
+  slashClickToReopen,
+  slashTagHighlight,
+  slashTrigger,
+} from "./slashTrigger";
 import { livePreview } from "./livePreview";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
@@ -102,8 +103,9 @@ const theme = EditorView.theme(
     ".cm-lp-link": { color: "var(--blue)", textDecoration: "underline" },
     // The `•` glyph that stands in for an unordered list marker off the line.
     ".cm-lp-bullet": { color: "var(--dim)" },
-    // The inline "@agent" trigger token — a subtle blue accent chip, so it
-    // reads as an actionable affordance (Enter / click reopens the popup).
+    // The inline `/` trigger token (`/agent` or a resolved `/<name>`) — a
+    // subtle blue accent chip, so it reads as an actionable affordance (Enter /
+    // click fires the create/run popup).
     ".cm-agent-tag": {
       color: "var(--blue)",
       backgroundColor: "rgba(0,158,238,0.12)",
@@ -134,19 +136,24 @@ export class MdEditor {
     parent: HTMLElement,
     initialDoc: string,
     onChange: (doc: string) => void,
-    // Demo: fired when the inline "@agent" trigger fires (caret right after
-    // `@agent` + Enter, or a click on a highlighted token). `from`/`to` is the
-    // document range of the matched token so the popup can replace exactly it
-    // on Save (or keep it on Exit). Optional so non-agent editors are unchanged.
-    onAgentTrigger?: (from: number, to: number) => void,
+    // Inline `/` agent trigger (P1): fired when a `/<word>` token is committed
+    // (caret right after it + Enter, or a click on a highlighted token) and the
+    // word classifies — `/agent` (create) or `/<name>` (run a saved def). The
+    // handler gets the kind, the word, and the token's [from, to) range so the
+    // popup can replace exactly it on Save (or keep it on Exit). Optional so
+    // non-agent editors are unchanged.
+    onSlashTrigger?: SlashTriggerHandler,
+    // Resolves whether a bare word names a saved agent/skill. Defaults to "no
+    // names known", so only `/agent` (create) reacts until an index is wired.
+    resolveAgent: SlashResolver = () => false,
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
     // supplied; the highlight is harmless and always on.
-    const agentExtensions = onAgentTrigger
+    const agentExtensions = onSlashTrigger
       ? [
-          agentTrigger(onAgentTrigger as AgentTriggerHandler),
-          agentClickToReopen(onAgentTrigger as AgentTriggerHandler),
+          slashTrigger(onSlashTrigger, resolveAgent),
+          slashClickToReopen(onSlashTrigger, resolveAgent),
         ]
       : [];
     const state = EditorState.create({
@@ -156,7 +163,7 @@ export class MdEditor {
         drawSelection(),
         highlightActiveLine(),
         // High-precedence agent Enter handler must sit before the default
-        // keymap (which also binds Enter); agentTrigger wraps it in Prec.highest.
+        // keymap (which also binds Enter); slashTrigger wraps it in Prec.highest.
         ...agentExtensions,
         keymap.of([...defaultKeymap, ...historyKeymap]),
         // Extended (GFM) dialect so strikethrough, task lists, tables, etc.
@@ -164,7 +171,7 @@ export class MdEditor {
         markdown({ base: markdownLanguage }),
         syntaxHighlighting(mdHighlight),
         livePreview,
-        agentTagHighlight,
+        slashTagHighlight(resolveAgent),
         theme,
         EditorView.lineWrapping,
         EditorView.updateListener.of((u) => {
@@ -177,9 +184,10 @@ export class MdEditor {
 
   /**
    * Replace the document range [from, to) with `text`, put the caret right
-   * after the inserted text, and refocus. Used by the agent popup's Save to
-   * swap the triggering `@agent` token for the prompt+response block. The
-   * existing debounced onChange persists the new doc to the vault.
+   * after the inserted text, and refocus. Used by the run popup's Save to swap
+   * the triggering `/<name>` token for the prompt+response block (and by the
+   * create popup to strip the `/agent` token). The existing debounced onChange
+   * persists the new doc to the vault.
    */
   replaceRange(from: number, to: number, text: string): void {
     const docLen = this.view.state.doc.length;

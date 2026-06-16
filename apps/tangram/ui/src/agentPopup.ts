@@ -1,22 +1,30 @@
-// The inline "@agent" LLM popup (demo). Triggered from the vault editor when
-// the caret sits right after a literal `@agent` and the user presses Enter (or
-// clicks a highlighted `@agent` token — see editor.ts / agentTag.ts). It mirrors
-// modal.ts's overlay/dialog visual language (a single-instance overlay appended
-// at the shell root, keyboard-first, backdrop-click / Esc to dismiss).
+// The inline `/<name>` agent/skill RUN popup (P1). Triggered from the vault
+// editor when the caret sits right after a `/<name>` that resolves to a saved
+// definition and the user presses Enter (or clicks a highlighted token — see
+// editor.ts / slashTrigger.ts). It mirrors modal.ts's overlay/dialog visual
+// language (a single-instance overlay at the shell root, keyboard-first,
+// backdrop-click / Esc to dismiss).
 //
-// Single-turn only: a prompt is sent to DeepSeek via the host's `/llm/deepseek`
-// proxy (relative path `../llm/deepseek/...` — the shell is mounted at
-// `/tangram/`, so it resolves to the host's proxy; the host injects the API
-// key, never the browser). The response is shown as a chat exchange, then the
-// user can Save (replace the `@agent` token with an indented blockquote of the
-// prompt + response) or Exit (discard, leave `@agent` untouched).
+// Single-turn only: the prompt the user types is sent to DeepSeek via the
+// host's `/llm/deepseek` proxy (relative path `../llm/deepseek/...` — the shell
+// is mounted at `/tangram/`, so it resolves to the host's proxy; the host
+// injects the API key, never the browser). The call is BOUND to the def: its
+// `model` is passed through and its `instructions` become the system message.
+// The response is shown as a chat exchange, then the user can Save (replace the
+// `/<name>` token with an indented blockquote of the prompt + response) or Exit
+// (discard, leave the token untouched).
 //
-// Scope guard: ONLY DeepSeek, single prompt → response, exactly this flow. No
-// multi-turn, no provider choice, no settings — iterate later.
+// The CREATE/DEFINE popup (`/agent`) lives below — see openCreateAgentPopup.
+//
+// Scope guard (P1): DeepSeek route only (the model string is passed through but
+// provider routing is later), single prompt → response, exactly this flow. No
+// multi-turn, no provider choice, no tools/sandbox.
+
+import { DEFAULT_MODEL, type AgentDef } from "./agents";
 
 /** What the popup does with the exchange when the user chooses Save. */
 export interface AgentPopupCallbacks {
-  /** Replace the triggering `@agent` range with the given markdown block and
+  /** Replace the triggering `/<name>` range with the given markdown block and
    *  refocus the editor. Wired by main.ts onto the live MdEditor. */
   onSave: (block: string) => void;
   /** Close with no document change (Exit / dismiss); refocus the editor. */
@@ -53,14 +61,26 @@ interface DeepSeekResponse {
 
 // POST the prompt to DeepSeek through the host proxy. The shell is mounted at
 // `/tangram/`, so the RELATIVE path `../llm/deepseek/...` resolves to the host's
-// `/llm/deepseek` proxy. No API key here — the host injects it.
-async function callDeepSeek(prompt: string): Promise<string> {
+// `/llm/deepseek` proxy. No API key here — the host injects it. The call is
+// bound to the def: `model` is passed through and `instructions` (if any) ride
+// as the system message ahead of the user's prompt. (P1 always uses the
+// `/llm/deepseek` route; provider routing by model is later.)
+async function callDeepSeek(
+  prompt: string,
+  model: string,
+  instructions: string,
+): Promise<string> {
+  const messages: Array<{ role: string; content: string }> = [];
+  if (instructions.trim().length > 0) {
+    messages.push({ role: "system", content: instructions });
+  }
+  messages.push({ role: "user", content: prompt });
   const res = await fetch("../llm/deepseek/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [{ role: "user", content: prompt }],
+      model: model || DEFAULT_MODEL,
+      messages,
     }),
   });
   if (!res.ok) {
@@ -81,12 +101,15 @@ async function callDeepSeek(prompt: string): Promise<string> {
 }
 
 /**
- * Open the "@agent" popup. Single-instance: any open popup is dismissed first.
- * The popup walks Prompt → Waiting → Chat (with Save/Exit) or Error (Retry).
+ * Open the `/<name>` RUN popup, bound to the resolved `def`. Single-instance:
+ * any open popup is dismissed first. The popup walks Prompt → Waiting → Chat
+ * (with Save/Exit) or Error (Retry); the title reads "Running: <name>".
  * Backdrop click / Esc dismiss at any state via `callbacks.onClose`.
  */
-export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
+export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): void {
   current?.dismiss();
+
+  const runTitle = `Running: ${def.name}`;
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -132,12 +155,12 @@ export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
 
     const title = document.createElement("div");
     title.className = "modal-title";
-    title.textContent = "Ask the agent";
+    title.textContent = runTitle;
 
     const input = document.createElement("textarea");
     input.className = "modal-input agent-input";
     input.rows = 3;
-    input.placeholder = "What should the agent do?";
+    input.placeholder = `What should ${def.name} do?`;
     input.value = initial;
     input.spellcheck = false;
 
@@ -179,7 +202,7 @@ export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
     dialog.replaceChildren();
     const title = document.createElement("div");
     title.className = "modal-title";
-    title.textContent = "Ask the agent";
+    title.textContent = runTitle;
 
     const chat = document.createElement("div");
     chat.className = "agent-chat";
@@ -200,7 +223,7 @@ export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
     dialog.replaceChildren();
     const title = document.createElement("div");
     title.className = "modal-title";
-    title.textContent = "Ask the agent";
+    title.textContent = runTitle;
 
     const chat = document.createElement("div");
     chat.className = "agent-chat";
@@ -236,7 +259,7 @@ export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
     dialog.replaceChildren();
     const title = document.createElement("div");
     title.className = "modal-title";
-    title.textContent = "Ask the agent";
+    title.textContent = runTitle;
 
     const chat = document.createElement("div");
     chat.className = "agent-chat";
@@ -270,7 +293,7 @@ export function openAgentPopup(callbacks: AgentPopupCallbacks): void {
   async function runPrompt(prompt: string) {
     renderWaiting(prompt);
     try {
-      const response = await callDeepSeek(prompt);
+      const response = await callDeepSeek(prompt, def.model, def.instructions);
       if (settled) return;
       renderChat(prompt, response);
     } catch (e) {

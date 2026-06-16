@@ -343,6 +343,22 @@ body {
   padding: 8px 11px; background: rgba(255, 69, 84, 0.08); white-space: pre-wrap; word-break: break-word;
 }
 
+/* ── `/agent` create/define popup (P1) ──
+   A compact label/field grid in the same modal card language. The fields are
+   name / kind / model / labels / instructions; Create writes a vault note. */
+.agent-create { width: min(540px, calc(100vw - 32px)); }
+.agent-create-grid {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: 8px 12px; align-items: center;
+}
+.agent-create-label { color: var(--dim); letter-spacing: 0.03em; text-align: right; }
+/* The instructions textarea stretches to fill its row height. */
+.agent-create-grid .agent-input { align-self: stretch; }
+.agent-create-select {
+  font: 13px/1.4 var(--mono); cursor: pointer;
+  appearance: none; -webkit-appearance: none;
+}
+
 /* ── auth UI (auth.md §9 C5) ──────────────────────────────────────────────── */
 .topbar-right { display: flex; align-items: center; gap: 14px; }
 
