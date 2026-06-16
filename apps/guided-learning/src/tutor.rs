@@ -1,8 +1,9 @@
 //! The tutor: the app's AI-enabled half. Each tutor action issues ONE
-//! Anthropic Messages-API call through `tangram::http` (the same call shape
-//! nutrition's `strategy/llm.rs` already ships — `claude-opus-4-8`, structured
-//! `json_schema` output, the OAuth-vs-api-key credential split). The component
-//! issues a BARE request; the host injects the Anthropic credential at the
+//! DeepSeek chat-completions call through `tangram::http` (the OpenAI-shaped
+//! call the `tangram` shell's agent runner already ships — `deepseek-chat`,
+//! JSON-mode structured output via `response_format: { "type": "json_object" }`
+//! with the required schema embedded in the prompt). The component issues a
+//! BARE request; the host injects the DeepSeek bearer credential at the
 //! `http-fetch` egress boundary (ADR-0005), so the key never enters the
 //! component's address space.
 //!
@@ -15,15 +16,15 @@ use serde::Deserialize;
 use serde_json::json;
 use tangram::http;
 
-const DEFAULT_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-opus-4-8";
+const DEFAULT_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const MODEL: &str = "deepseek-chat";
 
-/// The Messages-API endpoint: the live Anthropic URL, or a test/CI override.
+/// The chat-completions endpoint: the live DeepSeek URL, or a test/CI override.
 fn endpoint() -> String {
     std::env::var("GUIDED_LEARNING_LLM_URL").unwrap_or_else(|_| DEFAULT_URL.to_string())
 }
 
-/// Whether an Anthropic credential is resolvable in this environment. Natively
+/// Whether a DeepSeek credential is resolvable in this environment. Natively
 /// (and in tests) this reads the env directly; inside the component the key is
 /// host-injected at egress and the host ANDs its inject-resolution into the
 /// reported capability, so the component's own view here is best-effort.
@@ -38,9 +39,7 @@ pub fn credential_present() -> bool {
     if std::env::var("GUIDED_LEARNING_LLM_URL").is_ok() {
         return true;
     }
-    std::env::var("ANTHROPIC_API_KEY")
-        .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
-        .or_else(|_| std::env::var("CLAUDE_CODE_OAUTH_TOKEN"))
+    std::env::var("DEEPSEEK_API_KEY")
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false)
 }
@@ -52,9 +51,7 @@ pub fn credential_present() -> bool {
 /// natively rather than firing an unauthenticated request.
 #[cfg(not(target_family = "wasm"))]
 fn credential() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
-        .or_else(|_| std::env::var("CLAUDE_CODE_OAUTH_TOKEN"))
+    std::env::var("DEEPSEEK_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
 }
@@ -135,8 +132,14 @@ fn evaluate_schema() -> serde_json::Value {
     })
 }
 
-/// Issue one Messages-API call with a structured-output schema and return the
-/// model's structured text payload (the JSON string in the first text block).
+/// Issue one chat-completions call in DeepSeek JSON mode and return the model's
+/// structured text payload (the JSON string in `choices[0].message.content`).
+///
+/// DeepSeek's chat API supports JSON mode (`response_format: json_object`) but
+/// NOT Anthropic-style `json_schema` enforcement, so the required shape is
+/// embedded in the system prompt and the model is instructed to return JSON
+/// matching it. The parsed-output shape is identical to before, so the rest of
+/// the tutor (quiz rendering, grading, calibration) is unchanged.
 async fn call(system: &str, user: String, schema: serde_json::Value) -> anyhow::Result<String> {
     // Natively, fail fast with an actionable message if no credential is
     // configured (the component path issues a bare request that the host
@@ -146,60 +149,57 @@ async fn call(system: &str, user: String, schema: serde_json::Value) -> anyhow::
     #[cfg(not(target_family = "wasm"))]
     if cred.is_none() && std::env::var("GUIDED_LEARNING_LLM_URL").is_err() {
         anyhow::bail!(
-            "the tutor needs an Anthropic credential: set ANTHROPIC_API_KEY (or \
-             ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN). Without it you can still \
-             write and edit the study artifact by hand."
+            "the tutor needs a DeepSeek credential: set DEEPSEEK_API_KEY. Without it \
+             you can still write and edit the study artifact by hand."
         );
     }
+
+    // JSON mode requires the word "json" in the prompt; embedding the schema
+    // also stands in for Anthropic's `json_schema` enforcement.
+    let schema_pretty =
+        serde_json::to_string_pretty(&schema).unwrap_or_else(|_| schema.to_string());
+    let system = format!(
+        "{system}\n\nRespond with a single JSON object and nothing else. The JSON \
+         MUST match this JSON Schema exactly (same keys, types, and required \
+         fields):\n{schema_pretty}"
+    );
 
     let body = json!({
         "model": MODEL,
         "max_tokens": 2048,
-        "output_config": {
-            "format": { "type": "json_schema", "schema": schema },
-        },
-        "system": system,
-        "messages": [{ "role": "user", "content": user }],
+        "response_format": { "type": "json_object" },
+        "messages": [
+            { "role": "system", "content": system },
+            { "role": "user", "content": user },
+        ],
     });
 
-    let req = http::Request::post(endpoint())
-        .header("anthropic-version", "2023-06-01")
-        .json(&body);
+    let req = http::Request::post(endpoint()).json(&body);
 
     // Attach the credential on the native path (inside the component the
     // request stays BARE — the host injects the credential at the http-fetch
-    // egress boundary, ADR-0005). An OAuth token (sk-ant-oat… / a bearer)
-    // authenticates via Authorization: Bearer + the OAuth beta header; a
-    // standard API key uses x-api-key.
+    // egress boundary, ADR-0005). DeepSeek is OpenAI-compatible: the key
+    // authenticates via `Authorization: Bearer`.
     #[cfg(not(target_family = "wasm"))]
     let req = match cred {
-        Some(key)
-            if key.starts_with("sk-ant-oat")
-                || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() =>
-        {
-            req.header("authorization", format!("Bearer {key}"))
-                .header("anthropic-beta", "oauth-2025-04-20")
-        }
-        Some(key) => req.header("x-api-key", &key),
+        Some(key) => req.header("authorization", format!("Bearer {key}")),
         None => req,
     };
 
     let resp = http::fetch(req).await?;
     let payload: serde_json::Value = resp.json()?;
     if !resp.is_success() {
-        anyhow::bail!("Anthropic request failed ({}): {payload}", resp.status);
+        anyhow::bail!("DeepSeek request failed ({}): {payload}", resp.status);
     }
+    // OpenAI-shaped response: choices[0].message.content (the JSON string).
     let text = payload
-        .get("content")
+        .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|blocks| {
-            blocks
-                .iter()
-                .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-        })
-        .and_then(|b| b.get("text"))
+        .and_then(|choices| choices.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
         .and_then(|t| t.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Anthropic response had no text block: {payload}"))?;
+        .ok_or_else(|| anyhow::anyhow!("DeepSeek response had no message content: {payload}"))?;
     Ok(text.to_string())
 }
 

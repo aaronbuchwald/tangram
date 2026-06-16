@@ -10,7 +10,7 @@
 //!
 //! Everything — the material, every question/answer, the schedule, and the
 //! artifact — lives in this component's replicated Automerge document. The
-//! ONLY egress is the tutor's Anthropic Messages-API call (an AI-enabled
+//! ONLY egress is the tutor's DeepSeek chat-completions call (an AI-enabled
 //! component; the host injects the credential at the `http-fetch` boundary,
 //! ADR-0005). See `docs/design/guided-learning.md`.
 
@@ -731,7 +731,7 @@ const INSTRUCTIONS: &str = "A Make It Stick-driven tutor. Start a session over a
      evaluate_answer (LLM) grades the attempt, gives Socratic feedback, advances the spaced \
      review schedule, and appends the exchange to the study artifact. due_reviews / \
      next_questions interleave topics; calibration surfaces over-confidence. Edit the markdown \
-     artifact with edit_artifact (collaborative via the CRDT). The tutor needs an Anthropic \
+     artifact with edit_artifact (collaborative via the CRDT). The tutor needs a DeepSeek \
      credential configured host-side; without it the sync actions (artifact editing, \
      reflection) still work and the tutor reports unavailable.";
 
@@ -742,14 +742,14 @@ const INSTRUCTIONS: &str = "A Make It Stick-driven tutor. Start a session over a
 /// **`description_input`** — the generic "this AI app is configured" flag the
 /// host gates host-side (ADR-0005): when the app declares egress injection the
 /// host ANDs this with whether the inject secret resolves, so an app whose
-/// Anthropic credential is missing reports `false` and degrades cleanly
+/// DeepSeek credential is missing reports `false` and degrades cleanly
 /// (identical to nutrition). The component therefore reports `true`
 /// intrinsically (it CAN call the tutor) and lets the host decide; natively /
 /// in tests `available` is derived from a resolvable credential directly.
 #[must_use]
 pub fn capabilities_json(available: bool) -> serde_json::Value {
     serde_json::json!({
-        "tutor": "anthropic/claude-opus-4-8",
+        "tutor": "deepseek/deepseek-chat",
         // The host-gated "configured" flag (ADR-0005 ANDs in inject-resolution).
         "description_input": available,
     })
@@ -767,7 +767,7 @@ pub fn app() -> App<GuidedLearning> {
 // Compiled for wasm32-wasip2, the same model + actions become a Tangram
 // component (`tangram-host` owns the platform around it; the tutor's HTTP goes
 // through the host's allowlist-enforced `http-fetch` import, which injects the
-// Anthropic credential at the egress boundary — ADR-0005). The component
+// DeepSeek credential at the egress boundary — ADR-0005). The component
 // reports `description_input: true` intrinsically (it CAN call the tutor); the
 // host ANDs in whether the inject secret resolves, so a credential-less host
 // serves `description_input: false` and the tutor degrades cleanly. (The

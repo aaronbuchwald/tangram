@@ -1,20 +1,20 @@
 //! GL3 — the fixture LLM transport + `generate_questions`.
 //!
-//! Stands up a local recorded-Anthropic fixture server, points the tutor's
+//! Stands up a local recorded-DeepSeek fixture server, points the tutor's
 //! `http-fetch` at it via `GUIDED_LEARNING_LLM_URL`, and asserts that
-//! `generate_questions` parses the structured `json_schema` output into
+//! `generate_questions` parses the JSON-mode chat-completions output into
 //! Question/Topic rows and commits them via `ctx.mutate`. No live key needed
 //! (the nutrition / rmcp-golden fixture precedent).
 
 mod support;
-use support::{FixtureServer, act, anthropic_response, fresh_ctx, llm_env_guard};
+use support::{FixtureServer, act, deepseek_response, fresh_ctx, llm_env_guard};
 
 #[tokio::test]
 async fn generate_questions_parses_and_commits_structured_output() {
     let _guard = llm_env_guard().await;
 
     // The canned tutor output: two topics, mixed kinds.
-    let fixture = anthropic_response(serde_json::json!({
+    let fixture = deepseek_response(serde_json::json!({
         "questions": [
             { "topic": "Light reactions", "kind": "factual",
               "prompt": "What pigment captures light?", "model_answer": "Chlorophyll." },
@@ -92,7 +92,7 @@ async fn generate_questions_parses_and_commits_structured_output() {
 async fn generate_questions_errors_on_unknown_session() {
     let _guard = llm_env_guard().await;
     let server =
-        FixtureServer::fixed(anthropic_response(serde_json::json!({ "questions": [] }))).await;
+        FixtureServer::fixed(deepseek_response(serde_json::json!({ "questions": [] }))).await;
     unsafe { std::env::set_var("GUIDED_LEARNING_LLM_URL", &server.url) };
 
     let ctx = fresh_ctx();

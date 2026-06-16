@@ -1,7 +1,7 @@
 //! GL7 — egress containment (the §7 theorem, component side).
 //!
 //! The component's entire view of the outside world is ONE call: `POST
-//! .../v1/messages`. This pins the component-side half of the containment
+//! .../v1/chat/completions`. This pins the component-side half of the containment
 //! theorem — the tutor only ever issues the single declared call (method +
 //! path), so the host's allowlist/inject (and PR #1's call-level capability)
 //! has exactly one egress to bind a credential to.
@@ -13,17 +13,17 @@
 //! without the wasm component.
 
 mod support;
-use support::{FixtureServer, act, anthropic_response, fresh_ctx, llm_env_guard};
+use support::{FixtureServer, act, deepseek_response, fresh_ctx, llm_env_guard};
 
 #[tokio::test]
-async fn the_tutor_only_issues_the_declared_post_messages_call() {
+async fn the_tutor_only_issues_the_declared_post_completions_call() {
     let _guard = llm_env_guard().await;
-    let generate = anthropic_response(serde_json::json!({
+    let generate = deepseek_response(serde_json::json!({
         "questions": [
             { "topic": "T", "kind": "factual", "prompt": "Q?", "model_answer": "A." }
         ]
     }));
-    let evaluate = anthropic_response(serde_json::json!({
+    let evaluate = deepseek_response(serde_json::json!({
         "grade": 70, "feedback": "ok", "model_answer": "A."
     }));
     let server = FixtureServer::with_sequence(vec![generate, evaluate]).await;
@@ -66,13 +66,13 @@ async fn the_tutor_only_issues_the_declared_post_messages_call() {
 
     unsafe { std::env::remove_var("GUIDED_LEARNING_LLM_URL") };
 
-    // Every request the tutor made is exactly `POST /v1/messages`.
+    // Every request the tutor made is exactly `POST /v1/chat/completions`.
     let lines = server.request_lines();
     assert!(!lines.is_empty(), "the tutor made at least one call");
     for line in &lines {
         assert!(
-            line.starts_with("POST /v1/messages "),
-            "the tutor only issues POST /v1/messages — never another method/path: {line:?}"
+            line.starts_with("POST /v1/chat/completions "),
+            "the tutor only issues POST /v1/chat/completions — never another method/path: {line:?}"
         );
     }
 }

@@ -2,11 +2,11 @@
 //! through the real component under `tangram-host`.
 //!
 //! Reuses the nutrition `egress_injection.rs` posture: the host attaches the
-//! Anthropic credential at the component's `http-fetch` egress boundary, so
+//! DeepSeek credential at the component's `http-fetch` egress boundary, so
 //! the plaintext key lives ONLY in the host process env, never in the
 //! component. The deterministic, key-free assertion this pins:
 //!
-//! - **Configured ⇔ secret resolves:** with `ANTHROPIC_API_KEY` set in the
+//! - **Configured ⇔ secret resolves:** with `DEEPSEEK_API_KEY` set in the
 //!   HOST env and the inject rule present, `/guided-learning/api/capabilities`
 //!   reports `description_input:true`; with it UNSET, `false` (the tutor stays
 //!   offline/degraded — clean, no crash, no leak). This is the
@@ -14,8 +14,8 @@
 //!
 //! The whole test SELF-SKIPS (with a notice) when the wasm component is
 //! missing, so a `cargo test` without the pre-built component still passes.
-//! The live POST-/v1/messages auth + cross-host-denial steps are covered by
-//! the component-side single-call invariant in
+//! The live POST-/v1/chat/completions auth + cross-host-denial steps are covered
+//! by the component-side single-call invariant in
 //! `apps/guided-learning/tests/gl7_egress.rs`; full host egress denial reuses
 //! the same allowlist path the nutrition test exercises.
 
@@ -41,14 +41,12 @@ fn spawn_host(
         .env("HOME", home)
         .env("BIND_ADDR", bind)
         .env("RUST_LOG", "info")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN")
-        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("DEEPSEEK_API_KEY")
         .env_remove("TANGRAM_DATA_DIR")
         .stdout(Stdio::from(log_file.try_clone().expect("clone log")))
         .stderr(Stdio::from(log_file));
     if let Some(key) = api_key {
-        command.env("ANTHROPIC_API_KEY", key);
+        command.env("DEEPSEEK_API_KEY", key);
     }
     HostProc(command.spawn().expect("spawn tangram-host"))
 }
@@ -60,10 +58,10 @@ fn apps_toml(root: &Path, home: &Path) -> String {
 component = "{gl}"
 ui = "{root}/apps/guided-learning/ui"
 data_dir = "{home}/gl-data"
-allow_hosts = ["api.anthropic.com"]
+allow_hosts = ["api.deepseek.com"]
 
 [apps.guided-learning.inject]
-"api.anthropic.com" = {{ header = "x-api-key", secret = "env://ANTHROPIC_API_KEY" }}
+"api.deepseek.com" = {{ bearer = true, secret = "env://DEEPSEEK_API_KEY" }}
 "#,
         gl = component("guided_learning").display(),
         root = root.display(),

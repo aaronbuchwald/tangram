@@ -133,21 +133,20 @@ allow_hosts = ["api.deepseek.com"]
 
 # Guided Learning (docs/design/guided-learning.md): a Make It Stick-driven
 # tutor — an AI-enabled component. Its ENTIRE outbound-network grant is the
-# Anthropic Messages API; without it (or without a resolvable credential) the
-# tutor degrades cleanly and the sync actions (artifact editing, reflection)
-# still work. The HOST attaches the Anthropic credential at the component's
+# DeepSeek chat-completions API; without it (or without a resolvable credential)
+# the tutor degrades cleanly and the sync actions (artifact editing, reflection)
+# still work. The HOST attaches the DeepSeek credential at the component's
 # http-fetch egress boundary (ADR-0005) — the plaintext key NEVER enters the
 # component. `secret` is an env://NAME reference resolved from the host's
-# environment (.env is loaded). Use the OAuth-token form
-# `{ bearer = true, secret = "env://ANTHROPIC_AUTH_TOKEN" }` for an sk-ant-oat…
-# / CLAUDE_CODE_OAUTH_TOKEN instead of an x-api-key.
+# environment (.env is loaded). DeepSeek is OpenAI-compatible, so the key rides
+# as `Authorization: Bearer` (the same inject form the tangram shell uses).
 [apps.guided-learning]
 component = "target/wasm32-wasip2/release/guided_learning.wasm"
 ui = "apps/guided-learning/ui"
-allow_hosts = ["api.anthropic.com"]
+allow_hosts = ["api.deepseek.com"]
 
 [apps.guided-learning.inject]
-"api.anthropic.com" = { header = "x-api-key", secret = "env://ANTHROPIC_API_KEY" }
+"api.deepseek.com" = { bearer = true, secret = "env://DEEPSEEK_API_KEY" }
 
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"

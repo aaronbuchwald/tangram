@@ -7,20 +7,20 @@
 //! attempt is flagged.
 
 mod support;
-use support::{FixtureServer, act, anthropic_response, fresh_ctx, llm_env_guard};
+use support::{FixtureServer, act, deepseek_response, fresh_ctx, llm_env_guard};
 
 type Ctx = tangram_core::Ctx<guided_learning::GuidedLearning>;
 
 /// Drive generate → submit → evaluate against a scripted fixture, returning
 /// the ctx and session id so callers can read state or run further actions.
 async fn run(confidence: u8, grade: u8) -> (Ctx, String) {
-    let generate = anthropic_response(serde_json::json!({
+    let generate = deepseek_response(serde_json::json!({
         "questions": [
             { "topic": "Light reactions", "kind": "factual",
               "prompt": "What pigment captures light?", "model_answer": "Chlorophyll." }
         ]
     }));
-    let evaluate = anthropic_response(serde_json::json!({
+    let evaluate = deepseek_response(serde_json::json!({
         "grade": grade,
         "feedback": "You're close on energy capture, but name the pigment precisely.",
         "model_answer": "Chlorophyll is the light-capturing pigment."

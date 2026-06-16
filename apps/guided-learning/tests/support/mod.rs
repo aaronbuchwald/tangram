@@ -1,6 +1,6 @@
 //! Shared test scaffolding: build a `Ctx<GuidedLearning>` over an in-memory
 //! store (the same doc-in/doc-out store the WASM guest uses), and a tiny
-//! recorded-Anthropic fixture HTTP server so the LLM-backed actions run in CI
+//! recorded-DeepSeek fixture HTTP server so the LLM-backed actions run in CI
 //! with no live key (the nutrition / rmcp-golden fixture precedent).
 
 #![allow(dead_code)]
@@ -57,31 +57,34 @@ pub async fn llm_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     LOCK.lock().await
 }
 
-// ── recorded-Anthropic fixture server ──────────────────────────────────────
+// ── recorded-DeepSeek fixture server ────────────────────────────────────────
 
-/// A canned Messages-API response wrapping a structured-output JSON string in
-/// the first text content block (exactly the shape `tutor::call` parses).
-pub fn anthropic_response(structured_json: serde_json::Value) -> String {
-    let text = structured_json.to_string();
+/// A canned chat-completions response wrapping a structured-output JSON string
+/// in `choices[0].message.content` (exactly the shape `tutor::call` parses —
+/// the tutor runs DeepSeek in JSON mode, so the content IS the JSON object).
+pub fn deepseek_response(structured_json: serde_json::Value) -> String {
+    let content = structured_json.to_string();
     serde_json::json!({
-        "id": "msg_fixture",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-opus-4-8",
-        "content": [{ "type": "text", "text": text }],
-        "stop_reason": "end_turn"
+        "id": "chatcmpl_fixture",
+        "object": "chat.completion",
+        "model": "deepseek-chat",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": content },
+            "finish_reason": "stop"
+        }]
     })
     .to_string()
 }
 
 /// A local one-shot-per-connection HTTP server that replays `body` (a full
-/// Messages-API JSON response) for every POST. Returns the base URL to set as
-/// `GUIDED_LEARNING_LLM_URL`. The server runs on a background task for the
+/// chat-completions JSON response) for every POST. Returns the base URL to set
+/// as `GUIDED_LEARNING_LLM_URL`. The server runs on a background task for the
 /// lifetime of the returned guard.
 pub struct FixtureServer {
     pub url: String,
-    /// The request lines (e.g. "POST /v1/messages HTTP/1.1") the server saw,
-    /// so a containment test can assert the tutor only ever hits the one
+    /// The request lines (e.g. "POST /v1/chat/completions HTTP/1.1") the server
+    /// saw, so a containment test can assert the tutor only ever hits the one
     /// declared call.
     requests: Arc<std::sync::Mutex<Vec<String>>>,
     _handle: tokio::task::JoinHandle<()>,
@@ -106,7 +109,7 @@ impl FixtureServer {
             .await
             .expect("bind fixture listener");
         let addr = listener.local_addr().expect("local addr");
-        let url = format!("http://{addr}/v1/messages");
+        let url = format!("http://{addr}/v1/chat/completions");
         let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = requests.clone();
         let handle = tokio::spawn(async move {

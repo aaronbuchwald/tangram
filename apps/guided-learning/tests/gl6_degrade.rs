@@ -1,8 +1,8 @@
 //! GL6 — degrade-without-key + capabilities probe.
 //!
-//! With NO Anthropic credential resolvable: the sync actions still work (the
+//! With NO DeepSeek credential resolvable: the sync actions still work (the
 //! artifact is editable offline); the LLM-backed actions return a clean,
-//! actionable error ("configure ANTHROPIC_API_KEY"); and the capabilities
+//! actionable error ("configure DEEPSEEK_API_KEY"); and the capabilities
 //! probe reports the tutor unavailable. Mirrors the nutrition / egress
 //! `configured-iff-resolves` precedent.
 
@@ -14,12 +14,7 @@ use support::{act, fresh_ctx, llm_env_guard};
 /// serialized against the other LLM tests.
 async fn no_credentials() -> tokio::sync::MutexGuard<'static, ()> {
     let guard = llm_env_guard().await;
-    for var in [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "GUIDED_LEARNING_LLM_URL",
-    ] {
+    for var in ["DEEPSEEK_API_KEY", "GUIDED_LEARNING_LLM_URL"] {
         // SAFETY: serialized by the guard; the LLM tests are the only readers.
         unsafe { std::env::remove_var(var) };
     }
@@ -100,7 +95,7 @@ async fn llm_actions_return_actionable_error_without_key() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("ANTHROPIC_API_KEY") || err.contains("credential"),
+        err.contains("DEEPSEEK_API_KEY") || err.contains("credential"),
         "the LLM action names the missing credential: {err}"
     );
     // The error does not corrupt state — no questions were committed.
