@@ -15,6 +15,11 @@ import {
 } from "./api";
 import { isAgentPopupOpen, openAgentPopup } from "./agentPopup";
 import {
+  isQuickOpenOpen,
+  openQuickOpen,
+  type QuickOpenItem,
+} from "./quickOpen";
+import {
   DEFAULT_MODEL,
   buildAgentIndex,
   type AgentDef,
@@ -314,6 +319,7 @@ function el(tag: string, cls?: string, text?: string): HTMLElement {
 
 function renderTree() {
   treeEl.replaceChildren();
+  treeEl.setAttribute("role", "tree");
   const nodes = buildTree(files);
   if (nodes.length === 0) {
     treeEl.appendChild(el("div", "empty", "No notes yet"));
@@ -322,12 +328,81 @@ function renderTree() {
   for (const node of nodes) treeEl.appendChild(renderNode(node, 0));
 }
 
+// Keyboard navigation across the VISIBLE tree rows (#6). Rows are focusable
+// (tabindex=0) and carry tree-item semantics; ↑/↓ move focus between visible
+// rows, Enter/→ open a file or expand a folder, ← collapses a folder (or, on a
+// file/already-collapsed folder, steps to its parent). Click behaviour is
+// untouched. Re-deriving the visible row list from the DOM each keystroke keeps
+// it correct across the re-render that expand/collapse triggers.
+function visibleTreeRows(): HTMLElement[] {
+  return Array.from(treeEl.querySelectorAll<HTMLElement>(".tree-row"));
+}
+
+function focusTreeRow(row: HTMLElement | undefined) {
+  row?.focus();
+}
+
+function onTreeRowKey(e: KeyboardEvent, row: HTMLElement, node: TreeNode) {
+  const rows = visibleTreeRows();
+  const idx = rows.indexOf(row);
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    focusTreeRow(rows[idx + 1]);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    focusTreeRow(rows[idx - 1]);
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    row.click();
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    if (node.kind === "folder") {
+      if (collapsed.has(node.path)) {
+        row.click(); // expand
+        // After re-render, focus the same folder row so a second → can descend.
+        requestAnimationFrame(() => focusFolderRow(node.path));
+      } else {
+        focusTreeRow(rows[idx + 1]); // already open → step into first child
+      }
+    }
+  } else if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    if (node.kind === "folder" && !collapsed.has(node.path)) {
+      row.click(); // collapse
+      requestAnimationFrame(() => focusFolderRow(node.path));
+    } else {
+      // file, or already-collapsed folder → step up to the parent folder row.
+      focusTreeRow(parentFolderRow(node.path));
+    }
+  }
+}
+
+function focusFolderRow(path: string) {
+  for (const row of visibleTreeRows()) {
+    if (row.dataset.treePath === path) {
+      row.focus();
+      return;
+    }
+  }
+}
+
+function parentFolderRow(path: string): HTMLElement | undefined {
+  const parent = path.split("/").slice(0, -1).join("/");
+  if (!parent) return undefined;
+  return visibleTreeRows().find((r) => r.dataset.treePath === parent);
+}
+
 function renderNode(node: TreeNode, depth: number): HTMLElement {
   if (node.kind === "folder") {
     const wrap = el("div", "tree-folder");
     const row = el("div", "tree-row folder-row");
     row.style.paddingLeft = `${depth * 20 + 8}px`;
     const isCollapsed = collapsed.has(node.path);
+    row.tabIndex = 0;
+    row.dataset.treePath = node.path;
+    row.setAttribute("role", "treeitem");
+    row.setAttribute("aria-expanded", String(!isCollapsed));
+    row.addEventListener("keydown", (e) => onTreeRowKey(e, row, node));
     // Obsidian-style disclosure chevron: a single right-pointing chevron that
     // rotates 90° down when the folder is open (the `.open` class drives a CSS
     // transform/transition in styles.css). Dim/subtle, tight to the name —
@@ -379,6 +454,10 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
   }
   const row = el("div", "tree-row file-row");
   row.style.paddingLeft = `${depth * 20 + 8}px`;
+  row.tabIndex = 0;
+  row.dataset.treePath = node.path;
+  row.setAttribute("role", "treeitem");
+  row.addEventListener("keydown", (e) => onTreeRowKey(e, row, node));
   if (tabs.active?.kind === "note" && tabs.active.fileId === node.file.id) {
     row.classList.add("active");
   }
@@ -490,6 +569,106 @@ function renderAgentsBadge() {
   }
 }
 
+// Open the create-agent flow OUTSIDE the editor (from the Agents view's
+// "+ New agent" button or the quick-open switcher) — the same popup `/agent`
+// uses, but with no editor token to swap. On create we open the new definition's
+// source note in a tab (the create popup writes it to the vault by `path`, and a
+// vault state frame indexes it shortly after — we resolve the freshly-written
+// file by path here so the user lands on what they just made). The discoverable
+// on-ramp for #9/#10.
+function createAgentStandalone() {
+  openCreateAgentPopup({
+    isNameTaken: (name) => agentIndex.has(name),
+    onCreated: (created: CreatedAgent) => {
+      // The note may not be in `files` yet (the vault round-trip is async); try
+      // to open it by path, and if it isn't indexed yet the agents badge/table
+      // will pick it up on the next state frame regardless.
+      const file = files.find((f) => normalizePath(f.path) === normalizePath(created.path));
+      if (file) tabs.openNote(file.id);
+    },
+    onClose: () => {},
+  });
+}
+
+// ── quick-open (Ctrl/Cmd-P) ──────────────────────────────────────────────────
+
+// Build the switcher's item set from the live vault + agent index + fleet. Read
+// fresh each time quick-open is invoked (the closures over `files`/`agentIndex`/
+// `fleet` always see the current frame), so new notes/agents/apps appear without
+// any extra subscription. Folder sentinels (`.keep`) are excluded.
+function quickOpenItems(): QuickOpenItem[] {
+  const items: QuickOpenItem[] = [];
+  for (const f of files) {
+    if (f.path.endsWith("/.keep") || f.path === ".keep") continue;
+    const name = (f.path.split("/").pop() ?? f.path).replace(/\.md$/i, "");
+    items.push({
+      id: f.id,
+      kind: "note",
+      label: name,
+      detail: f.path,
+      haystack: `${name} ${f.path}`,
+    });
+  }
+  for (const def of agentIndex.all) {
+    items.push({
+      id: def.name,
+      kind: def.kind,
+      label: def.name,
+      detail: def.path,
+      haystack: `${def.name} ${def.path}`,
+    });
+  }
+  for (const app of fleet) {
+    items.push({
+      id: app.name,
+      kind: "app",
+      label: displayName(app.name),
+      detail: "app",
+      haystack: `${app.name} ${displayName(app.name)}`,
+    });
+  }
+  return items;
+}
+
+// Dispatch a quick-open pick: notes/apps open in a tab; an agent opens its bound
+// run popup (the highest-value action — run it now), falling back to its source
+// note if the def somehow can't be located.
+function quickOpenPick(item: QuickOpenItem): void {
+  if (item.kind === "note") {
+    tabs.openNote(item.id);
+    return;
+  }
+  if (item.kind === "app") {
+    tabs.openApp(item.id);
+    return;
+  }
+  // agent | skill — open the run popup bound to the def.
+  const def = agentIndex.findAgent(item.id);
+  if (def) {
+    openAgentPopup(def, { onSave: () => {}, onClose: () => {} });
+  } else {
+    tabs.openAgents();
+  }
+}
+
+// Global Ctrl/Cmd-P → toggle the quick-open switcher. Capture phase + preventing
+// default so it beats the browser's native print dialog. Single-instance: if the
+// switcher is already up, the shortcut closes it (handled inside quickOpen's own
+// Esc/keydown), so we only open when not already open.
+document.addEventListener(
+  "keydown",
+  (e) => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && !e.altKey && (e.key === "p" || e.key === "P")) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isQuickOpenOpen()) return;
+      openQuickOpen({ items: quickOpenItems, onPick: quickOpenPick });
+    }
+  },
+  true,
+);
+
 // Run a registry mutation, then refresh the fleet so the change reflects in
 // the sidebar (and /api/fleet) without waiting for the 5s poll. Errors (most
 // commonly a missing/invalid token → 401) surface as a themed toast.
@@ -517,13 +696,18 @@ function tabTitle(tab: Tab): string {
 
 function renderTabs() {
   tabstripEl.replaceChildren();
+  tabstripEl.setAttribute("role", "tablist");
   const home = el("button", "tab-home", "⌂");
   home.title = "Home";
+  home.setAttribute("role", "tab");
+  home.setAttribute("aria-label", "Home");
   home.addEventListener("click", () => tabs.openHome());
   tabstripEl.appendChild(home);
   let activeChip: HTMLElement | null = null;
   for (const tab of tabs.tabs) {
     const chip = el("div", "tab");
+    chip.setAttribute("role", "tab");
+    chip.setAttribute("aria-selected", String(tab.id === tabs.activeId));
     if (tab.id === tabs.activeId) {
       chip.classList.add("active");
       activeChip = chip;
@@ -704,6 +888,7 @@ function renderContent() {
     renderAgentsView(contentEl, agentIndex, {
       openNote: (fileId) => tabs.openNote(fileId),
       fileById: (fileId) => filesById.get(fileId),
+      newAgent: () => createAgentStandalone(),
     });
     return;
   }

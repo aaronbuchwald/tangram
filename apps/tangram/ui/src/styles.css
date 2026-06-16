@@ -136,6 +136,9 @@ body {
 }
 .tree-row:hover, .app-row:hover { background: var(--panel-2); }
 .tree-row.active, .app-row.active { background: #182634; color: #cfe9ff; }
+/* Keyboard focus on a vault tree row (#6 tree nav): a clear inset accent so the
+   ↑/↓-driven cursor is visible without shifting layout. */
+.tree-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--blue); }
 .tree-row .label, .app-row .label {
   flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -409,6 +412,36 @@ body {
 .modal-btn.danger { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
 .modal-btn.danger:hover { filter: brightness(1.08); color: #fff; }
 
+/* ── quick-open switcher (Ctrl/Cmd-P, #6) ──
+   Reuses the modal overlay/card language; a search input over a scrollable,
+   keyboard-navigable result list. Wired in quickOpen.ts. */
+.quick-open { width: min(560px, calc(100vw - 32px)); padding: 0; gap: 0; overflow: hidden; }
+.quick-open-input {
+  border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+  font: 15px/1.4 var(--sans); padding: 13px 15px;
+}
+.quick-open-input:focus { border-color: var(--line); border-bottom-color: var(--blue); }
+.quick-open-list { max-height: min(48vh, 420px); overflow-y: auto; padding: 6px; }
+.quick-open-empty { padding: 16px; text-align: center; color: var(--faint); font-size: 13px; }
+.quick-open-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 6px; cursor: pointer; user-select: none;
+}
+.quick-open-row.active { background: #182634; }
+.quick-open-label { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-open-row.active .quick-open-label { color: #cfe9ff; }
+.quick-open-detail {
+  margin-left: auto; color: var(--faint); font: 12px/1.4 var(--mono);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%;
+}
+.quick-open-kind {
+  flex: none; font: 600 9px/1 var(--sans); letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--dim); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 7px; min-width: 46px; text-align: center;
+}
+.quick-open-kind-agent, .quick-open-kind-skill { color: var(--blue); border-color: rgba(0,158,238,0.4); }
+.quick-open-kind-app { color: var(--green); border-color: rgba(31,210,134,0.4); }
+
 /* ── transient error toasts ──
    Themed replacement for window.alert on a failed vault/registry/agent op.
    Stacks bottom-right, reuses the modal card tokens, auto-dismisses (or click).
@@ -622,7 +655,28 @@ body {
   overflow: hidden; padding: 18px 22px; gap: 14px;
 }
 .agents-head { display: flex; flex-direction: column; gap: 10px; }
+.agents-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .agents-title { margin: 0; font-size: 1.3rem; font-weight: 400; }
+/* The "+ New agent" CTA — the discoverable on-ramp (#9). Primary-blue, matching
+   the modal primary button language so it reads as the main action. */
+.agents-new-btn {
+  background: var(--blue); border: 1px solid var(--blue); border-radius: 7px;
+  color: #06222e; font: 600 13px/1 var(--sans); padding: 8px 13px;
+  cursor: pointer; transition: filter 0.12s ease; white-space: nowrap;
+}
+.agents-new-btn:hover { filter: brightness(1.08); }
+.agents-new-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Empty-state CTA: the title, the primary button, and the one-line hint that
+   teaches the `/` affordance — replaces the passive "nothing here yet" text. */
+.agents-empty-cta { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 14px; }
+.agents-empty-title { color: var(--text); font-size: 14px; }
+.agents-empty-hint { color: var(--dim); font-size: 13px; }
+.agents-empty-hint strong { color: var(--text); font-weight: 600; }
+.agents-kbd {
+  font-family: var(--mono); font-size: 12px; color: var(--blue);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 5px;
+}
 .agents-bar { display: flex; align-items: center; gap: 12px; }
 .agents-query {
   flex: 1; background: var(--bg); border: 1px solid var(--line); border-radius: 7px;

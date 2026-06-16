@@ -25,6 +25,7 @@ import {
   drawSelection,
   highlightActiveLine,
   keymap,
+  placeholder,
 } from "@codemirror/view";
 import { autocompletion } from "@codemirror/autocomplete";
 import { tags as t } from "@lezer/highlight";
@@ -154,9 +155,42 @@ const theme = EditorView.theme(
       color: "var(--dim)",
       fontStyle: "italic",
     },
+    // The empty-note slash hint (#10): the default CM6 placeholder colour is too
+    // loud, so dim it; the `/`/`[[` chips read as quiet key glyphs.
+    ".cm-placeholder": { color: "var(--faint)", fontStyle: "normal" },
+    ".cm-slash-hint-kbd": {
+      fontFamily: "var(--mono)",
+      color: "var(--blue)",
+      backgroundColor: "var(--panel-2)",
+      borderRadius: "4px",
+      padding: "0.05em 0.3em",
+    },
   },
   { dark: true },
 );
+
+// Build the empty-note placeholder (#10): "Type / to run an agent · [[ to link
+// a note", with the `/` and `[[` tokens rendered as subtle key chips. Returned
+// as a detached DOM node so CM6's `placeholder` extension mounts it verbatim;
+// it auto-hides the instant the document is non-empty.
+function slashHintPlaceholder(): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = "cm-slash-hint";
+  const kbd = (text: string): HTMLElement => {
+    const k = document.createElement("code");
+    k.className = "cm-slash-hint-kbd";
+    k.textContent = text;
+    return k;
+  };
+  wrap.append(
+    document.createTextNode("Type "),
+    kbd("/"),
+    document.createTextNode(" to run an agent · "),
+    kbd("[["),
+    document.createTextNode(" to link a note"),
+  );
+  return wrap;
+}
 
 export class MdEditor {
   readonly view: EditorView;
@@ -226,6 +260,11 @@ export class MdEditor {
         // High-precedence agent Enter handler must sit before the default
         // keymap (which also binds Enter); slashTrigger wraps it in Prec.highest.
         ...agentExtensions,
+        // Quiet slash/wikilink affordance (#10): a dim placeholder shown only
+        // while the note is empty, surfacing the two inline powers without
+        // adding chrome. CM6's `placeholder` auto-hides the moment any text is
+        // typed, so it never intrudes on a real note or the live-preview render.
+        placeholder(slashHintPlaceholder()),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         // Extended (GFM) dialect so strikethrough, task lists, tables, etc.
         // parse — the live-preview decorations key off their Lezer nodes.

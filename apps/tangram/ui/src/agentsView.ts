@@ -230,6 +230,10 @@ export interface AgentsViewCallbacks {
   /** Look up the live MdFile for a def's fileId (so add-label/add-meta can read
    *  the current body before rewriting it). */
   fileById: (fileId: string) => MdFile | undefined;
+  /** Open the create-agent flow (the same path `/agent` uses). Wired by main.ts
+   *  to the shared create popup so the Agents view is a discoverable on-ramp
+   *  (#9/#10) — not just a passive table of what already exists. */
+  newAgent: () => void;
 }
 
 // Sort + query state is module-local so it survives re-renders driven by vault
@@ -257,9 +261,17 @@ export function renderAgentsView(
   host.replaceChildren();
   const wrap = el("div", "agents-view");
 
-  // Header: title + the GitHub-issues-style query bar + a live count.
+  // Header: a title row (title + the "+ New agent" CTA, the discoverable
+  // on-ramp #9) over the GitHub-issues-style query bar + a live count.
   const head = el("div", "agents-head");
-  head.appendChild(el("h1", "agents-title", "Agents"));
+  const titleRow = el("div", "agents-title-row");
+  titleRow.appendChild(el("h1", "agents-title", "Agents"));
+  const newBtn = el("button", "agents-new-btn", "+ New agent") as HTMLButtonElement;
+  newBtn.type = "button";
+  newBtn.title = "Create a new agent or skill";
+  newBtn.addEventListener("click", () => cb.newAgent());
+  titleRow.appendChild(newBtn);
+  head.appendChild(titleRow);
 
   const bar = el("div", "agents-bar");
   const input = document.createElement("input");
@@ -323,7 +335,29 @@ export function renderAgentsView(
       const tr = el("tr");
       const td = el("td", "agents-empty") as HTMLTableCellElement;
       td.colSpan = COLUMNS.length + 1;
-      td.textContent = index.all.length === 0 ? "No agents or skills yet" : "No matches";
+      if (index.all.length === 0) {
+        // First-run CTA (#9/#10): turn the passive "nothing here" into an
+        // on-ramp — a primary action plus the one-line hint that teaches the
+        // two ways to get an agent going.
+        const cta = el("div", "agents-empty-cta");
+        cta.appendChild(el("div", "agents-empty-title", "No agents or skills yet"));
+        const ctaBtn = el("button", "agents-new-btn", "+ New agent") as HTMLButtonElement;
+        ctaBtn.type = "button";
+        ctaBtn.addEventListener("click", () => cb.newAgent());
+        cta.appendChild(ctaBtn);
+        const hint = el("div", "agents-empty-hint");
+        hint.append(
+          document.createTextNode("Type "),
+          el("code", "agents-kbd", "/"),
+          document.createTextNode(" in any note to create or run an agent, or click "),
+          el("strong", undefined, "+ New agent"),
+          document.createTextNode("."),
+        );
+        cta.appendChild(hint);
+        td.appendChild(cta);
+      } else {
+        td.textContent = "No matches";
+      }
       tr.appendChild(td);
       tbody.appendChild(tr);
       return;
