@@ -29,22 +29,24 @@ mod agents;
 #[model]
 pub struct Vault {
     files: Vec<MdFile>,
-    /// Last-run bookkeeping for cron-triggered agents, keyed by agent name —
-    /// a replicated `Vec` (not a `HashMap`; the model `Default` must stay
-    /// deterministic) so a scheduled run survives a host restart and a
-    /// device's view of "when did /standup last run" replicates like any
-    /// other state. Absent on documents written by older binaries (the
-    /// `missing` attribute hydrates the empty default).
+    /// Last-run bookkeeping for cron-triggered agent INVOCATIONS, keyed by the
+    /// invocation's stable id (R1: the trigger — and therefore the run cadence —
+    /// belongs to the ```agent``` block, not the definition). A replicated `Vec`
+    /// (not a `HashMap`; the model `Default` must stay deterministic) so a
+    /// scheduled run survives a host restart and a device's view of "when did
+    /// this invocation last run" replicates like any other state. Absent on
+    /// documents written by older binaries (the `missing` attribute hydrates the
+    /// empty default).
     #[autosurgeon(missing = "Option::default")]
     agent_runs: Option<Vec<AgentRun>>,
 }
 
-/// One agent's last-run timestamp (the cron due-check reads this; `tick_agents`
-/// updates it in the same commit that appends the run's output).
+/// One invocation's last-run timestamp (the cron due-check reads this;
+/// `tick_agents` updates it in the same commit that appends the run's output).
 #[model]
 pub struct AgentRun {
-    /// The agent's name (matches the frontmatter `name`).
-    name: String,
+    /// The invocation's stable id (`agents::Invocation::invocation_id`).
+    invocation_id: String,
     /// Wall-clock ms of the last run that completed.
     last_run_ms: i64,
 }
@@ -242,11 +244,13 @@ impl Vault {
         Ok(())
     }
 
-    /// The host scheduler's per-tick entry point (host-side cron, P5): scan the
-    /// vault, run every cron-triggered agent whose schedule says it is DUE, and
-    /// append each one's completion to its own note. Returns the names of the
-    /// agents that ran this tick. Resolves the LLM call OUTSIDE the lock and
-    /// commits each result via `Ctx::mutate` (CLAUDE.md: the store lock is
+    /// The host scheduler's per-tick entry point (host-side cron): scan every
+    /// note body for ```agent``` invocation blocks with a `trigger: cron …`
+    /// whose schedule says they are DUE, resolve each block's `use:` to a
+    /// definition, run it (the def's instructions = system, the block's prompt =
+    /// user), and append each completion right after its block. Returns the
+    /// `use:` names that ran this tick. Resolves the LLM call OUTSIDE the lock
+    /// and commits each result via `Ctx::mutate` (CLAUDE.md: the store lock is
     /// never held across an await).
     ///
     /// A no-op when nothing is due — the host dispatches this on a ~60s
@@ -254,34 +258,48 @@ impl Vault {
     pub async fn tick_agents(ctx: Ctx<Self>) -> Result<Vec<String>, String> {
         let state = ctx.state().map_err(|e| e.to_string())?;
         let now = now_ms();
-        // Decide DUE agents from a single snapshot (pure, no I/O).
-        let due: Vec<agents::AgentDef> = state
+
+        // Index the definitions once (by lowercased name) so each due block can
+        // resolve its `use:`. Definitions are pure capabilities (no trigger).
+        let defs: Vec<agents::AgentDef> = state
             .files
             .iter()
             .filter_map(|f| agents::parse_agent(&f.body))
-            .filter(|def| {
-                let last = state.last_run_ms(&def.name);
-                agents::is_due(def, last, now)
-            })
+            .collect();
+        let resolve = |use_name: &str| -> Option<agents::AgentDef> {
+            let needle = use_name.trim().to_ascii_lowercase();
+            defs.iter()
+                .find(|d| d.name.to_ascii_lowercase() == needle)
+                .cloned()
+        };
+
+        // Decide DUE (invocation, definition) pairs from a single snapshot.
+        let due: Vec<(agents::Invocation, agents::AgentDef)> = state
+            .files
+            .iter()
+            .flat_map(|f| agents::parse_invocations(&f.id, &f.body))
+            .filter(|inv| inv.is_cron())
+            .filter(|inv| agents::is_due(inv, state.last_run_ms(&inv.invocation_id), now))
+            .filter_map(|inv| resolve(&inv.use_name).map(|def| (inv, def)))
             .collect();
 
         let mut ran = Vec::new();
-        for def in due {
+        for (inv, def) in due {
             // Resolve the model response OUTSIDE the lock, then commit.
-            match run_definition(&def).await {
+            match run_definition(&def, &inv.prompt).await {
                 Ok(output) => {
                     ctx.mutate("tick_agents", |m| {
-                        m.append_agent_output(&def, &output, now_ms())
+                        m.append_invocation_output(&inv, &def, &output, now_ms());
                     })
                     .map_err(|e| e.to_string())?;
-                    ran.push(def.name.clone());
+                    ran.push(inv.use_name.clone());
                 }
-                // A failing agent must not abort the whole tick — record the
-                // error to its note (so the operator sees it) and continue.
+                // A failing invocation must not abort the whole tick — record the
+                // error after its block (so the operator sees it) and continue.
                 Err(e) => {
                     let msg = format!("error: {e}");
                     let _ = ctx.mutate("tick_agents", |m| {
-                        m.append_agent_output(&def, &msg, now_ms())
+                        m.append_invocation_output(&inv, &def, &msg, now_ms());
                     });
                 }
             }
@@ -289,10 +307,11 @@ impl Vault {
         Ok(ran)
     }
 
-    /// Force a single agent to run NOW, ignoring its schedule (a manual run
-    /// from the UI or the host, and the seam the tests drive). Errors if no
+    /// Force a single agent to run NOW, ignoring any schedule (a manual run from
+    /// the UI or the host, and the seam the tests drive). Errors if no
     /// agent/skill named `name` exists in the vault. Appends the output to the
-    /// agent's own note and records the run time, exactly like a scheduled run.
+    /// agent's own note. Uses a minimal standing prompt (`Run now.`) since a
+    /// manual run is not bound to a specific invocation block.
     pub async fn run_agent(ctx: Ctx<Self>, name: String) -> Result<String, String> {
         let state = ctx.state().map_err(|e| e.to_string())?;
         let needle = name.trim().to_ascii_lowercase();
@@ -303,9 +322,9 @@ impl Vault {
             .find(|d| d.name.to_ascii_lowercase() == needle)
             .ok_or_else(|| format!("no agent or skill named {name:?} in the vault"))?;
 
-        let output = run_definition(&def).await?;
+        let output = run_definition(&def, "Run now.").await?;
         ctx.mutate("run_agent", |m| {
-            m.append_agent_output(&def, &output, now_ms())
+            m.append_manual_output(&def, &output, now_ms());
         })
         .map_err(|e| e.to_string())?;
         Ok(output)
@@ -313,46 +332,76 @@ impl Vault {
 }
 
 impl Vault {
-    /// The recorded last-run wall-clock for `name`, if any (the cron due-check
-    /// reads this).
-    fn last_run_ms(&self, name: &str) -> Option<i64> {
+    /// The recorded last-run wall-clock for the invocation `id`, if any (the
+    /// cron due-check reads this).
+    fn last_run_ms(&self, id: &str) -> Option<i64> {
         self.agent_runs
             .as_ref()?
             .iter()
-            .find(|r| r.name == name)
+            .find(|r| r.invocation_id == id)
             .map(|r| r.last_run_ms)
     }
 
-    /// Record `name`'s last run, upserting into the replicated `agent_runs`
-    /// map (deterministic `Vec`, not a `HashMap`).
-    fn record_run(&mut self, name: &str, at_ms: i64) {
+    /// Record an invocation's last run, upserting into the replicated
+    /// `agent_runs` map (deterministic `Vec`, not a `HashMap`), keyed by the
+    /// invocation's stable id.
+    fn record_run(&mut self, id: &str, at_ms: i64) {
         let runs = self.agent_runs.get_or_insert_with(Vec::new);
-        if let Some(run) = runs.iter_mut().find(|r| r.name == name) {
+        if let Some(run) = runs.iter_mut().find(|r| r.invocation_id == id) {
             run.last_run_ms = at_ms;
         } else {
             runs.push(AgentRun {
-                name: name.to_string(),
+                invocation_id: id.to_string(),
                 last_run_ms: at_ms,
             });
         }
     }
 
-    /// Append one agent run's output block to the agent's own note and record
-    /// the run time — both in the SAME commit (so the due-check and the
-    /// visible output never disagree). The note is located by the agent's name
-    /// (re-parsed from each file, since the path is independent of the name).
-    fn append_agent_output(&mut self, def: &agents::AgentDef, output: &str, at_ms: i64) {
-        let schedule = def
-            .trigger
-            .as_ref()
-            .and_then(|t| t.schedule.as_deref())
-            .unwrap_or("(manual)");
+    /// Append a cron invocation's output right after its ```agent``` block and
+    /// record the run time — both in the SAME commit (so the due-check and the
+    /// visible output never disagree). The block is located by re-parsing the
+    /// invocation's host note and matching the stable `invocation_id` (so an
+    /// edit to the block — which changes the id — never appends to a stale spot).
+    fn append_invocation_output(
+        &mut self,
+        inv: &agents::Invocation,
+        def: &agents::AgentDef,
+        output: &str,
+        at_ms: i64,
+    ) {
         let block = format!(
-            "\n\n> Agent: /{name} · model: {model} · cron {schedule}\n> Output: {output}\n",
+            "\n\n> Agent: /{name} · model: {model} · {trigger}\n> Output: {output}\n",
+            name = def.name,
+            model = def.model,
+            trigger = inv.trigger.trim(),
+        );
+        // Find the host note (by id) and the live block end (re-parsed, so a
+        // concurrent edit that moved/changed the block is handled safely: if the
+        // id no longer matches any block we skip the append but still record the
+        // run, so a vanished invocation does not re-fire).
+        for file in self.files.iter_mut() {
+            if let Some(live) = agents::parse_invocations(&file.id, &file.body)
+                .into_iter()
+                .find(|i| i.invocation_id == inv.invocation_id)
+            {
+                file.body.insert_str(live.block_end, &block);
+                file.updated_at_ms = Some(at_ms);
+                break;
+            }
+        }
+        self.record_run(&inv.invocation_id, at_ms);
+    }
+
+    /// Append a MANUAL run's output block to the agent definition's own note
+    /// (the `run_agent` path — not bound to an invocation block, so it appends
+    /// to the def note like the one-time inline flow does, and records no
+    /// invocation last-run).
+    fn append_manual_output(&mut self, def: &agents::AgentDef, output: &str, at_ms: i64) {
+        let block = format!(
+            "\n\n> Agent: /{name} · model: {model} · (manual)\n> Output: {output}\n",
             name = def.name,
             model = def.model,
         );
-        // Find the note whose frontmatter declares this agent and append.
         for file in self.files.iter_mut() {
             if agents::parse_agent(&file.body).is_some_and(|d| d.name == def.name) {
                 file.body.push_str(&block);
@@ -360,7 +409,6 @@ impl Vault {
                 break;
             }
         }
-        self.record_run(&def.name, at_ms);
     }
 }
 
@@ -403,19 +451,19 @@ fn agent_llm_url() -> String {
     std::env::var("TANGRAM_AGENT_LLM_URL").unwrap_or_else(|_| DEEPSEEK_URL.to_string())
 }
 
-/// Run one agent definition: issue a BARE chat-completions call to DeepSeek
-/// (system = the note's instructions, user = a minimal standing prompt) and
-/// return the assistant's text. The request carries NO API key — the HOST
-/// injects the DeepSeek credential at the component's http-fetch egress
+/// Run one agent definition with a `prompt`: issue a BARE chat-completions call
+/// to DeepSeek (system = the definition's instructions, user = the invocation's
+/// `prompt`) and return the assistant's text. The request carries NO API key —
+/// the HOST injects the DeepSeek credential at the component's http-fetch egress
 /// boundary (ADR-0005), so the key never enters the component's address space.
-async fn run_definition(def: &agents::AgentDef) -> Result<String, String> {
+async fn run_definition(def: &agents::AgentDef, prompt: &str) -> Result<String, String> {
     use tangram::http;
 
     let body = serde_json::json!({
         "model": def.model,
         "messages": [
             { "role": "system", "content": def.instructions },
-            { "role": "user", "content": "Run now." },
+            { "role": "user", "content": prompt },
         ],
     });
 
@@ -558,6 +606,48 @@ mod tests {
         v.write_file(id.clone(), "# Roadmap\n\n- ship it\n".into())
             .unwrap();
         assert_eq!(v.read_file(id).unwrap(), "# Roadmap\n\n- ship it\n");
+    }
+
+    /// The append path the cron tick drives: an invocation block's output is
+    /// inserted right after the block, and the run is recorded by the block's
+    /// stable id (not the definition name) so a second, distinct invocation of
+    /// the same def is tracked independently.
+    #[test]
+    fn invocation_output_appends_after_block_and_records_by_id() {
+        let mut v = empty();
+        let body = "# Daily\n\n```agent\nuse: standup\ntrigger: cron @hourly\n\
+                    prompt: Summarize today.\n```\n\ntail";
+        let id = v.create_file("daily.md".into(), body.into()).unwrap();
+        let file = v.files.iter().find(|f| f.id == id).unwrap();
+        let inv = agents::parse_invocations(&file.id, &file.body)
+            .into_iter()
+            .next()
+            .unwrap();
+        let def = agents::AgentDef {
+            kind: "skill".into(),
+            name: "standup".into(),
+            model: "deepseek-chat".into(),
+            instructions: "Write a status.".into(),
+        };
+        assert_eq!(v.last_run_ms(&inv.invocation_id), None);
+        v.append_invocation_output(&inv, &def, "all good", 1_234);
+        let after = v.read_file(id).unwrap();
+        // The output block lands right after the fence, before `tail`.
+        let fence_end = after.find("```\n").unwrap() + "```\n".len();
+        assert!(after[fence_end..].starts_with("\n\n> Agent: /standup"));
+        assert!(after.contains("> Output: all good"));
+        assert!(after.trim_end().ends_with("tail"));
+        // Run recorded by invocation id.
+        assert_eq!(v.last_run_ms(&inv.invocation_id), Some(1_234));
+    }
+
+    /// Editing the block changes its id, so the prior run no longer suppresses
+    /// it (stray-ref-safe / self-cleaning bookkeeping).
+    #[test]
+    fn editing_a_block_yields_a_fresh_invocation_id() {
+        let a = agents::invocation_id("f", "x", "cron @hourly", "p");
+        let b = agents::invocation_id("f", "x", "cron @daily", "p");
+        assert_ne!(a, b);
     }
 
     #[test]

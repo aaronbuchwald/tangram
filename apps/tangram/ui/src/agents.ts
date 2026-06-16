@@ -1,9 +1,12 @@
-// Agent/skill definitions, parsed from a vault note's leading YAML frontmatter
-// (P1 of the agents feature). A definition is decoupled from its triggers: the
-// saved note IS the entity; an inline `/<name>` in any file is a one-time
-// trigger that invokes it (see slashTrigger.ts). Event/cron triggers are later
-// phases — here we parse-and-ignore `tools`/`trigger`/`sandbox` so a richer
-// frontmatter doesn't break the index.
+// Agent/skill definitions, parsed from a vault note's leading YAML frontmatter.
+// R1 — the trigger belongs to the INVOCATION, not the definition: a definition
+// is a PURE CAPABILITY (kind/name/model/instructions/labels) and carries NO
+// trigger. The thing that decides when/how an agent runs is a ```agent
+// invocation block (see invocations.ts), indexed separately. An inline
+// `/<name>` in any file invokes a def — one-time (runs now) or, via the run
+// popup's options, written as a durable cron invocation block. Any stray
+// `trigger:`/`tools`/`sandbox` keys left in a definition's frontmatter are
+// parse-and-ignored so a richer frontmatter doesn't break the index.
 //
 // A file is an agent/skill iff its frontmatter carries `kind: agent|skill` AND
 // a non-empty `name`. The YAML parser is intentionally minimal and
@@ -15,7 +18,8 @@ import type { MdFile } from "./api";
 /** The default model used when a definition omits `model`. */
 export const DEFAULT_MODEL = "deepseek-chat";
 
-/** A parsed agent/skill definition (the entity; triggers are separate). */
+/** A parsed agent/skill definition — a pure capability; triggers live on the
+ *  ```agent invocation (see invocations.ts), never here. */
 export interface AgentDef {
   kind: "agent" | "skill";
   name: string;

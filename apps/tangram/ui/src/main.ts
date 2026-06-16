@@ -22,6 +22,7 @@ import {
 } from "./agents";
 import { renderAgentsView } from "./agentsView";
 import { buildLinkIndex, type LinkIndex } from "./links";
+import { buildInvocationIndex, type InvocationIndex } from "./invocations";
 import { wikiCandidatesFromFiles } from "./wikiComplete";
 import {
   type CreatedAgent,
@@ -87,6 +88,12 @@ let agentIndex: AgentIndex = buildAgentIndex([]);
 // reference (a stable closure), so links re-resolve and backlinks refresh on
 // the next vault state without re-mounting the editor.
 let linkIndex: LinkIndex = buildLinkIndex([]);
+// The agent INVOCATION index (R1): every ```agent block across the vault,
+// derived from the file text (so editing/removing a block self-cleans). Built
+// here alongside the other indexes so the UI and the component (which is the
+// scheduler-side consumer) agree on the format. Display of invocations is not
+// required for R1 — this just keeps the parser in lockstep with agents.rs.
+let invocationIndex: InvocationIndex = buildInvocationIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -426,7 +433,19 @@ function renderAgentsBadge() {
   const badge = document.getElementById("agents-count-badge");
   if (badge) badge.textContent = String(agentIndex.all.length);
   const head = document.getElementById("agents-head");
-  if (head) head.classList.toggle("active", tabs.active?.kind === "agents");
+  if (head) {
+    head.classList.toggle("active", tabs.active?.kind === "agents");
+    // Surface the scheduled-invocation count (R1: ```agent blocks across the
+    // vault) in the header tooltip — a small, honest read of the invocation
+    // index so it stays in lockstep with the component's scheduler view.
+    const scheduled = invocationIndex.all.filter((inv) =>
+      inv.trigger.trim().startsWith("cron"),
+    ).length;
+    head.title =
+      scheduled > 0
+        ? `Open the Agents view — ${scheduled} scheduled invocation${scheduled === 1 ? "" : "s"}`
+        : "Open the Agents view";
+  }
 }
 
 // Run a registry mutation, then refresh the fleet so the change reflects in
@@ -1042,6 +1061,10 @@ function onVaultState(state: VaultState) {
   // panel re-renders from it via renderContent below, so both reflect the new
   // vault without an editor re-mount.
   linkIndex = buildLinkIndex(files);
+  // Rebuild the agent invocation index over the same vault snapshot (R1). It is
+  // derived from each file's ```agent blocks, so edited/removed invocations
+  // self-clean here without any extra bookkeeping.
+  invocationIndex = buildInvocationIndex(files);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();

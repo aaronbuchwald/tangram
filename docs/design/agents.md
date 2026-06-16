@@ -44,8 +44,10 @@ held-for-review PR.
 ## 1. The model in one paragraph
 
 An **agent** is the base executable unit: a vault markdown file whose YAML
-frontmatter declares *instructions + model + tools + trigger + sandbox + identity
-+ labels + version*, and whose body is the natural-language instruction. To
+frontmatter declares *instructions + model + tools + sandbox + identity +
+labels + version* — a **pure capability** that carries **no trigger** (R1: the
+trigger lives on the invocation, §6). Its body is the natural-language
+instruction. To
 *run* an agent, the host drives an LLM↔tool loop — it sends the instructions
 (plus context) to the agent's `model` through the `/llm/<provider>` proxy, lets
 the model call the agent's declared MCP `tools` through the agentgateway MCP
@@ -84,7 +86,6 @@ An agent file is `frontmatter + markdown body`. Schema (all keys optional except
 | `name` | path-safe string | — | the handle: `@name` (agent) / `/name` (skill) |
 | `model` | provider/model string | host default | routed via `/llm/<provider>` (ADR-0012) |
 | `tools` | list of scoped tool ids | `[]` | MCP tools the loop may call (§7) |
-| `trigger` | `{ type: one-time \| event \| cron, … }` | `one-time` | how it runs (§6) |
 | `sandbox` | `none` \| `wasm` \| `gvisor` \| `seatbelt` | `none` | execution tier (§9) |
 | `labels` | list of strings | `[]` | free tags for the Agents view + query bar |
 | `meta` | map of key→value | `{}` | arbitrary kv for sort/filter (e.g. `cost_tier`) |
@@ -98,7 +99,6 @@ kind: skill
 name: summarize           # /summarize  (or @summarize inline)
 model: deepseek-chat      # via the /llm proxy
 tools: [vault.read, web.fetch]
-trigger: { type: one-time }
 sandbox: none
 labels: [writing, fast]
 meta: { owner: aaron, cost_tier: low }
@@ -106,6 +106,10 @@ version: 0.2.0
 ---
 Summarize the selected text into 3 terse bullets.
 ```
+
+The definition carries **no trigger** — it is a pure capability. The trigger
+(one-time vs cron vs event) lives on the **invocation**, a ```` ```agent ````
+block that links here via `use: summarize` (§6).
 
 `model: deepseek-chat` resolves to `POST /llm/deepseek/v1/chat/completions`
 (ADR-0012's path-based selection; the route is already wired and tested). The
@@ -157,24 +161,64 @@ to a *named, saved* agent definition (§11).
 
 ---
 
-## 6. Triggers
+## 6. Triggers — the trigger belongs to the INVOCATION, not the definition (R1)
 
-`trigger.type` selects how the host runs the agent:
+**A definition does not carry a trigger.** The definition (the `agents/…` note,
+§3) is a **pure capability** — kind, name, model, instructions, labels. What
+decides *whether and how* an agent runs is a separate, durable **invocation**: a
+fenced ```` ```agent ```` block placed inside *any* markdown note. The
+invocation is the **source of truth** for the trigger + the prompt, it links to
+a definition via `use:`, and it is **indexed** (derived from the file text) so
+editing or removing the block self-cleans — there are no stray references and no
+extra bookkeeping.
 
-- **`one-time`** (default) — runs on explicit invocation (`@`/`/`, or the Agents
-  view "Run" button). The only trigger the P0/P1 inline path needs.
-- **`event`** — runs on a **vault CRDT change** matched by the trigger spec:
-  a note created/changed in a folder, a label added, or **another agent's output
-  landing** (agents chaining via the document). The host watches the Automerge
-  change stream and fires matching agents.
-- **`cron`** — runs on a schedule (`trigger: { type: cron, expr: "0 7 * * *" }`).
+```text
+```agent
+use: standup                # the definition this invocation runs
+trigger: cron every 1h      # cron every <N>m|h · cron @hourly · cron @daily · one-time
+prompt: Summarize today's notes into three bullets.
+```                         # the prompt may span multiple lines until the fence
+```
 
-Event and cron are driven by a **host-supervised scheduler + event-watcher**,
+- **Definition** = capability (no trigger). Editing it is trigger-agnostic.
+- **Invocation** = a ```` ```agent ```` block. Owns `trigger` + `prompt`, links
+  to the def by `use:`, identified by a stable **`invocationId`** =
+  `hash(hostFileId + use + trigger + prompt)` (FNV-1a, identical in
+  `apps/tangram/ui/src/invocations.ts` and `apps/tangram/src/agents.rs`). An
+  unedited block keeps its id; editing it = a new id; removing it drops it.
+- **Last-run bookkeeping is keyed by `invocationId`** (the `agent_runs` `Vec` in
+  the vault model), so two distinct invocations of the same def run on their own
+  schedules, and an edited block re-fires (its id changed) rather than inheriting
+  a stale last-run.
+
+The run popup opened by `/<name>` is the **options pass** where a user picks the
+trigger (and, later, more): **prompt** + **Trigger** {**One-time** (default,
+runs now) · **Cron** (reveals a schedule input) · **Event** (disabled — future,
+issue #33)} + greyed placeholders for **MCP / Tools**, **Multi-step**, and
+**Tags / Labels** (each with a hover tooltip). The `/agent` define popup stays
+trigger-agnostic.
+
+`trigger` forms:
+
+- **`one-time`** (default) — runs on explicit invocation (`/<name>` → run now);
+  it does **not** write a durable ```` ```agent ```` block.
+- **`cron <schedule>`** — runs on a schedule. Picking Cron in the popup writes
+  the ```` ```agent ```` block; the host scheduler (below) picks it up. v1
+  schedule grammar: `every <N>m`, `every <N>h`, `@hourly`, `@daily` (a full
+  5-field cron is intentionally not supported).
+- **`event`** — runs on a **vault CRDT change** (note created, label added, or
+  another agent's output landing). **Disabled in the popup; future work,
+  issue #33.**
+
+Cron is driven by a **host-supervised scheduler** (`tangram-host/src/scheduler.rs`),
 built on the **same supervision pattern** the agentgateway and browser children
-already use (`gateway.rs` Backoff/shutdown; `tangram-automation/runner.rs`) — a
-long-running child the host owns, restarts, and shuts down cleanly. Output is
-always written back into the vault, so a triggered run is itself a CRDT change
-that may trigger downstream agents (bounded; see "agents spawning agents", §12).
+use (`gateway.rs` Backoff/shutdown; `tangram-automation/runner.rs`) — a 60s
+interval loop that dispatches the `tangram` shell's `tick_agents` action. The
+component scans every note body for ```` ```agent ```` blocks, resolves each
+`use:` to a definition, computes due per invocation, and appends each run's
+output right after its block — all in one `Ctx::mutate`. Output is written back
+into the vault, so a triggered run is itself a CRDT change that may (once event
+triggers ship) fire downstream agents (bounded; see §12).
 
 ---
 
@@ -204,7 +248,7 @@ GitHub-issues-style **sortable, filterable table**:
 |---|---|
 | name / kind | frontmatter |
 | model | frontmatter |
-| trigger | frontmatter (`one-time` / `event:…` / `cron:…`) |
+| trigger | the **invocation** (```` ```agent ```` block: `one-time` / `cron:…` / `event:…`), not the definition (R1, §6) |
 | last-run / status | run log (success/error/never) |
 | version | frontmatter semver |
 | labels | frontmatter `labels` |

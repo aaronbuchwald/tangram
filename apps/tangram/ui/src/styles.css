@@ -387,6 +387,36 @@ body {
   padding: 8px 11px; background: rgba(255, 69, 84, 0.08); white-space: pre-wrap; word-break: break-word;
 }
 
+/* ── run-popup options pass (R1: trigger lives on the invocation) ──
+   The trigger selector is active; MCP/Tools, Multi-step and Tags/Labels are
+   greyed placeholders with hover tooltips. Styled to match the modal card. */
+.agent-options {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 2px; padding-top: 10px; border-top: 1px solid var(--line);
+}
+.agent-option-row { display: flex; align-items: center; gap: 10px; }
+.agent-option-label { color: var(--dim); letter-spacing: 0.03em; min-width: 88px; }
+.agent-option-row.disabled { color: var(--faint); cursor: not-allowed; }
+.agent-option-row.disabled .agent-option-label { color: var(--faint); }
+.agent-option-soon {
+  margin-left: auto; color: var(--faint); letter-spacing: 0.04em;
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+}
+.agent-trigger-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.agent-seg-btn {
+  font: 12px/1.4 var(--mono); color: var(--dim);
+  background: var(--bg); border: none; padding: 4px 11px; cursor: pointer;
+  border-right: 1px solid var(--line);
+}
+.agent-seg-btn:last-child { border-right: none; }
+.agent-seg-btn:hover:not(.disabled):not(.active) { color: var(--text); }
+.agent-seg-btn.active { background: var(--blue); color: #fff; }
+.agent-seg-btn.disabled { color: var(--faint); cursor: not-allowed; }
+.agent-cron-wrap { display: flex; flex-direction: column; gap: 4px; padding-left: 98px; }
+.agent-cron-input { font: 13px/1.4 var(--mono); }
+.agent-cron-hint { color: var(--faint); }
+.agent-cron-hint.error { color: var(--red); }
+
 /* ── `/agent` create/define popup (P1) ──
    A compact label/field grid in the same modal card language. The fields are
    name / kind / model / labels / instructions; Create writes a vault note. */

@@ -1,35 +1,47 @@
-// The inline `/<name>` agent/skill RUN popup (P1). Triggered from the vault
+// The inline `/<name>` agent/skill INVOCATION popup. Triggered from the vault
 // editor when the caret sits right after a `/<name>` that resolves to a saved
 // definition and the user presses Enter (or clicks a highlighted token — see
 // editor.ts / slashTrigger.ts). It mirrors modal.ts's overlay/dialog visual
 // language (a single-instance overlay at the shell root, keyboard-first,
 // backdrop-click / Esc to dismiss).
 //
-// Single-turn only: the prompt the user types is sent to DeepSeek via the
-// host's `/llm/deepseek` proxy (relative path `../llm/deepseek/...` — the shell
-// is mounted at `/tangram/`, so it resolves to the host's proxy; the host
-// injects the API key, never the browser). The call is BOUND to the def: its
-// `model` is passed through and its `instructions` become the system message.
-// The response is shown as a chat exchange, then the user can Save (replace the
-// `/<name>` token with an indented blockquote of the prompt + response) or Exit
-// (discard, leave the token untouched).
+// R1 — the trigger belongs to the INVOCATION, not the definition. This popup is
+// where the user picks how a def runs (the OPTIONS PASS), below the prompt:
 //
-// The CREATE/DEFINE popup (`/agent`) lives below — see openCreateAgentPopup.
+//   - Trigger: One-time (default) · Cron (reveals a schedule input) · Event
+//     (disabled, future — issue #33).
+//   - MCP / Tools, Multi-step, Tags / Labels: disabled placeholders (tooltips).
 //
-// Scope guard (P1): DeepSeek route only (the model string is passed through but
-// provider routing is later), single prompt → response, exactly this flow. No
-// multi-turn, no provider choice, no tools/sandbox.
+// Submit behavior:
+//   - One-time → run NOW via DeepSeek through the host's `/llm/deepseek` proxy
+//     (relative `../llm/deepseek/...`; the host injects the key, never the
+//     browser), show the chat, and on Save replace the `/<name>` token with the
+//     `> Agent:` Input/Output block (unchanged behavior). No durable block.
+//   - Cron → write a durable ```agent block (use/trigger/prompt) by replacing
+//     the `/<name>` token; do NOT run now — the host scheduler picks it up.
+//
+// The call is BOUND to the def: its `model` is passed through and its
+// `instructions` become the system message.
+//
+// The CREATE/DEFINE popup (`/agent`) lives in createAgentPopup.ts; definitions
+// stay trigger-agnostic.
 
 import { DEFAULT_MODEL, type AgentDef } from "./agents";
+import { buildInvocationBlock } from "./invocations";
 
-/** What the popup does with the exchange when the user chooses Save. */
+/** What the popup does with the exchange / the chosen trigger. */
 export interface AgentPopupCallbacks {
   /** Replace the triggering `/<name>` range with the given markdown block and
-   *  refocus the editor. Wired by main.ts onto the live MdEditor. */
+   *  refocus the editor. Wired by main.ts onto the live MdEditor. Used for both
+   *  the one-time Output block (on Save) and the durable ```agent block (on a
+   *  Cron submit). */
   onSave: (block: string) => void;
   /** Close with no document change (Exit / dismiss); refocus the editor. */
   onClose: () => void;
 }
+
+/** The trigger the user chose in the options pass. */
+type TriggerChoice = "one-time" | "cron";
 
 // Only one popup at a time (like promptName/confirmAction). Re-opening while one
 // is up closes the previous instance first.
@@ -180,8 +192,8 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     if (e.target === overlay) dismiss();
   });
 
-  // ── Prompt state ──────────────────────────────────────────────────────────
-  function renderPrompt(initial = "") {
+  // ── Prompt + options state (R1 OPTIONS PASS) ───────────────────────────────
+  function renderPrompt(initial = "", initialTrigger: TriggerChoice = "one-time", initialSchedule = "") {
     dialog.replaceChildren();
 
     const title = document.createElement("div");
@@ -195,6 +207,64 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     input.value = initial;
     input.spellcheck = false;
 
+    // Options block: trigger selector + disabled placeholders.
+    const opts = document.createElement("div");
+    opts.className = "agent-options";
+
+    // ── Trigger (active) ──
+    let trigger: TriggerChoice = initialTrigger;
+    const trigRow = optionRow("Trigger");
+    const seg = document.createElement("div");
+    seg.className = "agent-trigger-seg";
+    const oneTimeBtn = segButton("One-time");
+    const cronBtn = segButton("Cron");
+    const eventBtn = segButton("Event");
+    eventBtn.disabled = true;
+    eventBtn.classList.add("disabled");
+    eventBtn.title =
+      "Run when a vault event occurs — note created, label added, another agent's output. Future feature (#33).";
+    seg.append(oneTimeBtn, cronBtn, eventBtn);
+    trigRow.append(seg);
+
+    // Cron schedule input (revealed only for Cron).
+    const cronWrap = document.createElement("div");
+    cronWrap.className = "agent-cron-wrap";
+    const cronInput = document.createElement("input");
+    cronInput.type = "text";
+    cronInput.className = "modal-input agent-cron-input";
+    cronInput.placeholder = "every 15m · @hourly · @daily";
+    cronInput.value = initialSchedule;
+    cronInput.spellcheck = false;
+    const cronHint = document.createElement("div");
+    cronHint.className = "agent-cron-hint micro";
+    cronHint.textContent = "Schedule: every <N>m | every <N>h | @hourly | @daily";
+    cronWrap.append(cronInput, cronHint);
+
+    function applyTrigger() {
+      oneTimeBtn.classList.toggle("active", trigger === "one-time");
+      cronBtn.classList.toggle("active", trigger === "cron");
+      cronWrap.style.display = trigger === "cron" ? "" : "none";
+      refresh();
+    }
+    oneTimeBtn.addEventListener("click", () => {
+      trigger = "one-time";
+      applyTrigger();
+      input.focus();
+    });
+    cronBtn.addEventListener("click", () => {
+      trigger = "cron";
+      applyTrigger();
+      cronInput.focus();
+    });
+
+    opts.append(trigRow, cronWrap);
+    // ── Disabled placeholders (future phases) ──
+    opts.append(
+      disabledRow("MCP / Tools", "Connect MCP servers/tools the agent may call. Coming in the Tools phase."),
+      disabledRow("Multi-step", "Multi-step / graph workflows (LangGraph-style). Future feature."),
+      disabledRow("Tags / Labels", "Tag this invocation/run for filtering. Coming soon."),
+    );
+
     const actions = document.createElement("div");
     actions.className = "modal-actions";
     const submitBtn = document.createElement("button");
@@ -203,28 +273,53 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     submitBtn.textContent = "Submit";
     actions.append(submitBtn);
 
-    dialog.append(title, input, actions);
+    dialog.append(title, input, opts, actions);
 
+    function scheduleValid(): boolean {
+      return parseScheduleMs(cronInput.value.trim()) !== null;
+    }
     function refresh() {
-      submitBtn.disabled = input.value.trim().length === 0;
+      const hasPrompt = input.value.trim().length > 0;
+      const ok = trigger === "cron" ? hasPrompt && scheduleValid() : hasPrompt;
+      submitBtn.disabled = !ok;
+      cronHint.classList.toggle(
+        "error",
+        trigger === "cron" && cronInput.value.trim().length > 0 && !scheduleValid(),
+      );
     }
     function submit() {
       const prompt = input.value.trim();
       if (!prompt) return;
+      if (trigger === "cron") {
+        const schedule = cronInput.value.trim();
+        if (parseScheduleMs(schedule) === null) return;
+        // Write the durable ```agent block; do NOT run now (the scheduler does).
+        teardown();
+        callbacks.onSave(buildInvocationBlock(def.name, `cron ${schedule}`, prompt));
+        return;
+      }
       void runPrompt(prompt);
     }
 
     input.addEventListener("input", refresh);
-    // Enter submits (Shift+Enter inserts a newline in the textarea).
+    cronInput.addEventListener("input", refresh);
+    // Enter submits from the prompt (Shift+Enter inserts a newline). Enter in the
+    // cron input also submits.
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         submit();
       }
     });
+    cronInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      }
+    });
     submitBtn.addEventListener("click", submit);
 
-    refresh();
+    applyTrigger();
     input.focus();
   }
 
@@ -350,4 +445,54 @@ function bubble(role: "user" | "assistant", text: string): HTMLElement {
   body.textContent = text;
   wrap.append(who, body);
   return wrap;
+}
+
+// ── options-pass helpers ──────────────────────────────────────────────────────
+
+/** A labelled option row (label on the left, control(s) appended by caller). */
+function optionRow(label: string): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "agent-option-row";
+  const lab = document.createElement("span");
+  lab.className = "agent-option-label micro";
+  lab.textContent = label;
+  row.append(lab);
+  return row;
+}
+
+/** A segmented-control button (One-time / Cron / Event). */
+function segButton(text: string): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "agent-seg-btn";
+  b.textContent = text;
+  return b;
+}
+
+/** A greyed/disabled option row with an explanatory hover tooltip (future
+ *  phases: MCP/Tools, Multi-step, Tags/Labels). */
+function disabledRow(label: string, tooltip: string): HTMLElement {
+  const row = optionRow(label);
+  row.classList.add("disabled");
+  row.title = tooltip;
+  const tag = document.createElement("span");
+  tag.className = "agent-option-soon micro";
+  tag.textContent = "Soon";
+  row.append(tag);
+  return row;
+}
+
+/** The popup-side mirror of the component's v1 schedule grammar
+ *  (`agents.rs::parse_schedule_ms`): `@hourly`, `@daily`, `every <N>m`,
+ *  `every <N>h`. Returns the interval in ms, or null for an unknown schedule
+ *  (so the Cron submit can be gated until the schedule is valid). */
+export function parseScheduleMs(schedule: string): number | null {
+  const s = schedule.trim();
+  if (s === "@hourly") return 60 * 60 * 1000;
+  if (s === "@daily") return 24 * 60 * 60 * 1000;
+  const m = /^every\s+(\d+)\s*([mh])$/.exec(s);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return m[2] === "m" ? n * 60 * 1000 : n * 60 * 60 * 1000;
 }
