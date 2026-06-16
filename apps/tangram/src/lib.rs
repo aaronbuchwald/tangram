@@ -24,9 +24,29 @@
 
 use tangram::prelude::*;
 
+mod agents;
+
 #[model]
 pub struct Vault {
     files: Vec<MdFile>,
+    /// Last-run bookkeeping for cron-triggered agents, keyed by agent name —
+    /// a replicated `Vec` (not a `HashMap`; the model `Default` must stay
+    /// deterministic) so a scheduled run survives a host restart and a
+    /// device's view of "when did /standup last run" replicates like any
+    /// other state. Absent on documents written by older binaries (the
+    /// `missing` attribute hydrates the empty default).
+    #[autosurgeon(missing = "Option::default")]
+    agent_runs: Option<Vec<AgentRun>>,
+}
+
+/// One agent's last-run timestamp (the cron due-check reads this; `tick_agents`
+/// updates it in the same commit that appends the run's output).
+#[model]
+pub struct AgentRun {
+    /// The agent's name (matches the frontmatter `name`).
+    name: String,
+    /// Wall-clock ms of the last run that completed.
+    last_run_ms: i64,
 }
 
 /// `Default` is the shared genesis commit, so it must be DETERMINISTIC and
@@ -43,6 +63,7 @@ impl Default for Vault {
                 created_at_ms: 0,
                 updated_at_ms: None,
             }],
+            agent_runs: Some(Vec::new()),
         }
     }
 }
@@ -220,6 +241,127 @@ impl Vault {
         }
         Ok(())
     }
+
+    /// The host scheduler's per-tick entry point (host-side cron, P5): scan the
+    /// vault, run every cron-triggered agent whose schedule says it is DUE, and
+    /// append each one's completion to its own note. Returns the names of the
+    /// agents that ran this tick. Resolves the LLM call OUTSIDE the lock and
+    /// commits each result via `Ctx::mutate` (CLAUDE.md: the store lock is
+    /// never held across an await).
+    ///
+    /// A no-op when nothing is due — the host dispatches this on a ~60s
+    /// interval, so the common case is cheap (a snapshot scan, no egress).
+    pub async fn tick_agents(ctx: Ctx<Self>) -> Result<Vec<String>, String> {
+        let state = ctx.state().map_err(|e| e.to_string())?;
+        let now = now_ms();
+        // Decide DUE agents from a single snapshot (pure, no I/O).
+        let due: Vec<agents::AgentDef> = state
+            .files
+            .iter()
+            .filter_map(|f| agents::parse_agent(&f.body))
+            .filter(|def| {
+                let last = state.last_run_ms(&def.name);
+                agents::is_due(def, last, now)
+            })
+            .collect();
+
+        let mut ran = Vec::new();
+        for def in due {
+            // Resolve the model response OUTSIDE the lock, then commit.
+            match run_definition(&def).await {
+                Ok(output) => {
+                    ctx.mutate("tick_agents", |m| {
+                        m.append_agent_output(&def, &output, now_ms())
+                    })
+                    .map_err(|e| e.to_string())?;
+                    ran.push(def.name.clone());
+                }
+                // A failing agent must not abort the whole tick — record the
+                // error to its note (so the operator sees it) and continue.
+                Err(e) => {
+                    let msg = format!("error: {e}");
+                    let _ = ctx.mutate("tick_agents", |m| {
+                        m.append_agent_output(&def, &msg, now_ms())
+                    });
+                }
+            }
+        }
+        Ok(ran)
+    }
+
+    /// Force a single agent to run NOW, ignoring its schedule (a manual run
+    /// from the UI or the host, and the seam the tests drive). Errors if no
+    /// agent/skill named `name` exists in the vault. Appends the output to the
+    /// agent's own note and records the run time, exactly like a scheduled run.
+    pub async fn run_agent(ctx: Ctx<Self>, name: String) -> Result<String, String> {
+        let state = ctx.state().map_err(|e| e.to_string())?;
+        let needle = name.trim().to_ascii_lowercase();
+        let def = state
+            .files
+            .iter()
+            .filter_map(|f| agents::parse_agent(&f.body))
+            .find(|d| d.name.to_ascii_lowercase() == needle)
+            .ok_or_else(|| format!("no agent or skill named {name:?} in the vault"))?;
+
+        let output = run_definition(&def).await?;
+        ctx.mutate("run_agent", |m| {
+            m.append_agent_output(&def, &output, now_ms())
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(output)
+    }
+}
+
+impl Vault {
+    /// The recorded last-run wall-clock for `name`, if any (the cron due-check
+    /// reads this).
+    fn last_run_ms(&self, name: &str) -> Option<i64> {
+        self.agent_runs
+            .as_ref()?
+            .iter()
+            .find(|r| r.name == name)
+            .map(|r| r.last_run_ms)
+    }
+
+    /// Record `name`'s last run, upserting into the replicated `agent_runs`
+    /// map (deterministic `Vec`, not a `HashMap`).
+    fn record_run(&mut self, name: &str, at_ms: i64) {
+        let runs = self.agent_runs.get_or_insert_with(Vec::new);
+        if let Some(run) = runs.iter_mut().find(|r| r.name == name) {
+            run.last_run_ms = at_ms;
+        } else {
+            runs.push(AgentRun {
+                name: name.to_string(),
+                last_run_ms: at_ms,
+            });
+        }
+    }
+
+    /// Append one agent run's output block to the agent's own note and record
+    /// the run time — both in the SAME commit (so the due-check and the
+    /// visible output never disagree). The note is located by the agent's name
+    /// (re-parsed from each file, since the path is independent of the name).
+    fn append_agent_output(&mut self, def: &agents::AgentDef, output: &str, at_ms: i64) {
+        let schedule = def
+            .trigger
+            .as_ref()
+            .and_then(|t| t.schedule.as_deref())
+            .unwrap_or("(manual)");
+        let block = format!(
+            "\n\n> Agent: /{name} · model: {model} · cron {schedule}\n> Output: {output}\n",
+            name = def.name,
+            model = def.model,
+        );
+        // Find the note whose frontmatter declares this agent and append.
+        for file in self.files.iter_mut() {
+            if agents::parse_agent(&file.body).is_some_and(|d| d.name == def.name) {
+                file.body.push_str(&block);
+                file.updated_at_ms = Some(at_ms);
+                break;
+            }
+        }
+        self.record_run(&def.name, at_ms);
+    }
 }
 
 /// Normalize a file path: trim, collapse leading/trailing slashes and empty
@@ -250,6 +392,52 @@ fn normalize_folder(path: &str) -> Result<String, String> {
 
 fn now_ms() -> i64 {
     tangram::time::now_ms()
+}
+
+/// The DeepSeek chat-completions endpoint. Overridable via `TANGRAM_AGENT_LLM_URL`
+/// so a test/CI run can point the call at a local recorded-fixture server (no
+/// live key, no real egress).
+const DEEPSEEK_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+
+fn agent_llm_url() -> String {
+    std::env::var("TANGRAM_AGENT_LLM_URL").unwrap_or_else(|_| DEEPSEEK_URL.to_string())
+}
+
+/// Run one agent definition: issue a BARE chat-completions call to DeepSeek
+/// (system = the note's instructions, user = a minimal standing prompt) and
+/// return the assistant's text. The request carries NO API key — the HOST
+/// injects the DeepSeek credential at the component's http-fetch egress
+/// boundary (ADR-0005), so the key never enters the component's address space.
+async fn run_definition(def: &agents::AgentDef) -> Result<String, String> {
+    use tangram::http;
+
+    let body = serde_json::json!({
+        "model": def.model,
+        "messages": [
+            { "role": "system", "content": def.instructions },
+            { "role": "user", "content": "Run now." },
+        ],
+    });
+
+    let req = http::Request::post(agent_llm_url()).json(&body);
+    let resp = http::fetch(req).await.map_err(|e| e.to_string())?;
+    let payload: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+    if !resp.is_success() {
+        return Err(format!(
+            "DeepSeek request failed ({}): {payload}",
+            resp.status
+        ));
+    }
+    // OpenAI-shaped response: choices[0].message.content.
+    payload
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("DeepSeek response had no message content: {payload}"))
 }
 
 /// The seeded welcome note — a deterministic genesis so a fresh vault is not
@@ -306,7 +494,10 @@ mod tests {
     }
 
     fn empty() -> Vault {
-        Vault { files: Vec::new() }
+        Vault {
+            files: Vec::new(),
+            agent_runs: Some(Vec::new()),
+        }
     }
 
     #[test]

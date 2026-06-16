@@ -39,6 +39,7 @@ mod policy;
 mod registry;
 mod routes;
 mod runtime;
+mod scheduler;
 mod secrets;
 mod tenant;
 mod verify;
@@ -854,6 +855,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(axum::serve(listener, internal_router).into_future());
     }
 
+    // The agent scheduler (Triggers v1): a supervised ~60s interval that drives
+    // the `tangram` shell app's `tick_agents` action, so cron-triggered agent
+    // notes run with no browser open. Stopped cleanly on shutdown alongside the
+    // gateway child.
+    let scheduler = Arc::new(scheduler::Scheduler::new(host.clone()));
+    let scheduler_task = scheduler.spawn();
+
     // Watch the config file's DIRECTORY (editors replace the file, which
     // would orphan a file watch) and nudge the converge loop on any event
     // there; a slow tick also picks up component rebuilds (mtime changes).
@@ -923,6 +931,8 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("tangram-host — shutting down");
         }
     }
+    scheduler.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), scheduler_task).await;
     if let Some(gateway) = &host.gateway {
         gateway.shutdown();
     }
