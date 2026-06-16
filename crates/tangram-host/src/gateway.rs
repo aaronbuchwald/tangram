@@ -490,10 +490,24 @@ fn logging_block() -> Value {
             "output_tokens": "llm.outputTokens",
             "total_tokens":  "llm.totalTokens",
             "cost":          "llm.cost.total",
-            "ttft":          "llm.timeToFirstToken"
+            "ttft":          "llm.timeToFirstToken",
+            // observability O2: the host-asserted principal identity
+            // (`PRINCIPAL_HEADER`, injected at the proxy boundary) so every
+            // LLM/MCP line is attributed to a principal — "user:alice ·
+            // nutrition" — not just "some traffic". A missing header (an
+            // unattributed call) yields null, not a render error.
+            "principal":     PRINCIPAL_FIELD_CEL
         } }
     })
 }
+
+/// The CEL expression every telemetry field maps to for the principal identity
+/// (observability O2): the value of the host-injected
+/// [`crate::auth::PRINCIPAL_HEADER`] request header. Validated against
+/// agentgateway v1.2.1 (`--validate-only`) in
+/// `tests/gateway_identity_validate.rs`; a missing header evaluates to null
+/// (an unattributed call), not a render/parse error.
+const PRINCIPAL_FIELD_CEL: &str = r#"request.headers["x-tangram-principal"]"#;
 
 /// The OTLP tracing block (observability O1, §4a) — emitted under
 /// `config.tracing` ONLY when an endpoint is configured (caller-gated). GenAI
@@ -513,7 +527,11 @@ fn tracing_block(endpoint: &str) -> Value {
             "gen_ai.response.model":      "llm.responseModel",
             "gen_ai.usage.input_tokens":  "llm.inputTokens",
             "gen_ai.usage.output_tokens": "llm.outputTokens",
-            "gen_ai.usage.total_tokens":  "llm.totalTokens"
+            "gen_ai.usage.total_tokens":  "llm.totalTokens",
+            // observability O2: attribute every GenAI span to the host-asserted
+            // principal (the `PRINCIPAL_HEADER` value), so a shared/exposed
+            // ingester's traces stay attributable to "user:alice · nutrition".
+            "tangram.principal":          PRINCIPAL_FIELD_CEL
         } }
     })
 }
@@ -808,9 +826,29 @@ impl Gateway {
         let _ = self.shutdown.send(true);
     }
 
-    /// Reverse-proxy one MCP request to the gateway, streaming both ways —
-    /// SSE responses (and the `Mcp-Session-Id` header) pass through intact.
+    /// Reverse-proxy one MCP/LLM request to the gateway, streaming both ways —
+    /// SSE responses (and the `Mcp-Session-Id` header) pass through intact. The
+    /// host-asserted principal `identity` (observability O2;
+    /// [`crate::auth::principal_identity`]) is injected as
+    /// [`crate::auth::PRINCIPAL_HEADER`] so the gateway's telemetry attributes
+    /// the call to that principal — see [`Self::proxy_as`] for the
+    /// anti-forgery + derivation contract.
     pub async fn proxy(&self, req: Request) -> Response {
+        // No resolved principal (a top-level self-hosted call with no component
+        // context) → still STRIP any inbound header so it can't be forged, but
+        // inject nothing. `proxy_as(req, None)` does exactly that.
+        self.proxy_as(req, None).await
+    }
+
+    /// Reverse-proxy with a host-asserted principal `identity` (observability
+    /// O2). The identity is established at this trusted boundary from the
+    /// resolved [`crate::auth::Principal`] + the dispatching app/component; the
+    /// component/client CANNOT forge it because the proxy UNCONDITIONALLY strips
+    /// any inbound [`crate::auth::PRINCIPAL_HEADER`] (via [`skip_request_header`])
+    /// before injecting the host's value. `identity = None` strips and injects
+    /// nothing (an unattributed call — e.g. the self-hosted loopback default with
+    /// no component context), which still cannot carry a forged identity.
+    pub async fn proxy_as(&self, req: Request, identity: Option<String>) -> Response {
         let path_and_query = req
             .uri()
             .path_and_query()
@@ -821,9 +859,15 @@ impl Gateway {
 
         let mut upstream = self.client.request(parts.method, &url);
         for (name, value) in &parts.headers {
+            // `skip_request_header` also drops any inbound PRINCIPAL_HEADER —
+            // the client cannot forge its own identity; the host re-asserts it
+            // below.
             if !skip_request_header(name) {
                 upstream = upstream.header(name, value);
             }
+        }
+        if let Some(identity) = identity {
+            upstream = upstream.header(crate::auth::PRINCIPAL_HEADER, identity);
         }
         let upstream = upstream.body(reqwest::Body::wrap_stream(body.into_data_stream()));
 
@@ -873,7 +917,11 @@ fn forward_output(child: &mut tokio::process::Child) {
 }
 
 /// Hop-by-hop request headers (plus Host, which reqwest derives from the
-/// URL) that must not be forwarded.
+/// URL) that must not be forwarded — PLUS the principal identity header
+/// (observability O2): any inbound [`crate::auth::PRINCIPAL_HEADER`] is dropped
+/// here so the host alone asserts identity at this trusted boundary (a
+/// component/client cannot forge "Aaron · nutrition"). The host re-injects its
+/// own value in [`Gateway::proxy_as`].
 fn skip_request_header(name: &HeaderName) -> bool {
     name == header::HOST
         || name == header::CONNECTION
@@ -881,6 +929,9 @@ fn skip_request_header(name: &HeaderName) -> bool {
         || name == header::TRAILER
         || name == header::TRANSFER_ENCODING
         || name == header::UPGRADE
+        || name
+            .as_str()
+            .eq_ignore_ascii_case(crate::auth::PRINCIPAL_HEADER)
 }
 
 fn skip_response_header(name: &HeaderName) -> bool {
@@ -1120,6 +1171,55 @@ mod tests {
             key: "env://K".into(),
         };
         assert!(bad_name.validate(&mut s4).is_err(), "path-unsafe name");
+    }
+
+    #[test]
+    fn principal_field_cel_references_the_injected_header() {
+        // The CEL string embeds the header name literally; if PRINCIPAL_HEADER
+        // ever changes, this catches the drift (the telemetry field would stop
+        // matching the header the proxy injects — silent loss of attribution).
+        assert!(
+            PRINCIPAL_FIELD_CEL.contains(crate::auth::PRINCIPAL_HEADER),
+            "telemetry CEL {PRINCIPAL_FIELD_CEL:?} must reference the injected \
+             header {:?}",
+            crate::auth::PRINCIPAL_HEADER
+        );
+    }
+
+    #[test]
+    fn render_attributes_principal_in_access_log_and_tracing() {
+        // observability O2: the principal identity field lands in BOTH the
+        // always-on access log AND (when an endpoint is set) the OTLP trace,
+        // mapped to the host-injected PRINCIPAL_HEADER — so every LLM/MCP line
+        // is attributed to a principal.
+        let settings = GatewaySettings {
+            enabled: true,
+            otlp_endpoint: Some("http://127.0.0.1:3000/api/public/otel".into()),
+            ..Default::default()
+        };
+        let telemetry = Telemetry::from_settings(&settings, 40123);
+        let config = render_config(&[AppKey::top("notes")], &[], 1, 2, &telemetry);
+
+        // Access log carries `principal` mapping to the header CEL.
+        let add = &config["config"]["logging"]["fields"]["add"];
+        assert_eq!(add["principal"], PRINCIPAL_FIELD_CEL);
+        // Trace carries `tangram.principal` mapping to the same CEL.
+        let tadd = &config["config"]["tracing"]["fields"]["add"];
+        assert_eq!(tadd["tangram.principal"], PRINCIPAL_FIELD_CEL);
+
+        // The O2 field MUST NOT weaken the loopback rule on any route.
+        let routes = config["binds"][0]["listeners"][0]["routes"]
+            .as_array()
+            .unwrap();
+        for route in routes {
+            assert!(
+                route["policies"]["authorization"]["rules"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("source.address"),
+                "every route keeps the loopback rule: {route}"
+            );
+        }
     }
 
     #[test]
@@ -1460,6 +1560,117 @@ mod tests {
             Duration::from_millis(500)
         );
         assert_eq!(backoff.after_exit(crash), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn skip_request_header_strips_the_inbound_principal_header() {
+        // Anti-forgery (observability O2): the proxy drops ANY inbound
+        // PRINCIPAL_HEADER (case-insensitive) so the client can't forge its own
+        // identity; the host re-asserts its own value in `proxy_as`.
+        assert!(skip_request_header(&HeaderName::from_static(
+            crate::auth::PRINCIPAL_HEADER
+        )));
+        assert!(skip_request_header(
+            &HeaderName::from_bytes(b"X-Tangram-Principal").unwrap()
+        ));
+        // A normal header is forwarded.
+        assert!(!skip_request_header(&HeaderName::from_static(
+            "x-custom-header"
+        )));
+    }
+
+    /// Spin up a one-shot loopback HTTP server that records the first request's
+    /// `x-tangram-principal` header value(s) and returns 200. Returns the bound
+    /// port + a oneshot receiver for what it saw.
+    async fn capture_principal_server() -> (u16, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        use axum::Router;
+        use axum::extract::Request;
+        use axum::routing::any;
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        let app = Router::new().route(
+            "/{*rest}",
+            any(move |req: Request| {
+                let tx = tx.clone();
+                async move {
+                    let seen: Vec<String> = req
+                        .headers()
+                        .get_all(crate::auth::PRINCIPAL_HEADER)
+                        .iter()
+                        .filter_map(|v| v.to_str().ok().map(str::to_string))
+                        .collect();
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(seen);
+                    }
+                    "ok"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (port, rx)
+    }
+
+    fn test_gateway(port: u16) -> Gateway {
+        // The binary path is never touched by `proxy_as` (it only uses
+        // `self.port` + `self.client`), so a placeholder is fine here.
+        Gateway::new(
+            PathBuf::from("/nonexistent/agentgateway"),
+            port,
+            0,
+            vec![],
+            telem(),
+            PathBuf::from("/tmp/unused.json"),
+        )
+    }
+
+    #[tokio::test]
+    async fn proxy_injects_host_asserted_identity_and_strips_forged() {
+        // The host-asserted identity is what reaches the gateway; an inbound
+        // (forged) value is dropped — only ONE header, the host's, arrives.
+        let (port, rx) = capture_principal_server().await;
+        let gw = test_gateway(port);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/notes/mcp")
+            // A client trying to spoof a higher-privilege identity.
+            .header(crate::auth::PRINCIPAL_HEADER, "user:root/admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = gw.proxy_as(req, Some("user:alice/notes".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let seen = rx.await.unwrap();
+        assert_eq!(
+            seen,
+            vec!["user:alice/notes".to_string()],
+            "only the host-asserted identity reaches the gateway (forged dropped)"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_with_no_identity_still_strips_forged_header() {
+        // `None` identity (an unattributed call) injects nothing — but a forged
+        // inbound header is STILL stripped, so the gateway sees no principal at
+        // all rather than a client-controlled one.
+        let (port, rx) = capture_principal_server().await;
+        let gw = test_gateway(port);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(crate::auth::PRINCIPAL_HEADER, "user:root/admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = gw.proxy_as(req, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let seen = rx.await.unwrap();
+        assert!(
+            seen.is_empty(),
+            "no identity injected and the forged header stripped, got {seen:?}"
+        );
     }
 
     #[test]

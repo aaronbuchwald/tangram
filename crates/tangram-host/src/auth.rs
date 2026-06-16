@@ -182,6 +182,53 @@ impl ScopeSet {
     }
 }
 
+// ── per-call principal identity for gateway telemetry (observability O2) ────
+
+/// The host-asserted identity header injected on every LLM/MCP request the host
+/// proxies to agentgateway (observability O2;
+/// `docs/design/gateway-observability-identity.md` §5). agentgateway's generated
+/// config copies it into the access-log + OTLP-trace fields (see
+/// `gateway::render_config`), so every call lands in telemetry attributed to a
+/// specific principal — `local` vs `user:alice/nutrition` (rendered "Aaron ·
+/// nutrition" in the O3 UI) — not just "some traffic".
+///
+/// The value is host-asserted at the trusted proxy boundary: the proxy STRIPS
+/// any inbound header of this name before injecting (a sandboxed component / a
+/// loopback client cannot forge its own identity), then sets the value computed
+/// from the resolved [`Principal`] + the dispatching app/component. This is the
+/// smallest-correct O2 slice of the design's eventual signed-JWT plane (§9 open
+/// decision): the gateway *labels* on it but does not yet *authorize* on it —
+/// the host's existing `mcp_guard` / loopback rule remain the enforcement.
+pub const PRINCIPAL_HEADER: &str = "x-tangram-principal";
+
+/// The separator between the principal id and the component in a
+/// [`principal_identity`] value. ASCII (HTTP header values must be visible ASCII;
+/// the human-facing "Aaron · nutrition" rendering happens in the UI/telemetry
+/// layer, O3 — the wire value stays low-cardinality + ASCII).
+const COMPONENT_SEP: &str = "/";
+
+/// The structured, low-cardinality-friendly identity value injected as
+/// [`PRINCIPAL_HEADER`] (observability O2). Shape: the principal id, optionally
+/// suffixed with `/`-joined dispatching component:
+///
+/// - `user:alice/nutrition` — multi-tenant user `alice`, call from `nutrition`
+/// - `tenant:acme/notes`    — a tenant's call from `notes`
+/// - `local`                — the self-hosted single user, direct (no component)
+/// - `local/guided-learning`— the self-hosted user, call from a component
+///
+/// Both fields are low-cardinality (a principal id + an app name), so the value
+/// is safe as a telemetry dimension — and ASCII, so it is a valid HTTP header
+/// value (a `·`-rendered "Aaron · nutrition" is the O3 UI surface, not the wire).
+/// App names are already validated path-safe (`config::validate_name`), so they
+/// carry no separator/control characters.
+pub fn principal_identity(principal: &Principal, component: Option<&str>) -> String {
+    let id = principal.telemetry_id();
+    match component {
+        Some(component) if !component.is_empty() => format!("{id}{COMPONENT_SEP}{component}"),
+        _ => id,
+    }
+}
+
 // ── the request principal (RUNTIME_PLAN Phase 5 → 6 seam) ───────────────────
 
 /// Who a request acts as, in the two-mode model (docs/design/auth.md). Three
@@ -217,6 +264,19 @@ impl Principal {
         match self {
             Self::LocalUser | Self::User { .. } => None,
             Self::Tenant(name) => Some(name.as_str()),
+        }
+    }
+
+    /// A stable, low-cardinality identifier for telemetry attribution
+    /// (observability O2): `local` for the self-hosted single user,
+    /// `tenant:<name>` for a tenant, `user:<id>` for a multi-tenant user. Carries
+    /// no secret — it is the principal *identity*, never its credential — and is
+    /// safe as a trace/log/metric dimension (see [`principal_identity`]).
+    pub fn telemetry_id(&self) -> String {
+        match self {
+            Self::LocalUser => "local".to_string(),
+            Self::Tenant(name) => format!("tenant:{name}"),
+            Self::User { user_id, .. } => format!("user:{user_id}"),
         }
     }
 
@@ -546,6 +606,52 @@ mod tests {
         assert!(!user.has_scope(Scope::RegistryWrite));
         assert!(!user.has_scope(Scope::Admin));
         assert_eq!(user.tenant(), None);
+    }
+
+    #[test]
+    fn principal_identity_attributes_by_principal_and_component() {
+        // observability O2: the structured, low-cardinality identity value the
+        // proxy injects as PRINCIPAL_HEADER.
+        let user = Principal::User {
+            user_id: "alice".into(),
+            email: "a@x".into(),
+            groups: vec![],
+            scopes: ScopeSet::all(),
+        };
+        assert_eq!(user.telemetry_id(), "user:alice");
+        assert_eq!(
+            principal_identity(&user, Some("nutrition")),
+            "user:alice/nutrition"
+        );
+        // No component → bare principal id (a direct/aggregate call).
+        assert_eq!(principal_identity(&user, None), "user:alice");
+        assert_eq!(principal_identity(&user, Some("")), "user:alice");
+
+        // Tenant + local.
+        assert_eq!(
+            Principal::Tenant("acme".into()).telemetry_id(),
+            "tenant:acme"
+        );
+        assert_eq!(
+            principal_identity(&Principal::Tenant("acme".into()), Some("notes")),
+            "tenant:acme/notes"
+        );
+        assert_eq!(Principal::LocalUser.telemetry_id(), "local");
+        assert_eq!(
+            principal_identity(&Principal::LocalUser, Some("guided-learning")),
+            "local/guided-learning"
+        );
+        assert_eq!(principal_identity(&Principal::LocalUser, None), "local");
+
+        // The value is a valid HTTP header value (visible ASCII) so the proxy
+        // can inject it — the panic-free `from_str` proves no non-ASCII slips in.
+        assert!(
+            axum::http::HeaderValue::from_str(&principal_identity(&user, Some("nutrition")))
+                .is_ok()
+        );
+        // The identity carries NO secret — it is the principal id, never a
+        // token (a leaked label cannot widen authority).
+        assert!(!principal_identity(&user, Some("nutrition")).contains("Bearer"));
     }
 
     #[test]

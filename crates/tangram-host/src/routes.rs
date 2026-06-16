@@ -366,7 +366,10 @@ async fn aggregate_mcp(
     req: Request,
 ) -> Response {
     match host.gateway.as_ref().filter(|_| via_gateway) {
-        Some(gateway) => gateway.proxy(req).await,
+        // The aggregate endpoint spans every app, so there is no single
+        // dispatching component — attribute to the top-level principal only
+        // (observability O2). The proxy still strips any forged inbound header.
+        Some(gateway) => gateway.proxy_as(req, top_level_identity(None)).await,
         None => (
             StatusCode::NOT_FOUND,
             "no aggregate /mcp endpoint (enable [gateway] in apps.toml); \
@@ -374,6 +377,18 @@ async fn aggregate_mcp(
         )
             .into_response(),
     }
+}
+
+/// The host-asserted principal identity for a TOP-LEVEL (non-tenant) proxied
+/// call (observability O2): the self-hosted single user ([`auth::Principal::LocalUser`]),
+/// optionally tagged with the dispatching `component`. Multi-tenant top-level
+/// principal resolution (PAT/session → `User`) is the C3 seam the design (§5)
+/// composes onto next; until then top-level is the loopback-trusted local user.
+fn top_level_identity(component: Option<&str>) -> Option<String> {
+    Some(auth::principal_identity(
+        &auth::Principal::LocalUser,
+        component,
+    ))
 }
 
 /// The LLM proxy endpoint (ADR-0012): `POST /llm/<name>/…` is reverse-proxied
@@ -384,7 +399,11 @@ async fn aggregate_mcp(
 /// side by the generated route's authorization rule (v1 is loopback-trusted).
 async fn llm_proxy(State((host, via_gateway)): State<(Arc<Host>, bool)>, req: Request) -> Response {
     match host.gateway.as_ref().filter(|_| via_gateway) {
-        Some(gateway) => gateway.proxy(req).await,
+        // `/llm/<provider>` carries no dispatching component in the path (the
+        // calling app would tag itself via its own MCP route); attribute to the
+        // top-level principal (observability O2). The proxy strips any forged
+        // inbound header regardless.
+        Some(gateway) => gateway.proxy_as(req, top_level_identity(None)).await,
         None => (
             StatusCode::NOT_FOUND,
             "no LLM proxy (enable [gateway] in apps.toml and declare a \
@@ -610,8 +629,10 @@ async fn dispatch_app(
         && (rest == "/mcp" || rest.starts_with("/mcp/"))
         && let Some(gateway) = host.gateway.as_ref()
     {
-        // Path untouched: agentgateway matches the same /<app>/mcp prefix.
-        return gateway.proxy(req).await;
+        // Path untouched: agentgateway matches the same /<app>/mcp prefix. The
+        // dispatching component is this app, so the call is attributed
+        // "<principal>/<app>" (observability O2).
+        return gateway.proxy_as(req, top_level_identity(Some(&name))).await;
     }
 
     forward_to_app(router, req, rest).await
@@ -692,7 +713,14 @@ async fn dispatch_tenant(host: Arc<Host>, via_gateway: bool, req: Request, rest:
     // multiplexed by the gateway (404 without one, like the global /mcp).
     if rest == "/mcp" || rest.starts_with("/mcp/") {
         return match host.gateway.as_ref().filter(|_| via_gateway) {
-            Some(gateway) => gateway.proxy(req).await,
+            // Aggregate over the tenant's apps → attribute to the tenant
+            // principal, no single component (observability O2).
+            Some(gateway) => {
+                let identity = principal
+                    .as_ref()
+                    .map(|p| auth::principal_identity(p, None));
+                gateway.proxy_as(req, identity).await
+            }
             None => (
                 StatusCode::NOT_FOUND,
                 "no aggregate /t/<tenant>/mcp endpoint (enable [gateway] in apps.toml); \
@@ -726,7 +754,12 @@ async fn dispatch_tenant(host: Arc<Host>, via_gateway: bool, req: Request, rest:
         && (app_rest == "/mcp" || app_rest.starts_with("/mcp/"))
         && let Some(gateway) = host.gateway.as_ref()
     {
-        return gateway.proxy(req).await;
+        // The dispatching component is this tenant app → attribute
+        // "tenant:<name>/<app>" (observability O2).
+        let identity = principal
+            .as_ref()
+            .map(|p| auth::principal_identity(p, Some(&app)));
+        return gateway.proxy_as(req, identity).await;
     }
 
     forward_to_app(router, req, app_rest).await

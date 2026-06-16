@@ -1,8 +1,11 @@
 # Design: agentgateway observability + per-(user, component, invocation) identity & authorization
 
 **Status:** PROPOSED — approved direction; **O1 SHIPPED** (gateway telemetry on
-by default + the one-command Langfuse stack — see §7 usage note + §8). O2–O4
-remain held-for-review checkpoints. This is the **canonical design for
+by default + the one-command Langfuse stack — see §7 usage note + §8); **O2
+SHIPPED** as the host-asserted-identity slice (§8a — every LLM/MCP call is
+attributed to a principal in the access log + OTLP traces; the signed-JWT +
+gateway-authorize half remains the §9 open decision). O3–O4 remain
+held-for-review checkpoints (plan: §8b). This is the **canonical design for
 agentgateway observability and identity** (design-of-record). Two LOCKED choices
 up front: (1) **observability is ON by default**, shipped as a **one-command,
 self-hostable Langfuse stack** the host's generated config points at; (2)
@@ -403,7 +406,7 @@ Each has a one-line **review gate**.
 | # | Checkpoint | Review gate |
 |---|---|---|
 | **O1 — SHIPPED** | **Gateway telemetry ON + one-command Langfuse stack.** Emit `config.tracing` (OTLP→Langfuse) + a JSON `accessLog` with `llm.*` fields from `render_config`; pin `statsAddr` to a `free_port()` slot; ship `deploy/observability/compose.yml` + `scripts/observability-up.sh`. | `scripts/observability-up.sh` then a `/llm/<name>` call → a GenAI trace appears in Langfuse and `agentgateway_gen_ai_client_token_usage` is scrapeable; ingester down ⇒ host still logs structured usage |
-| **O2** | **Host→gateway composite-identity propagation + authorize/label.** Mint a short-lived JWT per call at `Gateway::proxy` with `sub`/`component`/`invocation`/`scope`; gateway CEL authorizes (loopback ∧ jwt ∧ ADR-0008 grant) and labels traces/logs/metrics by the claims. | a call with the wrong `(user, component)` scope is denied at the gateway; a permitted call's trace/log/metric carries `tangram.user` + `tangram.component` + `tangram.invocation` labels |
+| **O2 — SHIPPED (label half)** | **Host-asserted per-call identity + telemetry attribution** (§8a). The host injects `x-tangram-principal` (`<principal>[/<component>]`) at `Gateway::proxy_as`, stripping any forged inbound value; `render_config` maps it into `config.logging` (`principal`) + `config.tracing` (`tangram.principal`). Verified with `agentgateway --validate-only`. The **authorize half** (signed JWT + gateway CEL `jwt.valid ∧ scope ∈ … ∧ ADR-0008 grant`) is deferred — §9 open decision, mandatory on non-loopback/multi-tenant exposure. | a permitted call's access-log line + OTLP trace carries the `principal` / `tangram.principal` label; a forged inbound `x-tangram-principal` is stripped and replaced by the host value; the rendered config validates against the installed agentgateway and the loopback rule is intact |
 | **O3** | **Per-run telemetry in History/Agents.** Extend `AgentRun` (additive `Option<…>`) with model/tokens/cost/latency/status; record from the gateway feed keyed by the `invocation` label; Agents-view columns + sort/filter + optional Langfuse deep-link (§6). | a finished agent run shows tokens/cost/latency/status in the Agents view; the row deep-links to its Langfuse trace; `cost>…` / `status:error` filter the table |
 | **O4** | **Prometheus / dashboards / cost budgets.** Bundle a Prometheus scrape of `statsAddr` + a starter dashboard; per-principal/per-agent **cost budget** that trips on `agentgateway_gen_ai_client_token_usage` (reuses the per-principal rate-limit, ADR-0011). | a dashboard shows per-(user,component) token spend; a budget cap denies further `/llm` calls for a principal over budget and recovers when the window rolls |
 
@@ -411,6 +414,151 @@ O1–O2 are the core (observability-by-default + attributed); O3 surfaces it
 in-app; O4 is dashboards + spend control.
 
 ---
+
+## 8a. O2 as shipped — the host-asserted identity header (the implemented slice)
+
+**Status: O2 SHIPPED (this checkpoint), as the smallest correct slice of §5.**
+The design's eventual mechanism is a host-minted, short-lived **signed JWT** the
+gateway *both authorizes and labels on* (§5.2–5.3). The shipped O2 is the
+**labelling half**, with a host-asserted **header** instead of a JWT — chosen
+because it (a) actually attributes every call in telemetry today, (b) is verified
+against the installed agentgateway (v1.2.1) rather than assumed, and (c) does not
+touch the loopback rule or key handling. The signed-JWT + gateway-authorize half
+stays the §9 open decision, sequenced after the auth C3 `Principal::User`
+plumbing it reads (§11 conflict note).
+
+What shipped (`crates/tangram-host/src/{auth,gateway,routes}.rs`):
+
+- **The identity value** — `auth::principal_identity(&Principal, component)`
+  returns a low-cardinality, **ASCII** string: `local`, `tenant:<t>`,
+  `user:<id>`, each optionally `/<component>` (e.g. `user:alice/nutrition`). The
+  `Principal::telemetry_id()` carries the principal id only — **never a
+  credential** (a leaked label cannot widen authority). ASCII because it is an
+  HTTP header value; the `·`-rendered "Aaron · nutrition" is the O3 UI surface,
+  not the wire.
+- **Injection at the trusted boundary** — `Gateway::proxy_as(req, identity)`
+  injects it as the `x-tangram-principal` header (`auth::PRINCIPAL_HEADER`). The
+  route callers derive it: per-app MCP (`/<app>/mcp`) and per-tenant app MCP tag
+  the component; the aggregates (`/mcp`, `/t/<t>/mcp`) and `/llm/<name>` attribute
+  the principal with no component (no single dispatching app). Top-level is
+  `LocalUser` today (the C3 multi-tenant top-level `User` resolution is the next
+  seam); tenant routes reuse the already-resolved `Principal::Tenant`.
+- **Anti-forgery** — `skip_request_header` **unconditionally strips any inbound
+  `x-tangram-principal`** before the host injects its own, so a sandboxed
+  component / loopback client cannot forge identity. `proxy_as(_, None)` strips
+  but injects nothing (an unattributed call still cannot carry a forged value).
+- **Attribution in telemetry** — `render_config` adds the field to BOTH
+  always-on `config.logging` (`principal`) and `config.tracing`
+  (`tangram.principal`), mapped via the CEL `request.headers["x-tangram-principal"]`.
+  A missing header → null, not an error. The loopback rule on every route is
+  untouched (asserted by test).
+- **Verified, not assumed** — `tests/gateway_identity_validate.rs` runs the real
+  `agentgateway --validate-only` over the rendered identity config (and a
+  control with broken CEL that MUST be rejected), pinning the mechanism against
+  v1.2.1; it SKIPs cleanly with no binary on `$PATH`. Unit tests assert the
+  inject+strip behaviour, the render fields, and the header/CEL consistency.
+
+The gap to the full §5 vision (the next O2 increment, or O2′): the gateway does
+not yet *authorize* on the identity (no `jwt.valid && scope ∈ …` rule) and the
+value is a header, not a signed token — fine **on the loopback-trusted default**
+(the header is host-asserted behind the loopback rule), but a **non-loopback /
+multi-tenant exposure MUST upgrade to the signed JWT** (§10: exposure flips
+identity claims to mandatory) so the gateway can verify provenance, not just
+read a header it trusts because the hop is local.
+
+## 8b. O3 + O4 — sequenced plan (NOT built this checkpoint)
+
+The O2 header lands the `principal` (and, for agents, the future `invocation`)
+grain in the gateway's access log + OTLP traces. O3 surfaces it; O4 dashboards +
+budgets it. Concrete, sequenced steps with their open questions.
+
+### O3 — surface identity + observability in the History/Agents UI
+
+**Where the data comes from (the load-bearing decision).** Two sources carry the
+per-call telemetry, and O3 must pick how the UI reads it:
+
+1. **The OTLP/Langfuse store** (rich: full spans, token/cost/latency, the
+   `tangram.principal` label) — query Langfuse's API by the principal/invocation
+   label, or deep-link to its trace UI. *Pro:* zero new host storage, the richest
+   view. *Con:* couples the in-app surface to an optional, possibly-unconfigured
+   ingester (the self-host default has no OTLP endpoint — only the access log).
+2. **A host endpoint over the access log / Prometheus metric** (always-on, even
+   with no ingester): the host already pipes the gateway's JSON access log to its
+   tracing (`forward_output`), and the stats port exposes
+   `agentgateway_gen_ai_client_token_usage`. *Pro:* always present, no ingester
+   dependency. *Con:* the host must parse + retain the access log (a small ring
+   buffer keyed by `principal`/`invocation`), or scrape its own metric.
+
+**Recommended sequence:**
+
+- **O3.1 — host-side capture (no UI).** Add a bounded in-memory **usage index**
+  on `Host`, fed by parsing the gateway's JSON access log lines (already flowing
+  through `forward_output`) into `{ principal, component, route, model, tokens,
+  cost, ttft, ts }`, keyed by principal (+ invocation once O2 stamps it). Expose
+  `GET /api/observability/usage?principal=…&since=…` (loopback/admin-gated like
+  `/api/audit`). This is the **always-on** path — works with no Langfuse.
+- **O3.2 — `AgentRun` enrichment.** Per the model-evolution rule, extend
+  `AgentRun` (`apps/tangram/src/lib.rs`) with additive `Option<…>` fields
+  `model`/`input_tokens`/`output_tokens`/`cost`/`latency_ms`/`status`, recorded
+  on run completion from O3.1's index keyed by the run's `invocation` label.
+  (This needs O2 to stamp `invocation` — currently only `principal` is stamped;
+  see open question below.) **Another agent owns `agentsView.ts` — O3.2's UI
+  columns + the `cost>… / status:error / model:claude-*` filters land with that
+  owner, not here.**
+- **O3.3 — optional Langfuse deep-link.** When `otlp_endpoint` is set, a per-run
+  link to `<langfuse>/trace/<trace-id>` (the trace id the host stamped); built,
+  not stored. Loopback-local unless the operator exposed the ingester.
+
+**O3 open questions:**
+
+- **Stamp `invocation` in O2′ or O3?** O3.2 needs the per-run grain. The agent
+  host loop (`scheduler.rs` / the `tangram` app's tool-calling loop) must thread
+  the `invocation_id` into the proxy call so `principal_identity` can append it
+  (e.g. `user:alice/nutrition#inv_7a1c`), OR a second header `x-tangram-invocation`.
+  *Recommend a second low-cardinality-exempt header* so the principal dimension
+  stays low-cardinality for metrics while the invocation rides traces/logs only.
+- **Access-log parse vs metric scrape for O3.1?** The access log has per-call
+  rows (needed for a run timeline); the Prometheus metric is aggregate. Recommend
+  the **access log** for the index, the metric for O4 dashboards.
+- **Retention.** A ring buffer (bounded count/age) vs persisting to the host
+  store. Recommend bounded in-memory for O3.1 (observation of *this* host, like
+  `/api/fleet`), persisted only if O4 budgets need a longer window.
+
+### O4 — dashboards + per-principal cost budgets
+
+- **O4.1 — dashboards.** Bundle a Prometheus scrape of the (now-stable, O1)
+  `statsAddr` + a starter Grafana/Langfuse dashboard in `deploy/observability/`,
+  showing per-`(principal, component)` token spend over time off
+  `agentgateway_gen_ai_client_token_usage`. The `tangram.principal` trace label
+  (O2) is the group-by dimension.
+- **O4.2 — per-principal cost budgets (the enforcement seam).** Budgets are
+  enforced **at the LLM proxy spend surface** (ADR-0012's noted future "meter /
+  authorize spend") — i.e. in `llm_proxy` / `Gateway::proxy_as` **before**
+  forwarding: check the principal's spend-this-window (from O3.1's index / the
+  metric) against a configured cap and **deny over budget** (fail closed; HTTP
+  402/429), recovering when the window rolls. This **reuses the per-principal
+  rate-limit seam** (`multitenant::RateLimiter`, ADR-0011 / auth.md §12) — the
+  same per-principal budget the mutation limiter already keys, extended with a
+  token/cost dimension; and the **`llm` scope** gates *whether* a principal may
+  call `/llm/*` at all (the scope check the design's §5.3 LLM-route rule
+  anticipates). Configure caps under `[gateway]` (or per-tenant), low-cardinality
+  by principal.
+
+**O4 open questions:**
+
+- **Budget windows + accounting source.** Token *cost* is only known *after* the
+  provider responds (the gateway parses `usage` on the response), so a pre-call
+  check is necessarily on the *prior* window's spend (lagging by one call) unless
+  the host estimates input tokens up front. Recommend: deny on the rolling
+  prior-window total (fail-closed, simple) and document the one-call overrun
+  bound; a precise pre-charge is a later refinement.
+- **Enforce at host vs gateway?** O4.2 enforces **host-side** (the proxy hop),
+  reusing the `RateLimiter` — simpler than a gateway CEL budget and keeps the
+  spend accounting where the `Principal` lives. The gateway CEL authorize (§5.3)
+  remains the defense-in-depth layer for the *scope* check, not the *budget*.
+- **Shared vs per-app budget.** Per the rate-limiter precedent, a principal
+  counts against ONE budget across all apps; a per-(principal, component) cap is
+  a follow-up dimension.
 
 ## 9. Open decisions (with recommended defaults)
 
