@@ -16,10 +16,16 @@
 // editor AND differs from what we last wrote — so a remote change lands without
 // clobbering the user's in-progress text, and our own echoed write is a no-op.
 
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  deleteGroupBackward,
+  deleteLineBoundaryBackward,
+  history,
+  historyKeymap,
+} from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Prec } from "@codemirror/state";
 import {
   EditorView,
   drawSelection,
@@ -70,6 +76,7 @@ import {
   type ObjectTypeProvider,
   objectCompletionSource,
 } from "./objectComplete";
+import { objectTable } from "./objectTable";
 import { livePreview } from "./livePreview";
 import { type CalloutBacklink, runCalloutCard } from "./callout";
 
@@ -285,6 +292,28 @@ const theme = EditorView.theme(
   { dark: true },
 );
 
+// macOS line/word deletion (fix: Cmd+Backspace regression). `@codemirror/lang-
+// markdown`'s `markdown()` extension installs its OWN keymap at `Prec.high`
+// binding plain `Backspace` → `deleteMarkupBackward` (and `Enter`), which sits
+// ABOVE the default keymap; the standard mac line-deletion binding (Cmd-
+// Backspace → delete-to-line-start) lives only in `defaultKeymap` at default
+// precedence. To guarantee the mac chord is never shadowed, bind it explicitly
+// at `Prec.high` and place it BEFORE `markdown()` in the extension list so it
+// wins at equal precedence (earlier-registered wins). We mirror the standard
+// `standardKeymap` mac bindings exactly:
+//   - Cmd-Backspace (`Mod-Backspace` on mac) → delete to the line boundary
+//   - Option-Backspace (`Alt-Backspace`)      → delete the previous word group
+// Plain Backspace is left to the markdown keymap (markup-aware) + default
+// keymap, and the atomic-chip deletion (the chips publish `atomicRanges`, so a
+// Backspace over a chip removes the whole chip) is unaffected — neither command
+// is rebound here.
+const macLineDeleteKeymap = Prec.high(
+  keymap.of([
+    { mac: "Mod-Backspace", run: deleteLineBoundaryBackward, preventDefault: true },
+    { mac: "Alt-Backspace", run: deleteGroupBackward, preventDefault: true },
+  ]),
+);
+
 // Build the empty-note placeholder (#10): "Type / to run an agent · [[ to link
 // a note", with the `/` and `[[` tokens rendered as subtle key chips. Returned
 // as a detached DOM node so CM6's `placeholder` extension mounts it verbatim;
@@ -416,6 +445,10 @@ export class MdEditor {
         // adding chrome. CM6's `placeholder` auto-hides the moment any text is
         // typed, so it never intrudes on a real note or the live-preview render.
         placeholder(slashHintPlaceholder()),
+        // macOS line/word deletion (Cmd+Backspace / Option+Backspace) at
+        // Prec.high, placed BEFORE `markdown()` so the mac chord is never
+        // shadowed by the markdown extension's Prec.high plain-Backspace keymap.
+        macLineDeleteKeymap,
         keymap.of([...defaultKeymap, ...historyKeymap]),
         // Extended (GFM) dialect so strikethrough, task lists, tables, etc.
         // parse — the live-preview decorations key off their Lezer nodes.
@@ -445,6 +478,13 @@ export class MdEditor {
         // as an `unknown`-type chip and the click is a no-op.
         objectChip(resolveObject),
         objectLinkClick(onOpenObjectLink),
+        // Smart Objects SO3 — DERIVED-object inline TABLES (the meal-plan UX
+        // fix): a StateField that replaces a grocery-list / cart-preview chip
+        // line with an auto-derived table/aisle BLOCK so its content is visible
+        // without a click (the chip ViewPlugin above skips those types). Sourced
+        // from a StateField because a block decoration spans the line (the
+        // callout's lesson). The block opens the popup via its Edit affordance.
+        objectTable(resolveObject, onOpenObjectLink),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
         // mounts (notes stop rendering). So the slash `/<partial>` popup and the

@@ -28,7 +28,6 @@ import {
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
-import { clickWithinRange, posOnToken } from "./wikiLink";
 import type { SmartObject } from "./api";
 
 /** The default glyph a smart-object chip leads with — distinct from the agent
@@ -53,6 +52,18 @@ const TYPE_GLYPHS: Record<string, string> = {
  *  default `◆` for an unregistered/unknown type. */
 export function glyphForType(objType: string): string {
   return TYPE_GLYPHS[objType.trim().toLowerCase()] ?? OBJECT_GLYPH;
+}
+
+/** The smart-object types rendered INLINE as a table/aisle BLOCK (the meal-plan
+ *  UX fix, see objectTable.ts) rather than the compact inline chip. The chip
+ *  ViewPlugin SKIPS these ids so the block StateField in objectTable.ts owns
+ *  them — the two never double-decorate the same range. Both are DERIVED. */
+const TABLE_TYPES: ReadonlySet<string> = new Set(["grocery-list", "cart-preview"]);
+
+/** True when a smart object of `objType` renders as an inline table block (and
+ *  is therefore skipped by the inline-chip ViewPlugin). Case-insensitive. */
+export function isTableObjectType(objType: string | null | undefined): boolean {
+  return TABLE_TYPES.has((objType ?? "").trim().toLowerCase());
 }
 
 /** Opens the object popup for the object with the given id (a chip click). */
@@ -305,6 +316,10 @@ function buildChipDecorations(
       const start = from + link.from;
       const end = from + link.to;
       const obj = resolve(link.id);
+      // A derived table type (grocery-list / cart-preview) renders as an inline
+      // BLOCK table, owned by the StateField in objectTable.ts — skip it here so
+      // the two decoration sources never collide on the same range.
+      if (isTableObjectType(obj?.type)) continue;
       const raw = text.slice(link.from, link.to);
       const inner = /^\[([^\]\n]*)\]/.exec(raw)?.[1] ?? "";
       const label = nameFromLabel(inner) || "object";
@@ -373,21 +388,28 @@ export function objectChip(resolve: ObjectResolver) {
 }
 
 /**
- * mousedown handler: clicking a chip opens the object popup for its id. Same
- * non-clamping, EOF-safe hit-test as `agentLinkClick` / `wikiLinkClick`.
+ * mousedown handler: clicking ANYWHERE on a chip opens the object popup for its
+ * id (#fix smart-object-ux 2). The previous position-based hit-test
+ * (`posAtCoords` + `posOnToken` + `clickWithinRange`, cloned from the
+ * wiki/agent link handlers) only registered toward the chip's LEFT edge: the
+ * atomic widget is a single replaced range, and `posAtCoords` resolves a click
+ * over the right portion of the rendered glyph to the EXCLUSIVE end (`pos ===
+ * to`), which `posOnToken` rejects as "past the chip" — so most of the chip was
+ * dead. A smart-object chip is an OPAQUE widget (no nested affordances like the
+ * Run chip's `↓`), so the whole rendered element is one click target: resolve
+ * the chip straight off the event's DOM target via `.cm-object-link[data-object-id]`,
+ * which covers the entire chip box. Falls back to nothing when the click did not
+ * land inside a chip element (normal caret placement).
  */
 export function objectLinkClick(open: ObjectLinkOpener) {
   return EditorView.domEventHandlers({
-    mousedown: (event, view) => {
-      const coords = { x: event.clientX, y: event.clientY };
-      const pos = view.posAtCoords(coords, false);
-      if (pos == null) return false;
-      const hit = objectLinkAt(view.state.doc.toString(), pos);
-      if (!hit) return false;
-      if (!posOnToken(pos, hit.from, hit.to)) return false;
-      if (!clickWithinRange(view, coords, hit.from, hit.to)) return false;
+    mousedown: (event, _view) => {
+      const target = event.target as HTMLElement | null;
+      const chip = target?.closest<HTMLElement>(".cm-object-link");
+      const id = chip?.dataset.objectId;
+      if (!id) return false;
       event.preventDefault();
-      open(hit.id);
+      open(id);
       return true;
     },
   });

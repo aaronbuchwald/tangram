@@ -1177,6 +1177,54 @@ body {
 .object-cart-aisle-name::before { content: "🧺 "; }
 .object-cart-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 
+/* Smart Objects SO3 — DERIVED-object INLINE TABLES (the meal-plan UX fix):
+ * a grocery-list / cart-preview chip renders in-document as a §8 Notion-style
+ * table BLOCK (a CM6 block widget from objectTable.ts) so its content is
+ * visible without a click. The §8 smart-object PURPLE accent family — fill
+ * #EEEDFE, border #AFA9EC, text #3C3489, dot #534AB7 — plus the green
+ * "auto-synced" badge that marks it derived. */
+.object-table-card {
+  border: 1px solid #afa9ec; border-radius: 8px; background: #eeedfe;
+  color: #3c3489; padding: 8px 12px; margin: 6px 0 10px; font-family: var(--sans);
+}
+.object-table-card.object-table-error { border-color: rgba(197, 64, 47, 0.45); }
+.object-table-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px; font-size: 13px;
+}
+.object-table-title { font-weight: 700; color: #3c3489; }
+.object-table-badge {
+  font-size: 11px; font-weight: 600; color: #1f8f5f;
+  background: rgba(31, 210, 134, 0.14); border-radius: 999px; padding: 1px 8px;
+}
+.object-table-badge-error {
+  color: #c5402f; background: rgba(197, 64, 47, 0.12);
+}
+.object-table-open {
+  margin-left: auto; cursor: pointer; font-size: 11px; font-weight: 600;
+  color: #534ab7; background: #fff; border: 1px solid #afa9ec;
+  border-radius: 6px; padding: 2px 10px;
+}
+.object-table-open:hover { background: #afa9ec; color: #fff; }
+.object-table-empty { color: #534ab7; opacity: 0.8; font-style: italic; font-size: 13px; }
+/* Grocery: Item | Qty | From table. */
+.object-table-grocery { width: 100%; border-collapse: collapse; font-size: 12px; }
+.object-table-grocery th {
+  text-align: left; font-weight: 600; color: #534ab7;
+  border-bottom: 1px solid #afa9ec; padding: 4px 6px;
+}
+.object-table-grocery td { padding: 4px 6px; border-bottom: 1px solid rgba(175, 169, 236, 0.4); }
+.object-table-grocery tr:last-child td { border-bottom: none; }
+/* Cart: aisle groups. */
+.object-table-aisle { margin-top: 8px; }
+.object-table-aisle:first-child { margin-top: 0; }
+.object-table-aisle-name {
+  font-weight: 700; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: #534ab7;
+}
+.object-table-aisle-name::before { content: "🧺 "; }
+.object-table-aisle-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; font-size: 13px; }
+
 /* Tab bar: the segmented-control pills as a tablist. */
 .run-editor-tabs { margin: 10px 0 4px; display: flex; gap: 4px; }
 .run-editor-tab { flex: 1; }
