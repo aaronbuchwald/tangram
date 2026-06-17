@@ -2750,6 +2750,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tangram-grocery-cart"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "automerge",
+ "autosurgeon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tangram",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "tangram-guided-learning"
 version = "0.1.0"
 dependencies = [

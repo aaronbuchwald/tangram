@@ -27,6 +27,7 @@ mod app;
 mod audit;
 mod auth;
 mod authapi;
+mod cartfill;
 mod config;
 mod doc;
 mod egress;
@@ -152,6 +153,13 @@ impl Host {
     /// before it enters the content-addressed store (`POST /artifacts`).
     pub fn engine(&self) -> &wasmtime::Engine {
         &self.engine
+    }
+
+    /// The canonicalized `apps.toml` path. Used by the cart-fill dispatch loop
+    /// to re-read `[automation]` per scan so a config edit takes effect without
+    /// a host restart.
+    pub fn config_path(&self) -> PathBuf {
+        self.config_path.clone()
     }
 }
 
@@ -912,6 +920,14 @@ async fn main() -> anyhow::Result<()> {
     let scheduler = Arc::new(scheduler::Scheduler::new(host.clone()));
     let scheduler_task = scheduler.spawn();
 
+    // The grocery cart-fill request→runner dispatch loop (Build-3 / GC1): a
+    // supervised ~2s scan that picks up the grocery-cart app's PENDING
+    // AutomationRequests, authorizes them against the [automation] operator
+    // policy, runs the (GC1 fixture) runner, and writes the CartFillResult back.
+    // Stopped cleanly on shutdown alongside the scheduler + gateway child.
+    let cartfill = Arc::new(cartfill::CartFillDispatcher::new(host.clone()));
+    let cartfill_task = cartfill.spawn();
+
     // Watch the config file's DIRECTORY (editors replace the file, which
     // would orphan a file watch) and nudge the converge loop on any event
     // there; a slow tick also picks up component rebuilds (mtime changes).
@@ -983,6 +999,8 @@ async fn main() -> anyhow::Result<()> {
     }
     scheduler.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(2), scheduler_task).await;
+    cartfill.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), cartfill_task).await;
     if let Some(gateway) = &host.gateway {
         gateway.shutdown();
     }

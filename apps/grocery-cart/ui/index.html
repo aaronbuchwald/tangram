@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grocery cart-fill</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #1a1a1a;
+        --muted: #6b6b6b;
+        --accent: #2f7d4f;
+        --card: #ffffff;
+        --bg: #f6f7f5;
+        --line: #e3e5e0;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #ececec;
+          --muted: #9a9a9a;
+          --accent: #6fce97;
+          --card: #1d1f1c;
+          --bg: #131512;
+          --line: #2c2f29;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        color: var(--fg);
+        background: var(--bg);
+        padding: 2.5rem 1.25rem;
+      }
+      main { max-width: 44rem; margin: 0 auto; }
+      h1 { font-size: 1.5rem; margin: 0 0 0.25rem; }
+      .lede { color: var(--muted); margin: 0 0 1.75rem; }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.25rem 1.4rem;
+        margin-bottom: 1rem;
+      }
+      h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+      code {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        color: var(--accent);
+        padding: 0.1em 0.4em;
+        border-radius: 5px;
+        font-size: 0.9em;
+      }
+      ol { margin: 0.5rem 0 0; padding-left: 1.2rem; }
+      li { margin: 0.35rem 0; }
+      .rail {
+        border-left: 3px solid var(--accent);
+        padding-left: 0.9rem;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Grocery cart-fill</h1>
+      <p class="lede">
+        An MCP server that fills a Whole Foods / Amazon cart from a structured
+        grocery list — for your review, <strong>never submitted</strong>.
+      </p>
+
+      <section class="card">
+        <h2>This app is driven over MCP</h2>
+        <p>
+          There is no live cart-fill button here. The cart fill runs as a
+          host-side browser automation; this app's tools surface on
+          <code>/grocery-cart/mcp</code>:
+        </p>
+        <ol>
+          <li>
+            <code>fill_cart(grocery_list)</code> — request a cart fill
+            (<code>[{ item, quantity, preferences? }]</code>) and get back a
+            <code>request_id</code> handle.
+          </li>
+          <li>
+            <code>cart_fill_status(request_id)</code> — poll for progress and
+            the result (<code>added</code> / <code>not_added</code> /
+            <code>cart_url</code>).
+          </li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2 class="rail">Never-checkout rail</h2>
+        <p class="rail">
+          The cart is filled for your review and the order-submit path is denied
+          at the egress boundary — the automation can never place an order. You
+          confirm checkout yourself.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

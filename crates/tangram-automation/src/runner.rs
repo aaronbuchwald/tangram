@@ -44,6 +44,26 @@ pub struct AutomationSettings {
     /// the `browser_domains_ceiling` (§5.3). Default-deny: empty ⇒ none.
     #[serde(default)]
     pub browser_domains_ceiling: Vec<String>,
+    /// Pre-approved, review-approved automation template ids (§4.3). An
+    /// [`crate::request::AutomationRequest`] naming a template NOT in this set is
+    /// denied outright (default-deny: empty ⇒ no template may run). This is the
+    /// operator gate the request→runner dispatch loop intersects against (e.g.
+    /// the grocery cart-fill server's `wholefoods-cart`).
+    #[serde(default)]
+    pub approved_templates: Vec<String>,
+    /// Per-app `op://` credential grants: which credential references each app
+    /// may request (app name → allowed refs). A request's `credential_refs` are
+    /// intersected with the grant for its app (ungranted refs are dropped, never
+    /// honored). Absent app ⇒ no credential grant.
+    #[serde(default)]
+    pub credential_grants: std::collections::BTreeMap<String, Vec<String>>,
+    /// Canonical request PATHS that the automation egress ceiling DENIES for
+    /// every template — the never-checkout rail. The order-submit path
+    /// (`/gp/buy/`) lives here so the browser egress gate (and, in a live run,
+    /// the template's `StopGate`) fails closed before checkout. Path PREFIXES:
+    /// a request path under a denied prefix is refused.
+    #[serde(default)]
+    pub denied_paths: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -54,6 +74,42 @@ fn default_timeout() -> u64 {
 }
 
 impl AutomationSettings {
+    /// Build the [`crate::request::OperatorPolicy`] this `[automation]` config
+    /// expresses, for the given set of apps allowed to request automations. The
+    /// `domains_ceiling` is `browser_domains_ceiling`, the approved templates and
+    /// per-app credential grants come from the config, and every named app is
+    /// allowed to request. This is the single seam the request→runner dispatch
+    /// loop intersects each [`crate::request::AutomationRequest`] against.
+    pub fn operator_policy<'a>(
+        &self,
+        allowed_apps: impl IntoIterator<Item = &'a str>,
+    ) -> crate::request::OperatorPolicy {
+        let mut policy = crate::request::OperatorPolicy::new()
+            .ceiling(self.browser_domains_ceiling.iter().cloned());
+        for app in allowed_apps {
+            policy = policy.allow_app(app);
+        }
+        for template in &self.approved_templates {
+            policy = policy.approve_template(template);
+        }
+        for (app, refs) in &self.credential_grants {
+            policy = policy.grant_credentials(app, refs.iter().cloned());
+        }
+        policy
+    }
+
+    /// Whether `path` falls under any configured `denied_paths` prefix — the
+    /// never-checkout rail (the order-submit path is denied for every template).
+    /// `path` is compared as a prefix (a request under a denied subtree is
+    /// refused). Empty `denied_paths` ⇒ nothing is denied here.
+    #[must_use]
+    pub fn path_is_denied(&self, path: &str) -> bool {
+        self.denied_paths.iter().any(|denied| {
+            let denied = denied.trim_end_matches('/');
+            path == denied || path.starts_with(&format!("{denied}/"))
+        })
+    }
+
     /// The driver to run: the configured path (if executable), else
     /// `playwright` on `$PATH`. `None` ⇒ the disabled-with-warning fallback.
     pub fn resolve_driver(&self) -> Option<PathBuf> {
@@ -244,6 +300,9 @@ mod tests {
         assert!(s.headless, "headless defaults true");
         assert_eq!(s.run_timeout_secs, 300);
         assert!(s.browser_domains_ceiling.is_empty(), "default-deny");
+        assert!(s.approved_templates.is_empty(), "default-deny templates");
+        assert!(s.credential_grants.is_empty(), "default-deny credentials");
+        assert!(s.denied_paths.is_empty());
         assert!(!AutomationSettings::default().enabled, "default off");
 
         let s: AutomationSettings = toml::from_str(
@@ -283,6 +342,53 @@ mod tests {
             Duration::from_millis(500),
             "stable run resets"
         );
+    }
+
+    #[test]
+    fn operator_policy_is_built_from_settings() {
+        use crate::request::{AutomationRequest, authorize};
+        let s: AutomationSettings = toml::from_str(
+            "enabled = true\n\
+             browser_domains_ceiling = [\"www.amazon.com\", \"www.wholefoodsmarket.com\"]\n\
+             approved_templates = [\"wholefoods-cart\"]\n\
+             denied_paths = [\"/gp/buy/\"]\n\
+             [credential_grants]\n\
+             \"grocery-cart\" = [\"op://Private/Amazon/password\"]",
+        )
+        .unwrap();
+        let policy = s.operator_policy(["grocery-cart"]);
+
+        // An in-policy request authorizes, narrowed to the ceiling + grant.
+        let req = AutomationRequest {
+            app: "grocery-cart".into(),
+            template_id: "wholefoods-cart".into(),
+            params: vec![],
+            domains: vec!["www.amazon.com".into(), "attacker.com".into()],
+            credential_refs: vec![
+                "op://Private/Amazon/password".into(),
+                "op://Private/Bank/pw".into(),
+            ],
+        };
+        let auth = authorize(&req, &policy).unwrap();
+        assert_eq!(auth.domains, vec!["www.amazon.com"]); // off-ceiling trimmed
+        assert_eq!(auth.credential_refs, vec!["op://Private/Amazon/password"]); // ungranted dropped
+
+        // An unapproved template is denied outright (default-deny).
+        let mut bad = req.clone();
+        bad.template_id = "place-order".into();
+        assert!(authorize(&bad, &policy).is_err());
+    }
+
+    #[test]
+    fn never_checkout_path_deny() {
+        let s: AutomationSettings =
+            toml::from_str("enabled = true\ndenied_paths = [\"/gp/buy/\"]").unwrap();
+        // The order-submit subtree is denied; an unrelated path is not.
+        assert!(s.path_is_denied("/gp/buy/spc/handlers/display.html"));
+        assert!(s.path_is_denied("/gp/buy/"));
+        assert!(s.path_is_denied("/gp/buy"));
+        assert!(!s.path_is_denied("/gp/cart/view.html"));
+        assert!(!s.path_is_denied("/s")); // search
     }
 
     #[tokio::test]

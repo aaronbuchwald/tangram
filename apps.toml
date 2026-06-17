@@ -108,6 +108,34 @@ enabled = true
 #   browser_domains_ceiling = ["www.allrecipes.com", "cooking.nytimes.com"]
 browser_domains_ceiling = ["*"]
 
+# Grocery cart-fill (Build-3 / GC1; docs/design/grocery-cart-mcp.md). The
+# grocery-cart app's `fill_cart` MCP tool emits an AutomationRequest naming the
+# `wholefoods-cart` template; the host request→runner dispatch loop
+# (tangram-host/src/cartfill.rs) authorizes it against THIS operator policy and
+# runs it. GC1 = a deterministic FIXTURE runner (no browser/1Password/LLM); the
+# live run is GC3 (owner-gated). The fields below are the operator policy the
+# dispatch loop intersects each request against (request.rs §4.3, never widens):
+#
+# - approved_templates: a request naming a template NOT listed here is DENIED
+#   outright (default-deny). `wholefoods-cart` is approved for GC1's fixture run.
+# - denied_paths: the never-checkout rail — the order-submit subtree is denied
+#   for EVERY template so the (GC2) browser egress gate fails closed before
+#   checkout (paired with the template's StopGate, wired in GC2). GC1 drives no
+#   browser; this records + asserts the rail intent from day one.
+# - [automation.credential_grants]: the per-app op:// credential grant. The ref
+#   below is a PLACEHOLDER — the operator MUST replace it with the real
+#   SA-scoped op:// reference (the 1Password item the OP_SERVICE_ACCOUNT_TOKEN
+#   in .env can read) BEFORE the GC3 live run. GC1 NEVER resolves it (the
+#   fixture runner makes no 1Password call). NOTE: the WF/Amazon hosts must also
+#   be in browser_domains_ceiling above; `["*"]` already covers them, but to
+#   NARROW the cart-fill egress, set the ceiling to the explicit WF/Amazon hosts.
+approved_templates = ["wholefoods-cart"]
+denied_paths = ["/gp/buy/"]               # the order-submit path — never-checkout
+
+[automation.credential_grants]
+# PLACEHOLDER — set the real SA-scoped op:// reference before the GC3 live run.
+"grocery-cart" = ["op://Private/PLACEHOLDER-amazon-login/password"]
+
 [apps.registry]
 component = "target/wasm32-wasip2/release/registry.wasm"
 ui = "apps/registry/ui"
@@ -247,6 +275,22 @@ FEEDBACK_REPO = "aaronbuchwald/tangram"
 [apps.notes]
 component = "target/wasm32-wasip2/release/notes.wasm"
 ui = "apps/notes/ui"
+
+# Grocery cart-fill MCP server (Build-3 / GC1; docs/design/grocery-cart-mcp.md).
+# A sandboxed app whose `fill_cart` MCP tool EMITS an AutomationRequest (it never
+# drives a browser); the host request→runner dispatch loop runs it against the
+# [automation] operator policy above (template approval + the never-checkout
+# path-deny + the per-app op:// credential grant). GC1's runner is a deterministic
+# FIXTURE (no browser/1Password/LLM/network) — no outbound grant is needed and
+# none is declared. The credential ref the app requests is intersected with the
+# [automation.credential_grants] placeholder above (set the real op:// before the
+# GC3 live run). require_auth gates the WRITE-BACK action (record_cart_result)
+# so a cart-fill RESULT cannot be forged over the public surface — only the host
+# dispatch loop (direct, in-process) advances a request.
+[apps.grocery-cart]
+component = "target/wasm32-wasip2/release/grocery_cart.wasm"
+ui = "apps/grocery-cart/ui"
+require_auth = true
 
 # Morning Brief — Tangram's first AI-enabled component (the offline core;
 # docs/design/morning-brief.md MB1-MB5). run_brief input_mode "fixture" runs

@@ -9,6 +9,7 @@ members = [
     "crates/tangram-macros",
     "apps/auto-todo",
     "apps/feedback",
+    "apps/grocery-cart",
     "apps/guided-learning",
     "apps/marketplace",
     "apps/morning-brief",

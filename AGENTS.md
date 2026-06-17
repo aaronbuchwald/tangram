@@ -101,6 +101,18 @@ symlink to `.agents/skills`.
   `POST /issues` files it; `GH_TOKEN` is host-injected at the egress boundary
   (`[apps.feedback]` inject in `apps.toml`, ADR-0005). `FEEDBACK_REPO` targets
   owner/repo. Static `ui/`; submission history in the doc
+- `apps/grocery-cart` — Whole Foods cart-fill MCP server (Build-3,
+  `docs/design/grocery-cart-mcp.md`): `fill_cart(grocery_list)` EMITS an
+  `AutomationRequest` (it never drives a browser) and returns a handle;
+  `cart_fill_status` polls (return-a-handle topology). The host **request→runner
+  dispatch loop** (`tangram-host/src/cartfill.rs`, mirrors `scheduler.rs`) picks
+  up PENDING requests, `authorize`s them against the `[automation]` operator
+  policy, runs the runner, and writes a `CartFillResult` back. GC1 (built): the
+  app + MCP tools + dispatch loop + a deterministic **fixture runner** (no
+  browser/1Password/LLM/network) + the never-checkout rail (template approval +
+  order-submit `denied_paths` + the placeholder `op://` grant in `[automation]`).
+  GC2 = the real WF `AutomationScript` + LLM item→product matching; GC3 =
+  owner-gated live run
 - `apps/shell` — multi-app host serving every app under one port, prefixed
 - `apps/tangram` — the Obsidian-style shell app (sidebar vault + live apps,
   tabbed main window); a wasm component whose `ui/` is the one app with a

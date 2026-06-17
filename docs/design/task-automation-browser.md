@@ -530,6 +530,13 @@ side-channel/kernel-surface axis since the WASM-first decision.
 
 ## 9. The Amazon grocery-list → cart demo (step by step)
 
+> **Concrete implementation:** the `grocery-cart` app + the host request→runner
+> dispatch loop that realize this demo are specified in
+> [grocery-cart-mcp.md](grocery-cart-mcp.md) (Build-3, fixture-first). GC1 ships
+> the skeleton + the dispatch loop with a deterministic fixture runner (offline);
+> GC2 wires the real `AutomationScript` + LLM matching; GC3 is the owner-gated
+> live run described below.
+
 **Goal:** turn a grocery list into a built Amazon cart, signing in with the
 1Password-brokered credential, and **stop before placing the order.**
 
