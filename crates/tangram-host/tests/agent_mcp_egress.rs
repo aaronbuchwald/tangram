@@ -208,7 +208,13 @@ async fn agent_reaches_only_the_granted_mcp_server() {
     let _host = spawn_host(home.path(), &apps_toml, &bind, &log);
 
     let client = reqwest::Client::new();
-    wait_for("host up", Duration::from_secs(90), || async {
+    // Host startup cold-compiles THREE wasm components (notes + nutrition + the
+    // heavy `tangram` shell). On the 2-core CI runner, under the nextest
+    // `host-integration` concurrency cap (2), this is the slowest host-up in the
+    // suite — measured ~82s solo on 2 cores, and roughly double under the
+    // cap-2 contention. 90s was too tight (CI timed out); give it ample headroom
+    // (the lighter single-component `default_view` test already uses 120s).
+    wait_for("host up", Duration::from_secs(240), || async {
         status_of(&client, &format!("{base}/tangram/api/state")).await
             == Some(reqwest::StatusCode::OK)
     })
