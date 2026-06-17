@@ -1,14 +1,19 @@
-//! Build-3 / GC1 end-to-end: the grocery cart-fill request→runner dispatch loop.
+//! Build-3 / GC2 end-to-end: the grocery cart-fill request→runner dispatch loop
+//! driving the REAL `tangram_automation::wholefoods::run_fill` flow OFFLINE.
 //!
 //! Drives the REAL `tangram-host` binary with the `grocery-cart` app + an
-//! `[automation]` operator policy, and proves the full round-trip OFFLINE (the
-//! GC1 fixture runner makes no browser / 1Password / LLM / network call):
+//! `[automation]` operator policy. With `TANGRAM_CARTFILL_OFFLINE_FIXTURE=1` the
+//! dispatcher's `OfflineFixtureRunner` runs the WHOLE real `run_fill` flow with a
+//! mock browser driver + a fixture LLM matcher + a session-reuse preflight — NO
+//! browser / 1Password / LLM / network call:
 //!
 //! - **Happy path:** `fill_cart` records a PENDING request and returns a handle;
-//!   the dispatch loop authorizes it against the policy, runs the fixture runner,
-//!   and writes a `done` `CartFillResult` back — `cart_fill_status` surfaces it,
-//!   with the off-ceiling domain trimmed away (never-widen) and the items echoed
-//!   as "added".
+//!   the dispatch loop authorizes it against the policy, runs `run_fill` (session
+//!   reuse skips login, the LLM matcher picks a product per item honoring
+//!   preferences, the StopGate halts before checkout, the cart-VIEW URL is
+//!   captured), and writes a `done` `CartFillResult` back — `cart_fill_status`
+//!   surfaces it, with the off-ceiling domain trimmed away (never-widen) and the
+//!   items LLM-matched into `added`.
 //! - **Default-deny:** with the `wholefoods-cart` template NOT approved in
 //!   `[automation]`, the same request is denied by policy and recorded `failed`
 //!   (the never-checkout rail fails closed — an unapproved template never runs).
@@ -36,6 +41,11 @@ fn spawn_host(home: &Path, apps_toml: &Path, bind: &str, log: &Path) -> HostProc
         .env("HOME", home)
         .env("BIND_ADDR", bind)
         .env("RUST_LOG", "info")
+        // GC2: drive the WHOLE real `run_fill` flow OFFLINE (a mock browser
+        // driver + a fixture LLM matcher + a session-reuse preflight) — no
+        // browser/1Password/LLM/network. The production default (unset) is the
+        // live runner, which is offline-`NeedsSignIn` until the GC3 live run.
+        .env("TANGRAM_CARTFILL_OFFLINE_FIXTURE", "1")
         .env_remove("TANGRAM_DATA_DIR")
         .stdout(Stdio::from(log_file.try_clone().expect("clone log")))
         .stderr(Stdio::from(log_file))
@@ -196,11 +206,15 @@ async fn fill_cart_round_trips_through_the_dispatch_loop() {
     .await;
     let result = &final_status["result"];
     let added = result["added"].as_array().expect("added array");
-    assert_eq!(added.len(), 2, "both items added by the fixture runner");
+    assert_eq!(added.len(), 2, "both items added by the real run_fill flow");
     assert_eq!(added[0]["item"], "milk");
-    assert_eq!(added[0]["product"], "[stub] organic milk");
+    // The LLM matcher honored the "organic" preference (the fixture driver
+    // surfaced "365 milk" + "Organic Whole milk"; the matcher picked the latter).
+    assert_eq!(added[0]["product"], "Organic Whole milk");
     assert_eq!(added[0]["qty"], 1);
     assert_eq!(added[1]["item"], "eggs");
+    // No preference → the first item-matching candidate ("365 eggs").
+    assert_eq!(added[1]["product"], "365 eggs");
     assert_eq!(added[1]["qty"], 2);
     // The never-widen rail: the cart URL anchors on a ceiling-allowed domain.
     let cart_url = result["cart_url"].as_str().expect("cart_url");

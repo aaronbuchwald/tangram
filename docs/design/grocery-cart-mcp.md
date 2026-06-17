@@ -9,12 +9,15 @@ host task — the **request→runner dispatch loop** — picks the request up,
 intersects it with operator policy, runs it, and writes a `CartFillResult` back
 into the app's own document, where the `cart_fill_status` MCP tool surfaces it.
 
-This is **Build-3** of the shopping automation, built **fixture-first**: GC1 (this
-checkpoint) is the skeleton + the one previously-unbuilt seam (the dispatch loop),
-with the runner execution stubbed to a deterministic dry-run. The live browser,
-the real Whole Foods script, LLM item→product matching, and the live run all land
-in later checkpoints. No code path exercised in CI or dev makes a live
-network / browser / LLM / 1Password call.
+This is **Build-3** of the shopping automation, built **fixture-first**: GC1 was
+the skeleton + the dispatch-loop seam (runner stubbed to a dry-run); **GC2 (this
+checkpoint)** lands the REAL automation — the hand-authored Whole Foods
+`AutomationScript` template, LLM item→product matching over `/llm`, and the
+dispatcher wired to the real `tangram_automation::wholefoods::run_fill` runner
+(replacing GC1's `fixture_run`) — still entirely offline/fixture-tested. The live
+browser session + live 1Password inject + live add-to-cart land in **GC3
+(owner-gated)**. No code path exercised in CI or dev makes a live network /
+browser / LLM / 1Password call.
 
 ## Why a separate app (not the `tangram` shell `fill_cart` stub)
 
@@ -90,9 +93,9 @@ app exposes:
 
 ## How it reuses each substrate piece
 
-The dispatch loop and (in GC2) the runner reuse the fully-built
-`tangram-automation` substrate; GC1 wires the request→authorize→dispatch→result
-spine and stubs the run:
+The dispatch loop and the runner reuse the fully-built `tangram-automation`
+substrate. GC1 wired the request→authorize→dispatch→result spine; GC2 wires the
+real run over the substrate below (offline-tested; the live wiring is GC3):
 
 - **`request.rs` (`AutomationRequest` + `authorize` + `OperatorPolicy`)** — the
   app emits the request; the dispatch loop calls `authorize(request, policy)`
@@ -118,7 +121,7 @@ spine and stubs the run:
   agentgateway `/llm/<name>` proxy (host-injected key, ADR-0012), with the result
   validated before any add-to-cart.
 
-## The host request→runner dispatch loop (the unbuilt seam)
+## The host request→runner dispatch loop
 
 A supervised host task — `crates/tangram-host/src/cartfill.rs`,
 `CartFillDispatcher` — built in the spawn/shutdown shape of `scheduler.rs` (a
@@ -131,30 +134,58 @@ tick:
 3. Calls `authorize(request, policy)` against the operator `OperatorPolicy` built
    from `[automation]`. A denial → writes a `failed` result with the policy
    reason (default-deny: a request for an unapproved template fails closed).
-4. **GC1 fixture runner** — `fixture_run(authorized)` (in `cartfill.rs`) returns
-   a deterministic canned `CartFillResult` WITHOUT launching a browser, calling
-   1Password, or the LLM: it echoes each grocery item as "added" with a stub
-   product name + qty, and a stub `cart_url`. **GC2** replaces this single call
-   with the real `tangram-automation` runner (the WF script replay).
+4. **GC2 real runner** — a `CartRunner` seam (in `cartfill.rs`) calls
+   `tangram_automation::wholefoods::run_fill(authorized, list, gate, preflight,
+   driver, matcher)`: it builds the `BrowserEgressGate` from the authorized
+   domains (allow WF/Amazon; **deny `/gp/buy/`**), runs the preflight (reuse the
+   session, skipping login, or surface a sign-in decision), replays the
+   `wholefoods-cart` script using the LLM item→product `Matcher` per item, halts
+   at the `StopGate` before checkout, and captures the filled (never submitted)
+   `cart_url`. (GC1's single `fixture_run` call was replaced by this.)
+   - **Production `LiveCartRunner` is offline until GC3:** with no configured
+     live browser session the preflight is `NoSession`, so `run_fill` returns
+     `NeedsSignIn` and the request is recorded `failed` with an actionable
+     reason — NO browser/1Password/LLM/network call. GC3 supplies the live
+     `CartDriver`, the session-reuse preflight, and the `Matcher::Live` over the
+     `/llm` proxy.
+   - **`TANGRAM_CARTFILL_OFFLINE_FIXTURE=1`** selects an `OfflineFixtureRunner`
+     that drives the WHOLE real `run_fill` flow with a mock driver + a fixture
+     LLM matcher + a `SignedIn` (session-reuse) preflight — the CI e2e mode (no
+     browser/1Password/LLM/network).
 5. Writes the result back (`record_cart_result` → `done`/`failed`).
 
-The fixture runner makes the FULL round-trip — MCP tool → request → authorize →
-dispatch → result — provable offline. The pure pieces (`pending_requests`,
-`authorize`, `fixture_run`) are unit-tested in `cartfill.rs`; an integration
-test drives the live host binary end-to-end.
+The runner makes the FULL round-trip — MCP tool → request → authorize →
+dispatch → real `run_fill` → result — provable offline. The pure pieces
+(`pending_requests`, `authorize`, `grocery_lines`/`outcome_json`/`run_fill_path`)
+are unit-tested in `cartfill.rs` (`authorize_then_real_run_round_trips_offline`,
+`live_runner_is_offline_and_surfaces_signin`); the WF script template + the
+matcher + the offline runner are unit-tested in
+`tangram-automation/src/wholefoods.rs`; an integration test
+(`tests/cartfill_dispatch.rs`, with the offline-fixture env) drives the live host
+binary end-to-end through the real `run_fill`.
 
-## The never-checkout rail (preserved from day one)
-
-Even though GC1 drives no browser, the rail is configured and asserted now:
+## The never-checkout rail (preserved from day one, LIVE in GC2)
 
 - **Operator policy / egress ceiling** — `[automation].browser_domains_ceiling`
   bounds the WF/Amazon hosts; the per-app credential grant is a single
   `op://` reference. The `wholefoods-cart` template must be `approved_templates`
   for any request to authorize at all (default-deny otherwise).
-- **Order-submit path-deny** — the operator config denies the checkout/order
-  path (`POST /gp/buy/…`) so the browser egress gate fails closed on it. GC1
-  documents + asserts this intent; GC2 wires the live gate + the template's
-  `StopGate` before checkout. The `purchased`/submit path is never reachable.
+- **Order-submit path-deny** — `wholefoods_gate(authorized.domains)` builds the
+  `BrowserEgressGate` allowing the authorized hosts and **always** `deny_path`s
+  the order-submit subtree (`/gp/buy/` on `www.amazon.com`, any method), so the
+  browser egress gate fails closed on it — even under a `*` ceiling, and even
+  after dot-segment/percent bypass attempts (the canonicalizer). The runner
+  egress-checks every navigation against this gate before the driver sees a URL.
+- **The template `StopGate`** — the `wholefoods-cart` `AutomationScript`'s last
+  reachable step is a `StopGate` ("cart built — placing the order requires
+  explicit owner approval"); `run_fill` halts there, and `replay_halts_before_
+  checkout` proves replay stops at the gate and never reaches the post-gate cart
+  navigate. `validate_disposition` (the LLM-fallback validator) guarantees the
+  LLM can never pass a stop-gate or steer off the allowlist. The `cart_url` the
+  runner captures is a cart-VIEW path (`/gp/cart/view.html`), never the
+  order-submit path. The submit path is never reachable — proven by
+  `wholefoods::tests::{gate_denies_the_order_submit_path,
+  replay_halts_at_the_stop_gate}` + the host integration test.
 
 ## GC1 → GC2 → GC3 roadmap
 
@@ -163,12 +194,36 @@ Even though GC1 drives no browser, the rail is configured and asserted now:
   request→runner **dispatch loop** with a **fixture/dry-run runner** + the design
   doc + the policy/egress config (template approval, WF ceiling, `op://`
   placeholder, order-submit deny). All offline-tested.
-- **GC2** — the real Whole Foods `AutomationScript` template (semantic-locator
-  steps, the `StopGate` before checkout, the `op://` `InjectCredential` login),
-  the LLM item→product matching over `/llm`, and a realistic fixture e2e
-  (recorded snapshots replayed without a live browser). The fixture runner call
-  is replaced by the live `tangram-automation` runner; CI stays fixture-driven.
-- **GC3 (owner-gated)** — the live run: a real headed/headless browser session,
-  the live 1Password inject, the live add-to-cart. Owner-gated; requires the
-  operator to set the real `op://` reference in `apps.toml` (the placeholder
-  below) and configure the SA-scoped token. Never submits an order.
+- **GC2 (DONE, this checkpoint)** — the real Whole Foods automation, still
+  offline/fixture-tested:
+  - the hand-authored `wholefoods-cart` `AutomationScript` template
+    (`tangram_automation::wholefoods::wholefoods_cart_script`): semantic
+    role+name `Locator`s (NOT CSS), a navigate-to-Amazon step, an `op://`
+    `InjectCredential` login step (preflight skips it on session reuse), a
+    search→choose→add-to-cart block per item with `Expect` post-conditions, the
+    hard `StopGate` before checkout, and the cart-VIEW URL capture;
+  - LLM item→product matching over the `/llm` proxy (`Matcher`, with a
+    `Fixture`/`Live` seam mirroring SO4 `ingest.rs` + a shared `parse_match_reply`
+    that rejects an invented product; the live call carries no key — host-injected
+    at the proxy);
+  - the dispatcher wired to the real runner (`cartfill.rs` `CartRunner` seam →
+    `wholefoods::run_fill`), replacing GC1's `fixture_run`;
+  - the offline e2e (the `OfflineFixtureRunner` + the host integration test) and
+    the never-checkout proofs.
+  CI makes NO live browser/1Password/LLM/network call.
+- **GC3 (owner-gated, NOT yet built)** — the live run: a real headed/headless
+  browser session (a live `CartDriver` over the supervised browser-driver), the
+  live 1Password inject (the `op://` reference resolved through the SA-scoped
+  `OnePasswordResolver`), the session-reuse preflight, the `Matcher::Live` over
+  `/llm`, and the live add-to-cart. Before GC3 the operator MUST supply:
+  - **the exact `op://` reference** for the Amazon/Whole Foods login (replacing
+    the `credential_ref_placeholder()` `op://Private/PLACEHOLDER-amazon-login/
+    password`), set as the per-app credential grant in
+    `[automation.credential_grants]."grocery-cart"`, plus the SA-scoped
+    `OP_SERVICE_ACCOUNT_TOKEN` in the host env;
+  - **a narrowed WF/Amazon ceiling** — `[automation].browser_domains_ceiling`
+    tightened to exactly the hosts the live run needs (not `*`), keeping the
+    `denied_paths = ["/gp/buy/"]` order-submit rail.
+  GC3 wires the live runner into the `LiveCartRunner` (today it short-circuits to
+  `NeedsSignIn` offline). Never submits an order — the `StopGate` + the
+  `/gp/buy/` path-deny stand.

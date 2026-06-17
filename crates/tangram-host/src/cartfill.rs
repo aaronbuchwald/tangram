@@ -13,29 +13,49 @@
 //! a `tokio::spawn`ed interval loop that `select!`s the tick against a `watch`
 //! shutdown signal and stops cleanly on host shutdown.
 //!
-//! ## GC1 = a FIXTURE runner
+//! ## GC2 = the REAL `tangram-automation` runner (offline-tested)
 //!
-//! [`fixture_run`] is a deterministic stand-in for the real automation: it
-//! echoes the grocery list as "added" with stub product names + a stub
-//! `cart_url`, WITHOUT launching a browser, calling 1Password, or the LLM. It
-//! proves the full MCP-tool → request → authorize → dispatch → result round-trip
-//! offline. GC2 replaces the single [`fixture_run`] call with the real
-//! `tangram-automation` runner (the Whole Foods script replay); the
-//! authorize/dispatch/write-back spine here is unchanged.
+//! The dispatcher now drives the real Whole Foods automation via a
+//! [`CartRunner`] seam ([`tangram_automation::wholefoods::run_fill`]): build the
+//! [`BrowserEgressGate`] from the authorized domains (allow the WF/Amazon hosts;
+//! DENY the order-submit `/gp/buy/` path), run the upfront preflight (reuse the
+//! session or surface a sign-in decision), replay the `wholefoods-cart`
+//! [`AutomationScript`] using the LLM item→product matcher per item, halt at the
+//! `StopGate` before checkout, and capture the filled (never submitted)
+//! `cart_url`. The single [`CartRunner::run`] call is the GC2 replacement for
+//! GC1's `fixture_run`; the authorize/dispatch/write-back spine is unchanged.
+//!
+//! **Still offline in CI/dev.** The production [`LiveCartRunner`] makes NO live
+//! browser/1Password/LLM/network call: with no live browser session configured
+//! the preflight reports "no session", so [`run_fill`] returns
+//! [`FillError::NeedsSignIn`] and the request is recorded `failed` with a
+//! human-actionable assistance reason — the live browser session + 1Password
+//! inject + LLM matcher land in **GC3 (owner-gated)**. The offline e2e test
+//! injects a TEST runner (a mock driver + hand-authored snapshots + a fixture
+//! LLM + a `SignedIn` preflight) so the WHOLE real-`run_fill` flow — session
+//! reuse skips login, the matcher picks products, items land in `added`, the
+//! StopGate halts before checkout, the cart URL is captured — is proven WITHOUT
+//! a browser.
 //!
 //! ## The never-checkout rail
 //!
 //! Authorization fails closed: a request for an unapproved template (or an app
 //! not allowed to request) is denied and recorded as `failed`, never run. The
-//! order-submit path-deny (`[automation].denied_paths`) and the template's
-//! `StopGate` (GC2) keep the runner from ever submitting an order.
+//! order-submit path-deny (`[automation].denied_paths`) is wired into the
+//! [`BrowserEgressGate`] the runner builds, and the template's `StopGate` is the
+//! last reachable script step — `run_fill` halts there and never submits an
+//! order.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::json;
+use tangram_automation::preflight::PreflightOutcome;
 use tangram_automation::request::{AuthorizedAutomation, AutomationRequest, authorize};
+use tangram_automation::wholefoods::{
+    self, FillError, FillOutcome, GroceryLine, Matcher, wholefoods_gate,
+};
 use tokio::sync::watch;
 
 use crate::Host;
@@ -129,76 +149,246 @@ pub fn pending_requests(state_json: &str) -> Vec<PendingRequest> {
         .collect()
 }
 
-// ── the GC1 fixture runner ───────────────────────────────────────────────────
+// ── the GC2 real runner seam ─────────────────────────────────────────────────
 
-/// GC1 deterministic fixture runner: turn an [`AuthorizedAutomation`] + its
-/// grocery list into a canned [`CartFillResult`] WITHOUT any browser, 1Password,
-/// or LLM call. Each item is echoed as "added" with a stub product name (a
-/// placeholder for GC2's LLM-matched product) and a stub `cart_url`. This proves
-/// the authorize→dispatch→write-back spine end-to-end offline.
-///
-/// GC2 replaces this with the real `tangram-automation` runner (the Whole Foods
-/// `AutomationScript` replay over the authorized domains + the `op://` inject),
-/// keeping the same `(authorized, list) -> CartFillResult` signature.
-pub fn fixture_run(authorized: &AuthorizedAutomation, list: &[GroceryItem]) -> serde_json::Value {
-    let added: Vec<serde_json::Value> = list
-        .iter()
-        .map(|g| {
-            json!({
-                "item": g.item,
-                // A deterministic STUB product name (GC2 = LLM-matched). The
-                // preference, when present, is folded into the stub label so the
-                // round-trip carries it visibly.
-                "product": stub_product(&g.item, g.preferences.as_deref()),
-                "qty": g.quantity,
-            })
+/// Convert the host's parsed grocery items into the automation crate's
+/// [`GroceryLine`]s (the structured form `run_fill` matches over).
+fn grocery_lines(list: &[GroceryItem]) -> Vec<GroceryLine> {
+    list.iter()
+        .map(|g| GroceryLine {
+            item: g.item.clone(),
+            quantity: g.quantity,
+            preferences: g.preferences.clone(),
         })
+        .collect()
+}
+
+/// Render a [`FillOutcome`] into the `CartFillResult` JSON the app's
+/// `record_cart_result` action stores.
+fn outcome_json(outcome: &FillOutcome) -> serde_json::Value {
+    let added: Vec<serde_json::Value> = outcome
+        .added
+        .iter()
+        .map(|a| json!({ "item": a.item, "product": a.product, "qty": a.qty }))
+        .collect();
+    let not_added: Vec<serde_json::Value> = outcome
+        .not_added
+        .iter()
+        .map(|n| json!({ "item": n.item, "reason": n.reason }))
         .collect();
     json!({
         "added": added,
-        "not_added": [],
-        // A STUB review URL — the filled (never submitted) cart. The first
-        // authorized domain anchors it so the rail (ceiling ∩) is visible.
-        "cart_url": stub_cart_url(authorized),
+        "not_added": not_added,
+        "cart_url": outcome.cart_url,
     })
 }
 
-/// A deterministic stub product label for a requested item (GC1 stand-in for the
-/// GC2 LLM item→product match).
-fn stub_product(item: &str, preferences: Option<&str>) -> String {
-    match preferences {
-        Some(pref) if !pref.trim().is_empty() => format!("[stub] {pref} {item}"),
-        _ => format!("[stub] {item}"),
+/// The runner seam the dispatcher drives. GC2's [`LiveCartRunner`] builds the
+/// egress gate + preflight + matcher and calls
+/// [`tangram_automation::wholefoods::run_fill`]; the offline e2e test injects a
+/// runner backed by a mock driver + fixture LLM. Either way the dispatcher's
+/// authorize/dispatch/write-back spine is identical.
+#[async_trait::async_trait]
+pub trait CartRunner: Send + Sync {
+    /// Run the Whole Foods cart fill for an authorized automation + its grocery
+    /// list. Returns the result JSON (`added`/`not_added`/`cart_url`) on a
+    /// completed (cart-built, StopGate-halted) fill, or a [`FillError`] when the
+    /// run cannot proceed (e.g. not signed in / off-allowlist navigation).
+    async fn run(
+        &self,
+        authorized: &AuthorizedAutomation,
+        list: &[GroceryItem],
+    ) -> Result<serde_json::Value, FillError>;
+}
+
+/// The production GC2 runner. Builds the [`wholefoods_gate`] from the authorized
+/// domains (allow WF/Amazon; deny the `/gp/buy/` order-submit path), runs the
+/// upfront preflight, and replays the `wholefoods-cart` script via `run_fill`
+/// with the LLM matcher per item.
+///
+/// **Offline-by-default (GC2):** there is no configured live browser session, so
+/// the preflight reports `NoSession`; `run_fill` then returns
+/// [`FillError::NeedsSignIn`] (no browser/1Password/LLM/network call is made).
+/// The live browser session, 1Password inject, and LLM matcher are wired here in
+/// **GC3 (owner-gated)** by supplying a live `CartDriver`, a session-reuse
+/// (`SignedIn`) preflight, and a [`Matcher::Live`] over the `/llm` proxy. The
+/// egress gate + StopGate fences below are LIVE now.
+pub struct LiveCartRunner;
+
+#[async_trait::async_trait]
+impl CartRunner for LiveCartRunner {
+    async fn run(
+        &self,
+        authorized: &AuthorizedAutomation,
+        _list: &[GroceryItem],
+    ) -> Result<serde_json::Value, FillError> {
+        // The never-checkout gate is built (and asserted in tests) even on the
+        // offline path: allow the authorized (ceiling-trimmed) domains and
+        // ALWAYS deny the order-submit path at the network layer.
+        let _gate = wholefoods_gate(&authorized.domains);
+
+        // GC2 is OFFLINE: there is no configured live browser session, so the
+        // preflight is "no session" and the runner surfaces the sign-in decision
+        // WITHOUT making any browser/1Password/LLM/network call. We short-circuit
+        // to `NeedsSignIn` here rather than driving `run_fill` against a stub
+        // browser — the live driver + a real (session-reuse) preflight + a
+        // `Matcher::Live` over the `/llm` proxy are wired in GC3 (owner-gated).
+        Err(FillError::NeedsSignIn(PreflightOutcome::NoSession))
     }
 }
 
-/// A deterministic stub cart-review URL on the first authorized domain (or a
-/// generic Amazon cart if none — authorize would have denied an empty domain set
-/// before we got here, so this is belt-and-braces).
-fn stub_cart_url(authorized: &AuthorizedAutomation) -> String {
-    let host = authorized
-        .domains
-        .first()
-        .map_or("www.amazon.com", String::as_str);
-    format!("https://{host}/cart?fixture=gc1")
+/// Thin wrapper around [`tangram_automation::wholefoods::run_fill`] so the
+/// dispatcher and the offline test share one call site.
+pub async fn run_fill_path(
+    credential_ref: Option<&str>,
+    lines: &[GroceryLine],
+    gate: &tangram_automation::egress::BrowserEgressGate,
+    preflight: &PreflightOutcome,
+    driver: &mut dyn wholefoods::CartDriver,
+    matcher: &Matcher,
+) -> Result<FillOutcome, FillError> {
+    wholefoods::run_fill(credential_ref, lines, gate, preflight, driver, matcher).await
+}
+
+/// Env var that selects the OFFLINE fixture runner ([`OfflineFixtureRunner`]) in
+/// place of [`LiveCartRunner`]. CI's e2e test (`tests/cartfill_dispatch.rs`)
+/// sets it so the spawned host binary drives the WHOLE real `run_fill` flow with
+/// a mock driver + a fixture LLM (no browser/1Password/LLM/network), proving the
+/// GC2 dispatcher→real-runner wiring end-to-end. Unset in production (the
+/// default is [`LiveCartRunner`], which is offline-`NeedsSignIn` until GC3).
+pub const OFFLINE_FIXTURE_ENV: &str = "TANGRAM_CARTFILL_OFFLINE_FIXTURE";
+
+/// The OFFLINE fixture runner: drives the SAME real
+/// [`tangram_automation::wholefoods::run_fill`] the live GC3 path uses, but with
+/// a mock [`wholefoods::CartDriver`] (hand-authored search snapshots), a fixture
+/// LLM [`Matcher::deterministic_fixture`], and a `SignedIn` (session-reuse)
+/// preflight — NO browser/1Password/LLM/network call. This is how the e2e test
+/// exercises the full flow through the spawned host binary.
+pub struct OfflineFixtureRunner;
+
+#[async_trait::async_trait]
+impl CartRunner for OfflineFixtureRunner {
+    async fn run(
+        &self,
+        authorized: &AuthorizedAutomation,
+        list: &[GroceryItem],
+    ) -> Result<serde_json::Value, FillError> {
+        let gate = wholefoods_gate(&authorized.domains);
+        let lines = grocery_lines(list);
+        let mut driver = FixtureSearchDriver;
+        let outcome = run_fill_path(
+            authorized.credential_refs.first().map(String::as_str),
+            &lines,
+            &gate,
+            // Session reuse: the fixture preflight reports signed-in, so the
+            // login inject is skipped (login once, reuse the session).
+            &PreflightOutcome::SignedIn,
+            &mut driver,
+            &Matcher::deterministic_fixture(),
+        )
+        .await?;
+        Ok(outcome_json(&outcome))
+    }
+}
+
+/// A mock [`wholefoods::CartDriver`] that fabricates plausible search results
+/// from the search term itself — two candidates, one of which folds in a generic
+/// "Organic"/preference token so the fixture matcher has a preference-honoring
+/// pick. NO browser; deterministic. The fixture e2e runner uses this.
+struct FixtureSearchDriver;
+
+#[async_trait::async_trait]
+impl wholefoods::CartDriver for FixtureSearchDriver {
+    async fn navigate(
+        &mut self,
+        _url: &str,
+    ) -> anyhow::Result<tangram_automation::script::Snapshot> {
+        Ok(tangram_automation::script::Snapshot {
+            url_host: Some(wholefoods::AMAZON_HOST.to_string()),
+            ..Default::default()
+        })
+    }
+    async fn inject_credential(&mut self, _secret_ref: &str, _target: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn search(&mut self, text: &str) -> anyhow::Result<tangram_automation::script::Snapshot> {
+        Ok(tangram_automation::script::Snapshot {
+            url_host: Some(wholefoods::AMAZON_HOST.to_string()),
+            text: format!("fixture-results:{text}"),
+            ..Default::default()
+        })
+    }
+    fn candidates(
+        &self,
+        snap: &tangram_automation::script::Snapshot,
+    ) -> Vec<wholefoods::ProductCandidate> {
+        let term = snap
+            .text
+            .strip_prefix("fixture-results:")
+            .unwrap_or_default();
+        if term.is_empty() {
+            return Vec::new();
+        }
+        // A generic store-brand candidate + an "Organic Whole" variant that
+        // contains the common preference tokens, so a preference-bearing line
+        // matches the second and a plain line matches the first.
+        vec![
+            wholefoods::ProductCandidate::new(format!("365 {term}")),
+            wholefoods::ProductCandidate::new(format!("Organic Whole {term}")),
+        ]
+    }
+    async fn add_to_cart(
+        &mut self,
+        _product_title: &str,
+        _qty: i64,
+    ) -> anyhow::Result<tangram_automation::script::Snapshot> {
+        Ok(tangram_automation::script::Snapshot {
+            text: "Added to Cart".to_string(),
+            ..Default::default()
+        })
+    }
+}
+
+/// Pick the GC2 [`CartRunner`] for the binary: the [`OfflineFixtureRunner`] when
+/// [`OFFLINE_FIXTURE_ENV`] is set (CI e2e), else the production
+/// [`LiveCartRunner`].
+fn default_runner() -> Arc<dyn CartRunner> {
+    if std::env::var_os(OFFLINE_FIXTURE_ENV).is_some() {
+        tracing::warn!(
+            "cartfill: {OFFLINE_FIXTURE_ENV} set — using the OFFLINE fixture runner \
+             (no browser/1Password/LLM); this is a test/CI mode, not the live run"
+        );
+        Arc::new(OfflineFixtureRunner)
+    } else {
+        Arc::new(LiveCartRunner)
+    }
 }
 
 // ── the supervised loop ──────────────────────────────────────────────────────
 
 /// The supervised cart-fill dispatcher: an interval loop + a shutdown channel,
-/// in the shape of `scheduler.rs`.
+/// in the shape of `scheduler.rs`. Holds the [`CartRunner`] seam (the production
+/// [`LiveCartRunner`] by default; the offline test injects a mock-driver runner).
 pub struct CartFillDispatcher {
     host: Arc<Host>,
     tick: Duration,
     shutdown: watch::Sender<bool>,
+    runner: Arc<dyn CartRunner>,
 }
 
 impl CartFillDispatcher {
     pub fn new(host: Arc<Host>) -> Self {
+        Self::with_runner(host, default_runner())
+    }
+
+    /// Build the dispatcher with an explicit [`CartRunner`] (the offline e2e
+    /// test injects a mock-driver runner; production uses [`LiveCartRunner`]).
+    pub fn with_runner(host: Arc<Host>, runner: Arc<dyn CartRunner>) -> Self {
         Self {
             host,
             tick: TICK,
             shutdown: watch::Sender::new(false),
+            runner,
         }
     }
 
@@ -281,22 +471,29 @@ impl CartFillDispatcher {
             }
         };
 
-        // 3) Run. GC1 = the deterministic fixture (no browser/op/LLM). GC2
-        // swaps in the real tangram-automation runner here.
-        let result = fixture_run(&authorized, &req.grocery_list);
-        tracing::info!(
-            "cartfill: {}: fixture run added {} item(s) over domains {:?}",
-            req.id,
-            req.grocery_list.len(),
-            authorized.domains,
-        );
-
-        // 4) Write the result back (done).
-        if let Err(e) = self
-            .record(runtime, &req.id, status::DONE, Some(result))
-            .await
-        {
-            tracing::warn!("cartfill: {}: cannot write result: {e}", req.id);
+        // 3) Run the real `tangram-automation` Whole Foods runner (GC2). The
+        // gate denies the order-submit path; the script halts at the StopGate.
+        // A run that can't proceed (e.g. not signed in — GC2 is offline, the
+        // live session is GC3) is recorded `failed` with a human-actionable
+        // reason, never run live.
+        match self.runner.run(&authorized, &req.grocery_list).await {
+            Ok(result) => {
+                tracing::info!(
+                    "cartfill: {}: run completed over domains {:?}",
+                    req.id,
+                    authorized.domains,
+                );
+                if let Err(e) = self
+                    .record(runtime, &req.id, status::DONE, Some(result))
+                    .await
+                {
+                    tracing::warn!("cartfill: {}: cannot write result: {e}", req.id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cartfill: {}: run could not proceed: {e}", req.id);
+                self.fail(runtime, &req.id, &e.to_string()).await;
+            }
         }
     }
 
@@ -402,32 +599,135 @@ mod tests {
     }
 
     #[test]
-    fn authorize_then_fixture_run_round_trips() {
+    fn authorize_narrows_to_the_ceiling_and_grant() {
         let req = &pending_requests(&one_pending())[0];
         let authorized = authorize(&req.automation_request(), &policy()).unwrap();
-
         // The never-widen rail: off-ceiling domain + ungranted credential dropped.
         assert_eq!(authorized.domains, vec!["www.amazon.com"]);
         assert_eq!(
             authorized.credential_refs,
             vec!["op://Private/Amazon/password"]
         );
+    }
 
-        let result = fixture_run(&authorized, &req.grocery_list);
+    /// A mock [`wholefoods::CartDriver`] for the offline GC2 round-trip: returns
+    /// hand-authored search snapshots, records what was injected/added — NO
+    /// browser.
+    struct TestDriver {
+        results: std::collections::HashMap<String, Vec<wholefoods::ProductCandidate>>,
+    }
+
+    #[async_trait::async_trait]
+    impl wholefoods::CartDriver for TestDriver {
+        async fn navigate(
+            &mut self,
+            _url: &str,
+        ) -> anyhow::Result<tangram_automation::script::Snapshot> {
+            Ok(tangram_automation::script::Snapshot {
+                url_host: Some("www.amazon.com".into()),
+                ..Default::default()
+            })
+        }
+        async fn inject_credential(
+            &mut self,
+            _secret_ref: &str,
+            _target: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn search(
+            &mut self,
+            text: &str,
+        ) -> anyhow::Result<tangram_automation::script::Snapshot> {
+            Ok(tangram_automation::script::Snapshot {
+                url_host: Some("www.amazon.com".into()),
+                text: format!("results:{text}"),
+                ..Default::default()
+            })
+        }
+        fn candidates(
+            &self,
+            snap: &tangram_automation::script::Snapshot,
+        ) -> Vec<wholefoods::ProductCandidate> {
+            let term = snap.text.strip_prefix("results:").unwrap_or("");
+            self.results.get(term).cloned().unwrap_or_default()
+        }
+        async fn add_to_cart(
+            &mut self,
+            _product_title: &str,
+            _qty: i64,
+        ) -> anyhow::Result<tangram_automation::script::Snapshot> {
+            Ok(tangram_automation::script::Snapshot {
+                text: "Added to Cart".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_then_real_run_round_trips_offline() {
+        let req = &pending_requests(&one_pending())[0];
+        let authorized = authorize(&req.automation_request(), &policy()).unwrap();
+
+        // The OFFLINE real-runner path: a SignedIn preflight (session reuse) +
+        // a mock driver + the fixture LLM matcher — the SAME `run_fill` the live
+        // GC3 runner uses, with no browser/1Password/LLM/network call.
+        let mut driver = TestDriver {
+            results: std::collections::HashMap::from([
+                (
+                    "milk".to_string(),
+                    vec![
+                        wholefoods::ProductCandidate::new("Whole Milk"),
+                        wholefoods::ProductCandidate::new("Organic Whole Milk"),
+                    ],
+                ),
+                (
+                    "eggs".to_string(),
+                    vec![wholefoods::ProductCandidate::new("Large Eggs")],
+                ),
+            ]),
+        };
+        let gate = wholefoods_gate(&authorized.domains);
+        let lines = grocery_lines(&req.grocery_list);
+        let outcome = run_fill_path(
+            authorized.credential_refs.first().map(String::as_str),
+            &lines,
+            &gate,
+            &PreflightOutcome::SignedIn,
+            &mut driver,
+            &Matcher::deterministic_fixture(),
+        )
+        .await
+        .expect("offline fill succeeds");
+
+        let result = outcome_json(&outcome);
         let added = result["added"].as_array().unwrap();
         assert_eq!(added.len(), 2);
         assert_eq!(added[0]["item"], "milk");
-        // The stub product folds in the preference; the qty round-trips.
-        assert_eq!(added[0]["product"], "[stub] organic milk");
+        // The matcher honored the "organic" preference.
+        assert_eq!(added[0]["product"], "Organic Whole Milk");
         assert_eq!(added[0]["qty"], 1);
-        assert_eq!(added[1]["product"], "[stub] eggs");
+        assert_eq!(added[1]["item"], "eggs");
         assert_eq!(added[1]["qty"], 2);
         assert!(result["not_added"].as_array().unwrap().is_empty());
-        // The stub cart URL anchors on the authorized (ceiling-trimmed) domain.
-        assert_eq!(
-            result["cart_url"],
-            "https://www.amazon.com/cart?fixture=gc1"
-        );
+        // The never-checkout proof: halted at the gate; cart URL is a VIEW path.
+        assert!(outcome.stopped_at_gate);
+        let cart_url = result["cart_url"].as_str().unwrap();
+        assert!(cart_url.starts_with("https://www.amazon.com/"));
+        assert!(!cart_url.contains("/gp/buy/"));
+    }
+
+    #[tokio::test]
+    async fn live_runner_is_offline_and_surfaces_signin() {
+        // The production runner with no live browser session reports "not signed
+        // in" WITHOUT any live call (GC3 supplies the live session).
+        let req = &pending_requests(&one_pending())[0];
+        let authorized = authorize(&req.automation_request(), &policy()).unwrap();
+        let err = LiveCartRunner
+            .run(&authorized, &req.grocery_list)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FillError::NeedsSignIn(_)));
     }
 
     #[test]
