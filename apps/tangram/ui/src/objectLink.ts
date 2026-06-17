@@ -54,16 +54,17 @@ export function glyphForType(objType: string): string {
   return TYPE_GLYPHS[objType.trim().toLowerCase()] ?? OBJECT_GLYPH;
 }
 
-/** The smart-object types rendered INLINE as a table/aisle BLOCK (the meal-plan
- *  UX fix, see objectTable.ts) rather than the compact inline chip. The chip
+/** The smart-object types rendered INLINE as a §8 BLOCK card (the meal-plan
+ *  mockup, see objectTable.ts) rather than the compact inline chip. The chip
  *  ViewPlugin SKIPS these ids so the block StateField in objectTable.ts owns
- *  them — the two never double-decorate the same range. Both are DERIVED. */
-const TABLE_TYPES: ReadonlySet<string> = new Set(["grocery-list", "cart-preview"]);
+ *  them — the two never double-decorate the same range. `recipe` is a §8 card
+ *  (SO5); `grocery-list`/`cart-preview` are derived tables (SO3). */
+const CARD_TYPES: ReadonlySet<string> = new Set(["recipe", "grocery-list", "cart-preview"]);
 
-/** True when a smart object of `objType` renders as an inline table block (and
+/** True when a smart object of `objType` renders as an inline §8 block card (and
  *  is therefore skipped by the inline-chip ViewPlugin). Case-insensitive. */
-export function isTableObjectType(objType: string | null | undefined): boolean {
-  return TABLE_TYPES.has((objType ?? "").trim().toLowerCase());
+export function isCardObjectType(objType: string | null | undefined): boolean {
+  return CARD_TYPES.has((objType ?? "").trim().toLowerCase());
 }
 
 /** Opens the object popup for the object with the given id (a chip click). */
@@ -316,10 +317,10 @@ function buildChipDecorations(
       const start = from + link.from;
       const end = from + link.to;
       const obj = resolve(link.id);
-      // A derived table type (grocery-list / cart-preview) renders as an inline
-      // BLOCK table, owned by the StateField in objectTable.ts — skip it here so
-      // the two decoration sources never collide on the same range.
-      if (isTableObjectType(obj?.type)) continue;
+      // A §8 card type (recipe / grocery-list / cart-preview) renders as an
+      // inline BLOCK card, owned by the StateField in objectTable.ts — skip it
+      // here so the two decoration sources never collide on the same range.
+      if (isCardObjectType(obj?.type)) continue;
       const raw = text.slice(link.from, link.to);
       const inner = /^\[([^\]\n]*)\]/.exec(raw)?.[1] ?? "";
       const label = nameFromLabel(inner) || "object";

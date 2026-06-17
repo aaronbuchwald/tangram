@@ -142,12 +142,15 @@ describe("object chip atomicity + render (DOM)", () => {
   });
 
   it("renders a per-type glyph + class for the resolved type (#109 fix 2)", () => {
-    const editor = mountWithObjectChip(obj({ type: "recipe" }));
+    // Use a NON-card type (`rollup`) — the meal-plan card types (recipe /
+    // grocery-list / cart-preview) now render as inline BLOCK cards, owned by
+    // objectTable.ts, so they are intentionally NOT inline chips (SO5).
+    const editor = mountWithObjectChip(obj({ type: "rollup" }));
     const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
-    expect(chip?.dataset.objectType).toBe("recipe");
-    expect(chip?.classList.contains("cm-object-link-recipe")).toBe(true);
-    // The recipe glyph (🍳), NOT the generic `◆`.
-    expect(chip?.textContent).toContain(glyphForType("recipe"));
+    expect(chip?.dataset.objectType).toBe("rollup");
+    expect(chip?.classList.contains("cm-object-link-rollup")).toBe(true);
+    // The rollup glyph (∑), NOT the generic `◆`.
+    expect(chip?.textContent).toContain(glyphForType("rollup"));
     expect(chip?.textContent).not.toContain(OBJECT_GLYPH);
     editor.destroy();
   });

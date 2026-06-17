@@ -222,6 +222,35 @@ pub struct RecipeCacheEntry {
     object_id: String,
 }
 
+/// The result of the Smart Objects SO5 **cart-fill action STUB** ([`Vault::fill_cart`]).
+///
+/// SO5 reproduces the §8 "add to cart" action affordance over the wired
+/// recipe→grocery→cart primitive, but the LIVE cart-fill pipeline (the
+/// `tangram-automation` browser-driver + the `op://` credential broker, §5) is
+/// **deferred to Build-3**. So this is a pure, deterministic STUB: it streams the
+/// §3 pipeline PHASE NAMES (Explore → Compile → Run → Verify) and ends on a
+/// review-only terminus — **no live browser, no credential, and it NEVER
+/// purchases**. `purchased` is hard-wired `false`; the action does no I/O and
+/// touches no egress. The UI streams these phases (each a green check) and shows
+/// `review_message` (a lock icon line) when the stream ends.
+#[model]
+pub struct CartFillResult {
+    /// The §3 pipeline phase names, in order, that the UI streams as green
+    /// checks: `["Explore", "Compile", "Run", "Verify"]`. Pure/constant — the
+    /// stub does not actually execute any phase.
+    phases: Vec<String>,
+    /// The number of grocery rows the cart WOULD hold (the live grocery-list row
+    /// count) — purely informational, surfaced as "· N items" on the button.
+    item_count: i64,
+    /// The review-only terminus line the UI shows after the phase stream — the
+    /// lock-icon message confirming nothing was purchased. Fixed copy so the
+    /// no-purchase guarantee is auditable at the source.
+    review_message: String,
+    /// Always `false` — the stub NEVER purchases. Present so a caller can assert
+    /// the no-purchase invariant programmatically (and the tests do).
+    purchased: bool,
+}
+
 /// The seed type registry (Smart Objects SO1): 1–2 trivial types so the
 /// end-to-end `@`→chip→popup loop is demonstrable. Rich types (recipe,
 /// grocery-list, cart-preview) are SO3. The tuples are `(name, label, default
@@ -243,6 +272,22 @@ const KNOWN_OBJECT_TYPES: &[(&str, &str, &str)] = &[
     ("grocery-list", "Grocery list (derived)", "table"),
     ("cart-preview", "Cart preview (derived)", "table"),
 ];
+
+/// The review-only terminus message for the SO5 cart-fill STUB
+/// ([`Vault::fill_cart`]). Fixed copy so the no-purchase guarantee is auditable
+/// at the source: the UI shows it (with a lock icon) when the phase stream ends.
+const CART_REVIEW_MESSAGE: &str =
+    "Cart ready for your review — nothing purchased. Confirm checkout yourself.";
+
+/// Count the rows in a `grocery-list` object's cached `data` (`{ "rows": [...] }`).
+/// Read-only + best-effort: a malformed/empty payload counts as 0 (never panics).
+/// Used by the SO5 cart-fill stub to report how many items the cart would hold.
+fn grocery_row_count(data: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .and_then(|v| v["rows"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
 
 /// The default `render` hint for a smart object of `obj_type`: the registered
 /// type's default, falling back to `chip` for an unregistered type. Used when an
@@ -1207,6 +1252,51 @@ impl Vault {
         // in topological order, in this same commit (the chain recalculates live).
         self.recompute_reactive_graph();
         Ok(())
+    }
+
+    /// Smart Objects SO5 — the **cart-fill action STUB** (the §8 "Fill Whole
+    /// Foods cart" affordance over the wired primitive). Returns the §3 pipeline
+    /// phase names (Explore → Compile → Run → Verify) plus a review-only terminus
+    /// message and the live grocery row count, so the UI can stream the phases
+    /// (each a green check) and end on the lock-icon "nothing purchased" line.
+    ///
+    /// This is intentionally a **pure, read-only STUB** — it does NOT touch
+    /// `tangram-automation`, opens NO browser, resolves NO credential, performs
+    /// NO egress, and **never purchases** (`purchased` is hard-wired `false`).
+    /// The LIVE cart-fill pipeline (§5) is deferred to Build-3; this preserves
+    /// the review-only safety posture until then. `cart_preview_id` names the
+    /// `cart-preview` object the button sits on; the item count is read from its
+    /// upstream `grocery-list` dep (the number of rows that WOULD be added).
+    /// Errors only if the object is absent or is not a `cart-preview`.
+    pub fn fill_cart(&self, cart_preview_id: String) -> Result<CartFillResult, String> {
+        let objs = self.objects.as_deref().unwrap_or(&[]);
+        let cart = objs
+            .iter()
+            .find(|o| o.id == cart_preview_id)
+            .ok_or_else(|| format!("no object with id {cart_preview_id}"))?;
+        if cart.obj_type != "cart-preview" {
+            return Err(format!("object {cart_preview_id} is not a cart-preview"));
+        }
+        // The live grocery row count = the rows of the cart's upstream
+        // grocery-list dependency (the items the cart WOULD hold). Read-only;
+        // never falls over on a malformed payload (counts what it can parse).
+        let item_count = cart
+            .derive
+            .as_ref()
+            .and_then(|d| d.deps.first())
+            .and_then(|gl_id| objs.iter().find(|o| &o.id == gl_id))
+            .map_or(0, |gl| grocery_row_count(&gl.data));
+        Ok(CartFillResult {
+            // The §3 pipeline phases the UI streams as green checks.
+            phases: ["Explore", "Compile", "Run", "Verify"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            item_count: i64::try_from(item_count).unwrap_or(i64::MAX),
+            review_message: CART_REVIEW_MESSAGE.to_string(),
+            // The no-purchase invariant — hard-wired, asserted by the tests.
+            purchased: false,
+        })
     }
 
     /// Smart Objects SO4 — **recipe URL ingestion**. Turn a pasted recipe URL
@@ -2367,9 +2457,11 @@ Objects SO3). Three recipes feed a **derived** grocery list, which feeds a \
 chip → *Include in plan* — and watch the grocery list and the cart preview \
 recompute **live**, right here in the document.\n\n\
 ## Recipes\n\n\
-- [◆ Tomato Pasta](obj://recipe-pasta)\n\
-- [◆ Tomato Soup](obj://recipe-soup)\n\
-- [◆ Garden Salad](obj://recipe-salad)\n\n\
+Check a recipe to include it in the plan; click a card to expand its \
+ingredients.\n\n\
+[◆ Tomato Pasta](obj://recipe-pasta)\n\n\
+[◆ Tomato Soup](obj://recipe-soup)\n\n\
+[◆ Garden Salad](obj://recipe-salad)\n\n\
 ## Grocery list (auto-synced)\n\n\
 [◆ Grocery list](obj://meal-plan-grocery)\n\n\
 The olive oil from all three recipes amalgamates (2 + 2 + 1 = 5 tbsp); onion \
@@ -3669,6 +3761,53 @@ mod tests {
             v.toggle_recipe_in_plan("recipe-pasta".into(), "recipe-salad".into(), true)
                 .is_err()
         );
+    }
+
+    // ── Smart Objects SO5: the cart-fill action STUB (review-only) ─────────────
+
+    #[test]
+    fn fill_cart_streams_the_phases_and_never_purchases() {
+        let v = Vault::default();
+        let r = v
+            .fill_cart("meal-plan-cart".into())
+            .expect("cart-fill stub");
+        // The §3 pipeline phases stream in order.
+        assert_eq!(r.phases, ["Explore", "Compile", "Run", "Verify"]);
+        // The terminus is the review-only message — and NOTHING is purchased.
+        assert!(!r.purchased, "the stub must NEVER purchase");
+        assert!(r.review_message.contains("nothing purchased"));
+        assert!(r.review_message.contains("Confirm checkout yourself"));
+        // The item count reflects the live grocery-list row count (the seeded
+        // meal-plan amalgamates to a non-empty grocery list).
+        assert!(
+            r.item_count > 0,
+            "the seeded plan has grocery rows to report"
+        );
+        assert_eq!(
+            r.item_count,
+            i64::try_from(grocery_rows(&v, "meal-plan-grocery").len()).unwrap()
+        );
+    }
+
+    #[test]
+    fn fill_cart_item_count_tracks_the_live_plan() {
+        let mut v = Vault::default();
+        let before = v.fill_cart("meal-plan-cart".into()).unwrap().item_count;
+        // Toggling a recipe out of the plan changes the live grocery row count,
+        // so the stub's reported item count tracks it (it reads the live store).
+        v.toggle_recipe_in_plan("meal-plan-grocery".into(), "recipe-salad".into(), false)
+            .unwrap();
+        let after = v.fill_cart("meal-plan-cart".into()).unwrap().item_count;
+        assert!(after < before, "removing a recipe drops the item count");
+    }
+
+    #[test]
+    fn fill_cart_rejects_a_non_cart_object() {
+        let v = Vault::default();
+        // A recipe is not a cart-preview.
+        assert!(v.fill_cart("recipe-pasta".into()).is_err());
+        // An unknown id errors too.
+        assert!(v.fill_cart("nope".into()).is_err());
     }
 
     // ── Smart Objects SO4: recipe URL ingestion (the commit + cache halves) ───

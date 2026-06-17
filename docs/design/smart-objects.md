@@ -15,8 +15,10 @@ unchanged, and converge onto this primitive in a **later** checkpoint (§7). Thi
 doc owns the primitive, the locked Handoff-2 decisions, and the SO checkpoint
 roadmap. SO1 (the foundation: the object store + the `@` chip + the basic popup +
 typed links) is the first shippable slice and what this doc's "as built" notes
-describe; SO2 (reactivity), SO3 (recipe types + the reactive chain), and SO4
-(recipe URL ingestion) are **built**; SO5 (the §8 mockup + cart-fill) is planned.
+describe; SO2 (reactivity), SO3 (recipe types + the reactive chain), SO4
+(recipe URL ingestion), and SO5 (the §8 meal-plan mockup + the cart-fill stub)
+are **built** — **Build-1 is COMPLETE**. The LIVE cart-fill action pipeline (the
+`tangram-automation` browser + credential tier) is deferred to **Build-3** (§5).
 
 ---
 
@@ -261,7 +263,12 @@ NOT a new runtime:
   `data` and the replicated doc never see them.
 
 The cart-preview action (§6) is the pipeline's acceptance vehicle, gated on the
-SO3 types existing.
+SO3 types existing. SO5 shipped the **review-only STUB** of this action
+(`fill_cart`): the §8 "Fill Whole Foods cart" button streams the phase names
+(Explore → Compile → Run → Verify) and ends on a lock-icon "nothing purchased"
+terminus, but the action is pure/read-only — it touches none of the substrates
+above and **never purchases**. Build-3 replaces the stub with the live pipeline
+behind the same §8 surface.
 
 ---
 
@@ -304,9 +311,10 @@ The Handoff-2 flagship demo, staged:
   fix 1).
 - **SO4 — recipe URL ingestion (AS BUILT).** Paste a recipe URL → a normalized
   `recipe` smart object that flows into the SO3 reactive grocery→cart chain. The
-  **§8 two-column + chat-panel mockup and the "add to cart" action-role
-  object/stub move to SO5** (below) — SO4 lands the ingestion pipeline (the
-  handoff's flagged core technical risk).
+  **§8 meal-plan mockup and the "add to cart" action-role stub moved to SO5**
+  (now **built** — the in-document recipe/grocery/cart cards, the review-only
+  cart-fill stub + phase stream, and the light "Add via chat" demo) — SO4 lands
+  the ingestion pipeline (the handoff's flagged core technical risk).
 
   **The architecture split (LOCKED): host fetches, the component
   extracts + normalizes + dispatches.** A WASM component cannot fetch arbitrary
@@ -380,11 +388,15 @@ The Handoff-2 flagship demo, staged:
 | **SO2** | **Reactivity engine** | the `derive`/`derive_error` model + a topological recompute engine (`reactive.rs`), cached-inline derived, cycle detection, the single-doc simplification, a real derived type (`rollup`) + a seeded live demo, and the chip/popup derived rendering (§4). | **DONE** |
 | **SO3** | **Recipe types + the reactive chain** | the `recipe`/`grocery-list`/`cart-preview` types + the two derive kinds (`reactive::grocery`, with unit reconciliation); the seeded reactive `meal-plan-demo.md` (3 overlapping recipes → derived grocery-list → derived cart-preview); the Include-in-plan toggle (`toggle_recipe_in_plan`) driving the live recompute; functional §8-styled rendering (recipe card / grocery table / cart-by-aisle, purple accent); the two #109 fix-forwards (whole-span delete-strip + per-type chip glyph) (§6). | **DONE** |
 | **SO4** | **Recipe URL ingestion** | host-mediated fetch (`GET /recipe/fetch`, gated by the `tangram-automation` egress ceiling) + in-component schema.org/Recipe JSON-LD extraction + LLM ingredient normalization (DeepSeek, fixture-testable) + the canonical dictionary + the `recipe` object & URL+JSON-LD-hash cache + the `@recipe` import affordance (§6). Deferred (seam wired): the no-JSON-LD LLM page-parse fallback + the JS-render browser-driver fetch. | **DONE** |
-| **SO5** | **The §8 mockup + cart-fill** | the pixel-exact §8 two-column + chat-panel mockup over the wired primitive; the "add to cart" action-role object/stub (§5) that runs the pipeline to a cart-preview run object. | PLANNED |
+| **SO5** | **The §8 mockup + cart-fill stub** | the §8 meal-plan mockup over the wired primitive — in-document BLOCK cards (the recipe card: an include-in-plan checkbox + the purple chip pill + a chevron over an expandable ingredient list; the grocery Item \| Qty \| From table; the cart-preview grouped by aisle), the §8 **Action** affordance (a full-width "Fill Whole Foods cart · N items" button that streams the §3 phases — Explore → Compile → Run → Verify, each a green check — and ends on a lock-icon **review-only "nothing purchased"** terminus), and a light in-document chat affordance (two seeded messages + an "Add 'Tacos' via chat" button that injects a 4th recipe and re-syncs the chain). The cart-fill is a **STUB** — `fill_cart` is a pure, read-only action returning the phase sequence + the review message; **no live browser, no `tangram-automation`, NEVER purchases**. | **DONE** |
 | — | **Agent/Run convergence + versioning** | re-home agents/runs onto the primitive behind the unchanged surface; versioning (§7). | LATER / PARALLEL |
 
-The **action pipeline** (§5) lands with the action role — Build-3/SOx — alongside
-SO5 (the cart-preview action needs the recipe types to act on).
+The **LIVE action pipeline** (§5 — the `tangram-automation` browser-driver +
+`op://` credential broker, producing a cart-preview run-role object) lands with
+the action role at **Build-3/SOx**. SO5 ships only the review-only STUB
+(`fill_cart`): it reproduces the §8 Action affordance + phase stream over the
+wired primitive but performs NO egress and never purchases — the safety posture
+holds until Build-3 wires the live pipeline behind the same surface.
 
 ---
 

@@ -76,7 +76,7 @@ import {
   type ObjectTypeProvider,
   objectCompletionSource,
 } from "./objectComplete";
-import { objectTable } from "./objectTable";
+import { type MealPlanCallbacks, objectTable } from "./objectTable";
 import { livePreview } from "./livePreview";
 import { type CalloutBacklink, runCalloutCard } from "./callout";
 
@@ -418,6 +418,11 @@ export class MdEditor {
     // per-type glyph/style. Reads through the live replicated store. Defaults to
     // "no record" → the chip reads as an `unknown`-type chip, a harmless no-op.
     resolveObject: ObjectResolver = () => null,
+    // Smart objects SO5 — the §8 meal-plan card hooks (the recipe card's
+    // include-in-plan checkbox, the cart-preview's "Fill cart" Action stream, the
+    // light "Add via chat" demo). All optional; with none wired the cards render
+    // statically (a harmless no-op for non-vault editors). See objectTable.ts.
+    mealPlanCallbacks: MealPlanCallbacks = {},
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -484,7 +489,7 @@ export class MdEditor {
         // without a click (the chip ViewPlugin above skips those types). Sourced
         // from a StateField because a block decoration spans the line (the
         // callout's lesson). The block opens the popup via its Edit affordance.
-        objectTable(resolveObject, onOpenObjectLink),
+        objectTable(resolveObject, onOpenObjectLink, mealPlanCallbacks),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
         // mounts (notes stop rendering). So the slash `/<partial>` popup and the

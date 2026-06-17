@@ -1177,53 +1177,131 @@ body {
 .object-cart-aisle-name::before { content: "🧺 "; }
 .object-cart-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; }
 
-/* Smart Objects SO3 — DERIVED-object INLINE TABLES (the meal-plan UX fix):
- * a grocery-list / cart-preview chip renders in-document as a §8 Notion-style
- * table BLOCK (a CM6 block widget from objectTable.ts) so its content is
- * visible without a click. The §8 smart-object PURPLE accent family — fill
- * #EEEDFE, border #AFA9EC, text #3C3489, dot #534AB7 — plus the green
- * "auto-synced" badge that marks it derived. */
-.object-table-card {
-  border: 1px solid #afa9ec; border-radius: 8px; background: #eeedfe;
-  color: #3c3489; padding: 8px 12px; margin: 6px 0 10px; font-family: var(--sans);
+/* Smart Objects SO5 — the §8 meal-plan MOCKUP: a recipe / grocery-list /
+ * cart-preview chip renders in-document as a styled BLOCK CARD (a CM6 block
+ * widget from objectTable.ts) so its content is visible without a click — the
+ * §8 "document recalculates itself" surface. The §8 smart-object PURPLE accent
+ * family — fill #EEEDFE, border #AFA9EC, text #3C3489, dot #534AB7 — plus the
+ * green "auto-synced" badge that marks a derived card. */
+.object-card {
+  border: 0.5px solid #afa9ec; border-radius: 10px; background: #fff;
+  color: #3c3489; padding: 10px 12px; margin: 8px 0 12px; font-family: var(--sans);
 }
-.object-table-card.object-table-error { border-color: rgba(197, 64, 47, 0.45); }
-.object-table-head {
+/* Derived cards (grocery / cart) carry the purple fill; the recipe card stays
+ * white (a definition, not derived). */
+.object-card-grocery-list, .object-card-cart-preview { background: #eeedfe; }
+.object-card.object-card-error { border-color: rgba(197, 64, 47, 0.45); }
+.object-card-head {
   display: flex; align-items: center; gap: 8px;
   margin-bottom: 6px; font-size: 13px;
 }
-.object-table-title { font-weight: 700; color: #3c3489; }
-.object-table-badge {
+/* The §8 purple chip pill (`🍳/🛒/🧺 Name`) with the #534AB7 dot. */
+.object-card-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-weight: 700; color: #3c3489;
+  background: #eeedfe; border: 1px solid #afa9ec; border-radius: 999px;
+  padding: 2px 10px; font-size: 12px;
+}
+.object-card-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #534ab7; flex: none;
+}
+.object-card-badge {
   font-size: 11px; font-weight: 600; color: #1f8f5f;
   background: rgba(31, 210, 134, 0.14); border-radius: 999px; padding: 1px 8px;
 }
-.object-table-badge-error {
-  color: #c5402f; background: rgba(197, 64, 47, 0.12);
-}
-.object-table-open {
+.object-card-badge-error { color: #c5402f; background: rgba(197, 64, 47, 0.12); }
+.object-card-open {
   margin-left: auto; cursor: pointer; font-size: 11px; font-weight: 600;
   color: #534ab7; background: #fff; border: 1px solid #afa9ec;
   border-radius: 6px; padding: 2px 10px;
 }
-.object-table-open:hover { background: #afa9ec; color: #fff; }
-.object-table-empty { color: #534ab7; opacity: 0.8; font-style: italic; font-size: 13px; }
-/* Grocery: Item | Qty | From table. */
-.object-table-grocery { width: 100%; border-collapse: collapse; font-size: 12px; }
-.object-table-grocery th {
+.object-card-open:hover { background: #afa9ec; color: #fff; }
+.object-card-empty { color: #534ab7; opacity: 0.8; font-style: italic; font-size: 13px; }
+
+/* §8 recipe CARD: a header row (include checkbox + pill + chevron) over an
+ * expandable indented ingredient list. */
+.object-recipe-head { cursor: pointer; }
+.object-recipe-include {
+  accent-color: #534ab7; width: 15px; height: 15px; cursor: pointer; flex: none;
+}
+.object-recipe-chevron { margin-left: auto; color: #534ab7; font-size: 12px; }
+.object-card-recipe .object-card-open { margin-left: 8px; }
+.object-recipe-ingredients {
+  margin: 6px 0 0; padding-left: 26px; display: grid; gap: 3px;
+  font-size: 13px; color: #3c3489;
+}
+.object-recipe-collapsed .object-recipe-ingredients { display: none; }
+.object-recipe-aisle {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: #eeedfe; border: 1px solid #afa9ec; color: #534ab7;
+}
+
+/* §8 grocery list: Item | Qty | From table. */
+.object-card-grocery { width: 100%; border-collapse: collapse; font-size: 12px; }
+.object-card-grocery th {
   text-align: left; font-weight: 600; color: #534ab7;
   border-bottom: 1px solid #afa9ec; padding: 4px 6px;
 }
-.object-table-grocery td { padding: 4px 6px; border-bottom: 1px solid rgba(175, 169, 236, 0.4); }
-.object-table-grocery tr:last-child td { border-bottom: none; }
-/* Cart: aisle groups. */
-.object-table-aisle { margin-top: 8px; }
-.object-table-aisle:first-child { margin-top: 0; }
-.object-table-aisle-name {
+.object-card-grocery td { padding: 4px 6px; border-bottom: 1px solid rgba(175, 169, 236, 0.4); }
+.object-card-grocery tr:last-child td { border-bottom: none; }
+
+/* §8 cart preview: aisle groups. */
+.object-card-aisle { margin-top: 8px; }
+.object-card-aisle:first-child { margin-top: 0; }
+.object-card-aisle-name {
   font-weight: 700; font-size: 11px; text-transform: uppercase;
   letter-spacing: 0.04em; color: #534ab7;
 }
-.object-table-aisle-name::before { content: "🧺 "; }
-.object-table-aisle-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; font-size: 13px; }
+.object-card-aisle-name::before { content: "🧺 "; }
+.object-card-aisle-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; font-size: 13px; }
+
+/* §8 ACTION: a full-width accent-purple button that streams the §3 pipeline
+ * phases (each a green check) and ends on a lock-icon review terminus. This is
+ * a STUB — it NEVER purchases (the live pipeline is Build-3). */
+.object-action { margin-top: 12px; }
+.object-action-btn {
+  width: 100%; cursor: pointer; font-weight: 700; font-size: 13px;
+  color: #fff; background: #534ab7; border: 1px solid #4a40a8;
+  border-radius: 8px; padding: 9px 12px;
+}
+.object-action-btn:hover:not(:disabled) { background: #4a40a8; }
+.object-action-btn:disabled { opacity: 0.65; cursor: progress; }
+.object-action-status { margin-top: 8px; display: grid; gap: 3px; }
+.object-action-status-active {
+  padding: 8px 10px; border-radius: 8px; background: #fff; border: 1px solid #afa9ec;
+}
+.object-action-phase {
+  font-size: 12px; color: #3c3489; display: flex; align-items: center; gap: 6px;
+}
+.object-action-check { color: #1f8f5f; font-weight: 700; }
+.object-action-review {
+  margin-top: 4px; font-size: 12px; font-weight: 600; color: #534ab7;
+}
+.object-action-error { color: #c5402f; }
+
+/* §8 light CHAT affordance (inside the document column, NOT a second sidebar so
+ * it never competes with the right-sidebar copilot): two seeded messages + an
+ * "Add 'Tacos' via chat" button that injects a recipe and re-syncs the chain. */
+.object-chat-demo {
+  margin-top: 12px; padding-top: 10px; border-top: 1px dashed #afa9ec;
+  display: grid; gap: 5px;
+}
+.object-chat-demo-head { font-size: 11px; font-weight: 700; color: #534ab7; }
+.object-chat-demo-msg {
+  font-size: 12px; padding: 5px 9px; border-radius: 10px; max-width: 90%;
+}
+.object-chat-demo-assistant {
+  background: #eeedfe; color: #3c3489; justify-self: start;
+}
+.object-chat-demo-user {
+  background: #534ab7; color: #fff; justify-self: end;
+}
+.object-chat-demo-btn {
+  margin-top: 2px; justify-self: start; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: #534ab7;
+  background: #fff; border: 1px solid #afa9ec; border-radius: 7px; padding: 4px 12px;
+}
+.object-chat-demo-btn:hover { background: #afa9ec; color: #fff; }
 
 /* Tab bar: the segmented-control pills as a tablist. */
 .run-editor-tabs { margin: 10px 0 4px; display: flex; gap: 4px; }

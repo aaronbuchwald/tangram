@@ -1166,6 +1166,40 @@ function stripObjectLink(id: string): void {
   editor.replaceRange(from, to, "");
 }
 
+// Smart objects SO5 — the §8 "Add 'Tacos' via chat" demo (objectTable.ts's chat
+// affordance). Demonstrates that chat is just a GRAPH MUTATION → the reactive
+// chain re-syncs: create a `tacos` recipe object (idempotent, a fixed id),
+// append its chip to the active note so a §8 recipe card appears, then toggle it
+// into the plan so the grocery list + cart preview recompute LIVE (and the
+// "· N items" count bumps). No LLM call — the "chat" here is the demo button.
+function addTacosViaChat(groceryListId: string): void {
+  const TACOS_ID = "recipe-tacos-demo";
+  const data = JSON.stringify({
+    name: "Tacos",
+    servings: 2,
+    ingredients: [
+      { canonicalName: "tortilla", quantity: 6, unit: "ct", category: "Pantry" },
+      { canonicalName: "onion", quantity: 1, unit: "ct", category: "Produce" },
+      { canonicalName: "tomato", quantity: 2, unit: "ct", category: "Produce" },
+      { canonicalName: "black beans", quantity: 1, unit: "ct", category: "Pantry" },
+    ],
+  });
+  // Append the recipe chip to the active note (on its own line so it renders as a
+  // §8 recipe card) — unless it is already present.
+  const editor = activeEditor?.editor;
+  if (editor && !parseObjectLinks(editor.doc).some((l) => l.id === TACOS_ID)) {
+    const doc = editor.doc;
+    const sep = doc.endsWith("\n") ? "" : "\n";
+    const link = buildObjectLink("Tacos", TACOS_ID);
+    editor.replaceRange(doc.length, doc.length, `${sep}\n${link}\n`);
+  }
+  // Create the recipe object, then toggle it into the plan (the chain re-syncs).
+  void vault
+    .createObject(TACOS_ID, "recipe", data, [], "card")
+    .then(() => vault.toggleRecipeInPlan(groceryListId, TACOS_ID, true))
+    .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+}
+
 // The Done chip's `↓` (chip→callout backlink, R3): jump to the Run's output
 // callout via its `^runout-<id>` block id and flash it. Falls back to scrolling
 // to the chip's link when no callout exists yet (a Run that hasn't produced
@@ -1362,6 +1396,20 @@ function renderNoteTab(fileId: string) {
     // store so the chip renders its per-type glyph/style and restyles as the
     // object changes.
     (id) => objectIndex.byId(id),
+    // Smart objects SO5 — the §8 meal-plan card hooks (objectTable.ts): the
+    // recipe card's include-in-plan checkbox, the cart-preview's "Fill Whole
+    // Foods cart" Action stream (a STUB — never purchases), and the light
+    // "Add 'Tacos' via chat" demo (chat = graph mutation → the chain re-syncs).
+    {
+      allObjects: () => objectIndex.all,
+      onToggleRecipe: (groceryListId, recipeId, include) => {
+        void vault
+          .toggleRecipeInPlan(groceryListId, recipeId, include)
+          .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+      },
+      onFillCart: (cartId) => vault.fillCart(cartId),
+      onAddViaChat: (groceryListId) => addTacosViaChat(groceryListId),
+    },
   );
   state.editor = editor;
 

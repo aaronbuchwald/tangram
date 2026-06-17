@@ -111,6 +111,19 @@ export interface ObjectType {
   render: string;
 }
 
+/** The result of the Smart Objects SO5 cart-fill action STUB. Mirrors
+ *  `CartFillResult` in `apps/tangram/src/lib.rs`. The §8 "Fill Whole Foods cart"
+ *  button streams `phases` (each a green check), reports `item_count` items, and
+ *  ends on the lock-icon `review_message`. `purchased` is ALWAYS false — the stub
+ *  NEVER purchases (no live browser, no credential, no egress; the live pipeline
+ *  is deferred to Build-3). */
+export interface CartFillResult {
+  phases: string[];
+  item_count: number;
+  review_message: string;
+  purchased: boolean;
+}
+
 export interface VaultState {
   files: MdFile[];
   /** Present on documents written by this binary or newer; absent (treat as
@@ -257,6 +270,13 @@ export const vault = {
   // URL+JSON-LD hash (re-import is free). Returns the created/cached object id.
   ingestRecipe: (url: string, object_id: string) =>
     postAction("ingest_recipe", { url, object_id }) as Promise<string>,
+  // SO5: the cart-fill action STUB (review-only — NEVER purchases). Returns the
+  // §3 pipeline phases + the review-only terminus message + the live item count
+  // so the §8 "Fill Whole Foods cart" button can stream the phases and end on
+  // the lock-icon "nothing purchased" line. No live browser / credential /
+  // egress — the live pipeline is Build-3.
+  fillCart: (cart_preview_id: string) =>
+    postAction("fill_cart", { cart_preview_id }) as Promise<CartFillResult>,
   objectTypes: () => postAction("object_types", {}) as Promise<ObjectType[]>,
   // SO3: toggle a recipe in/out of a derived grocery-list's included set (drives
   // the live recompute of the grocery-list + downstream cart-preview).
