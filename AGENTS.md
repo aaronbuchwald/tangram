@@ -136,6 +136,11 @@ symlink to `.agents/skills`.
 - `.agents/skills/` — agent skills (SKILL.md format):
   - `systemd-service` — install/rebuild a Tangram binary as a systemd service
   - `local-replica` — run/check/stop a local replica syncing to a remote
+  - `frontend-design` — distinctive, intentional visual design for new/reshaped UI
+  - `codebase-health` — periodic codebase-health / lint consolidation passes
+  - `verify-design-in-ui` — review a design doc, isolate its observable
+    behaviors, and walk the running UI to confirm they landed (or where they
+    diverge); run after landing frontend-verifiable work
 - `.env` (gitignored; template in `.env.example`) — secrets/API keys live
   here. Never commit secrets.
 - README sections worth jumping to: "Getting started" (remote service +
@@ -184,3 +189,7 @@ cargo run -p tangram-shell                                # run all apps, one po
 - At the end of a session that introduced a new recurring workflow, file/CI
   convention, or service, check whether this index still tells a newcomer
   where that thing lives; if not, propose the one-line index update.
+- After landing a frontend-verifiable unit of work, run the
+  `verify-design-in-ui` skill against its design doc to confirm the intended
+  behaviors actually shipped in the running UI (or surface where they diverge)
+  before considering the unit done.
