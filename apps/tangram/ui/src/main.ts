@@ -1030,9 +1030,10 @@ function openAgentLinkTrigger(id: string): void {
     return;
   }
   openTriggerPopup(inv, {
-    onSave: (trigger, prompt) => {
+    onSave: (trigger, prompt, mountedFiles) => {
       void vault
-        .updateInvocation(id, trigger, prompt)
+        // embedded-runs R4: carry the Run-scoped mounted files through Save.
+        .updateInvocation(id, trigger, prompt, mountedFiles)
         .catch((e) => showError(String(e instanceof Error ? e.message : e)));
       activeEditor?.editor.focus();
     },
@@ -1055,6 +1056,13 @@ function openAgentLinkTrigger(id: string): void {
       executions
         .filter((e) => e.run_id === runId)
         .sort((a, b) => b.ts - a.ts),
+    // Mounted-files picker source (embedded-runs R4): the vault's real files,
+    // excluding the `.keep` folder sentinels, sorted by path for a stable list.
+    vaultFiles: () =>
+      files
+        .filter((f) => !f.path.endsWith("/.keep"))
+        .map((f) => f.path)
+        .sort((a, b) => a.localeCompare(b)),
   });
 }
 

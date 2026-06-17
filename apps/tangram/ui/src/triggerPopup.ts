@@ -44,8 +44,9 @@ import type { Execution, Invocation } from "./api";
 
 /** Side effects the Run editor needs from the shell. */
 export interface TriggerPopupCallbacks {
-  /** Persist the edited schedule + prompt (`update_invocation`). */
-  onSave: (trigger: string, prompt: string) => void;
+  /** Persist the edited schedule + prompt + Run-scoped mounted files
+   *  (`update_invocation`; embedded-runs R4 adds `files`). */
+  onSave: (trigger: string, prompt: string, files: string[]) => void;
   /** "Open in Agents" — deep-link into the Agents view's Runs sub-tab,
    *  switching to it and scrolling to + highlighting this Run's row (I3). */
   onOpenAgents: () => void;
@@ -63,6 +64,10 @@ export interface TriggerPopupCallbacks {
   /** The Run's executions, newest first (embedded-runs R3 executions log) — the
    *  History tab lists these. Read live off the vault state frame in main.ts. */
   executionsForRun: (runId: string) => Execution[];
+  /** The vault's pickable file paths (embedded-runs R4): the source for the
+   *  Run-scoped mounted-files multi-select. Excludes the `.keep` folder
+   *  sentinels. Read live off the vault state frame in main.ts. */
+  vaultFiles: () => string[];
 }
 
 /** The four tabs of the Run editor, in display order. */
@@ -152,6 +157,15 @@ export function openTriggerPopup(
   const picker = buildRecurrencePicker(() => refreshSave(), initial);
   picker.show(true);
 
+  // Run-scoped mounted files (embedded-runs R4): the live, editable set this
+  // editor mutates. Seeded from the Run's stored `files` (de-duped, order kept),
+  // mutated by the picker, read on Save. The Config panel is re-rendered when it
+  // changes so the resolved preview + chip list stay in sync.
+  const mountedFiles: string[] = dedupePaths(inv.files ?? []);
+  function refreshConfigPanel() {
+    if (currentTab === "config") panel.replaceChildren(renderPanel("config"));
+  }
+
   // ── Tab bar + panels ───────────────────────────────────────────────────────
   const tabBar = document.createElement("div");
   tabBar.className = "agent-seg run-editor-tabs";
@@ -174,7 +188,9 @@ export function openTriggerPopup(
     tabBar.appendChild(b);
   }
 
+  let currentTab: RunTab = "config";
   function selectTab(tab: RunTab) {
+    currentTab = tab;
     for (const { id } of TAB_ORDER) {
       const btn = tabBtns[id]!;
       const on = id === tab;
@@ -188,9 +204,15 @@ export function openTriggerPopup(
   function renderPanel(tab: RunTab): HTMLElement {
     switch (tab) {
       case "config":
-        return renderConfigPanel(inv, def, promptInput, picker.el);
+        return renderConfigPanel(inv, def, promptInput, picker.el, {
+          mountedFiles,
+          vaultFiles: callbacks.vaultFiles(),
+          onMountsChanged: () => {
+            refreshConfigPanel();
+          },
+        });
       case "runs":
-        return renderRunsPanel(inv, def, callbacks);
+        return renderRunsPanel(inv, def, callbacks, mountedFiles);
       case "history":
         return renderHistoryPanel(callbacks.executionsForRun(inv.id));
       case "observability":
@@ -233,7 +255,7 @@ export function openTriggerPopup(
     if (!trigger) return;
     const prompt = promptInput.value.trim();
     teardown();
-    callbacks.onSave(trigger, prompt);
+    callbacks.onSave(trigger, prompt, dedupePaths(mountedFiles));
   });
   agentsBtn.addEventListener("click", () => {
     teardown();
@@ -258,6 +280,19 @@ function el(tag: string, cls?: string, text?: string): HTMLElement {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/** Trim, drop blanks, and de-duplicate a path list while preserving first-seen
+ *  order — mirrors the component's `canonical_mounted_files` (lib.rs) so the
+ *  editor and the stored set agree (order matters for mounts: it is the
+ *  injection order + part of the config hash). NOT sorted. */
+function dedupePaths(paths: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of paths) {
+    const p = raw.trim();
+    if (p.length > 0 && !out.includes(p)) out.push(p);
+  }
+  return out;
 }
 
 /** An "overrides agent" badge — flags a Run-scoped value that REPLACES an
@@ -343,8 +378,18 @@ function renderConfigPanel(
   def: AgentDef | null,
   promptInput: HTMLElement,
   pickerEl: HTMLElement,
+  mounts: {
+    mountedFiles: string[];
+    vaultFiles: string[];
+    onMountsChanged: () => void;
+  },
 ): HTMLElement {
-  const cfg = resolveRunConfig(inv, def);
+  // The Config panel reads the LIVE editable mounted set (mutated in place by
+  // the picker below), so the resolved preview reflects the current selection.
+  const cfg = resolveRunConfig(
+    { ...inv, files: mounts.mountedFiles },
+    def,
+  );
   const panel = el("div", "run-config");
 
   // ── Inherited Agent config (greyed, read-only) ──
@@ -406,8 +451,91 @@ function renderConfigPanel(
   schedField.appendChild(pickerEl);
   runSec.appendChild(schedField);
 
+  // Mounted files (Run-scoped, additive — embedded-runs R4). A multi-select of
+  // existing vault files; the chosen set is injected into the agent at run time.
+  runSec.appendChild(renderMountedFilesField(mounts));
+
   panel.appendChild(runSec);
   return panel;
+}
+
+/** The Run-scoped **mounted files** field (embedded-runs R4): the current
+ *  mounted set as removable chips + an "add" picker over the vault's files. It
+ *  mutates the shared `mountedFiles` array in place and calls `onMountsChanged`
+ *  so the Config panel (resolved preview) re-renders. Purely Run-scoped +
+ *  additive (the Agent carries no mounts), so it lives in the "THIS RUN"
+ *  section and reads as the Run's own ("this run"). */
+function renderMountedFilesField(mounts: {
+  mountedFiles: string[];
+  vaultFiles: string[];
+  onMountsChanged: () => void;
+}): HTMLElement {
+  const wrap = el("div", "run-field run-field-scoped run-mounts-field");
+  const head = el("div", "run-field-head");
+  head.append(
+    el("span", "run-field-label micro", "Mounted files"),
+    originTag("added"),
+  );
+  wrap.appendChild(head);
+  wrap.appendChild(
+    el(
+      "div",
+      "run-field-hint micro",
+      "Vault files whose contents are injected into the agent at run time (a " +
+        '"Mounted files:" preamble), and reachable via the vault read_file tool ' +
+        "when the agent has that grant. Run-scoped — only this run sees them.",
+    ),
+  );
+
+  // The current mounted set as removable chips.
+  const chips = el("div", "run-chips run-mounts-chips");
+  if (mounts.mountedFiles.length === 0) {
+    chips.appendChild(el("span", "run-field-empty micro", "— no files mounted —"));
+  } else {
+    for (const path of mounts.mountedFiles) {
+      const chip = el("span", "run-chip run-chip-added run-mount-chip", path);
+      const x = el("button", "run-mount-remove", "×") as HTMLButtonElement;
+      x.type = "button";
+      x.title = `Unmount ${path}`;
+      x.setAttribute("aria-label", `Unmount ${path}`);
+      x.addEventListener("click", () => {
+        const i = mounts.mountedFiles.indexOf(path);
+        if (i >= 0) mounts.mountedFiles.splice(i, 1);
+        mounts.onMountsChanged();
+      });
+      chip.appendChild(x);
+      chips.appendChild(chip);
+    }
+  }
+  wrap.appendChild(chips);
+
+  // The "add a vault file" picker: every vault file not already mounted.
+  const remaining = mounts.vaultFiles.filter((f) => !mounts.mountedFiles.includes(f));
+  const picker = document.createElement("select");
+  picker.className = "modal-input agent-input run-mounts-picker";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent =
+    remaining.length > 0 ? "+ mount a vault file…" : "— all vault files mounted —";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  picker.appendChild(placeholder);
+  for (const path of remaining) {
+    const opt = document.createElement("option");
+    opt.value = path;
+    opt.textContent = path;
+    picker.appendChild(opt);
+  }
+  picker.disabled = remaining.length === 0;
+  picker.addEventListener("change", () => {
+    const path = picker.value;
+    if (path && !mounts.mountedFiles.includes(path)) {
+      mounts.mountedFiles.push(path);
+      mounts.onMountsChanged();
+    }
+  });
+  wrap.appendChild(picker);
+  return wrap;
 }
 
 // ── Runs tab — re-run now + resolved effective config preview ─────────────────
@@ -437,8 +565,11 @@ function renderRunsPanel(
   inv: Invocation,
   def: AgentDef | null,
   callbacks: TriggerPopupCallbacks,
+  mountedFiles: string[],
 ): HTMLElement {
-  const cfg = resolveRunConfig(inv, def);
+  // Resolve against the LIVE mounted set so the effective-config preview reflects
+  // the current selection (embedded-runs R4).
+  const cfg = resolveRunConfig({ ...inv, files: mountedFiles }, def);
   const eff = effectiveConfig(cfg);
   const panel = el("div", "run-runs");
 
@@ -501,6 +632,9 @@ function renderRunsPanel(
     );
     previewSec.appendChild(previewList("MCP servers", eff.mcpServers));
     previewSec.appendChild(previewList("Tags", eff.tags));
+    // Run-scoped mounted files (embedded-runs R4) — part of the resolved
+    // effective config (and the component's config hash).
+    previewSec.appendChild(previewList("Mounted files", eff.mountedFiles));
     previewSec.appendChild(previewScalar("Instructions", eff.instructions || "(none)"));
   }
   panel.appendChild(previewSec);

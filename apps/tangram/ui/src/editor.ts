@@ -416,10 +416,16 @@ export class MdEditor {
 
   /**
    * Scroll to the Obsidian-style block id `^<blockId>` in the doc and briefly
-   * highlight the line carrying it. The bidirectional backlink target: the
-   * chip's `↓` jumps to the output callout's `^runout-<id>`; a callout's `↑`
-   * jumps to the chip's host paragraph `^run-<id>`. No-op when the anchor is
-   * absent. Returns true when the anchor was found.
+   * highlight the target. The bidirectional backlink target: the chip's `↓`
+   * jumps to the output callout's `^runout-<id>`; a callout's `↑` jumps to the
+   * chip's host paragraph `^run-<id>`. No-op when the anchor is absent. Returns
+   * true when the anchor was found.
+   *
+   * The callout's `^runout-<id>` block-id line sits INSIDE the callout's replaced
+   * (card-widget) decoration range, so `domAtPos` resolves to the widget, not a
+   * `.cm-line` — flashing the line no-ops. So for a callout target we flash the
+   * rendered CARD element (`.run-callout-card[data-callout-block-id]`) directly,
+   * the same visible pulse the upward `↑`→chip direction gets (embedded-runs R4).
    */
   scrollToBlockId(blockId: string): boolean {
     const doc = this.doc;
@@ -427,25 +433,39 @@ export class MdEditor {
     const at = doc.indexOf(anchor);
     if (at === -1) return false;
     this.scrollToPos(at);
-    // Flash a highlight on the anchor's line via a transient DOM class. The line
-    // DOM resolves after the scroll lands, so defer one frame. Guarded so a view
-    // torn down between the scroll and the frame is a harmless no-op.
+    // Flash a highlight via a transient DOM class. The DOM resolves after the
+    // scroll lands, so defer one frame. Guarded so a view torn down between the
+    // scroll and the frame is a harmless no-op.
     const lineFrom = this.view.state.doc.lineAt(at).from;
     const flashTimers = this.flashTimers;
     const rafId = window.requestAnimationFrame(() => {
       flashTimers.delete(rafId);
-      let lineEl: Element | null = null;
+      let target: Element | null = null;
       try {
-        const dom = this.view.domAtPos(lineFrom)?.node as HTMLElement | undefined;
-        lineEl =
-          dom?.nodeType === Node.ELEMENT_NODE
-            ? (dom.closest?.(".cm-line") ?? null)
-            : (dom?.parentElement?.closest(".cm-line") ?? null);
+        // Prefer the rendered callout card for this block id: its `^runout-<id>`
+        // line is inside the replaced card range, so `domAtPos` can't reach a
+        // `.cm-line` — flash the card element itself instead. `CSS.escape` may be
+        // absent (jsdom); block ids are simple `runout-<uuid>` slugs, so a
+        // minimal escape fallback is safe.
+        const escaped =
+          typeof CSS !== "undefined" && typeof CSS.escape === "function"
+            ? CSS.escape(blockId)
+            : blockId.replace(/["\\]/g, "\\$&");
+        target = this.view.dom.querySelector(
+          `.run-callout-card[data-callout-block-id="${escaped}"]`,
+        );
+        if (!target) {
+          const dom = this.view.domAtPos(lineFrom)?.node as HTMLElement | undefined;
+          target =
+            dom?.nodeType === Node.ELEMENT_NODE
+              ? (dom.closest?.(".cm-line") ?? null)
+              : (dom?.parentElement?.closest(".cm-line") ?? null);
+        }
       } catch {
         return; // view destroyed (or pos unmapped) — nothing to flash
       }
-      if (lineEl) {
-        const el = lineEl;
+      if (target) {
+        const el = target;
         el.classList.add("cm-backlink-flash");
         const timer = window.setTimeout(() => {
           flashTimers.delete(timer);

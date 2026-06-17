@@ -63,10 +63,12 @@ Each checkpoint is independently shippable + reviewable.
 | **R1** | **Doc + rename + atomic chip + live status** (this checkpoint) | this design doc; user-facing **Triggers → Runs** rename across the shell UI (Agents view sub-tab, the click-to-edit popup, empty states/counts/filters/aria), Executions wording where executions are surfaced; the inline chip made a **CM6 atomic widget** (`EditorView.atomicRanges`) so the cursor steps over it (click still opens the editor, EOF-safe hit test kept); **live status** rendered on the chip from the Run's index record (Idle / Running / Done / Error) with a best-effort `↓` scroll-to-latest-output; a minimal **running→done/error** transition in the component run flow so the chip can show "running". | typing creates a chip; the caret cannot enter the chip (steps over it); clicking opens the editor; the chip reflects the Run's status and a running tick shows "running…"; the UI says "Runs"/"Run"/"Execution", never "Trigger"/"Invocation". |
 | **R2** | **The Run editor surface** | the modal **Run editor** opened by a chip click, with tabs: **Config** (trigger + prompt + the layered context), **Runs** (sibling Runs of the same Agent), **History = Executions** (this Run's executions), **Observability** (per-execution timing/tokens/cost stubs). **Visible additive inheritance**: inherited-from-Agent vs Run-override fields are visually distinguished. | the editor opens with all four tabs; editing Config round-trips through `update_invocation`; inherited vs overridden config is visibly distinct; the Runs/History tabs read the live index. |
 | **R3 ✅** | **Inline output callout card + bidirectional backlinks + one-time/scheduled unification + executions log** (this checkpoint) | the component renders each Execution's output as a **callout CARD below the host paragraph** (an Obsidian `> [!run]+` callout — a styled card in the live-preview editor + reading view, degrading to a portable blockquote); a **block id** stamped on the host paragraph (`^run-<id>`) and on the callout (`^runout-<id>`) gives the **bidirectional backlink** (chip `↓` ⇄ callout `↑`); **One-time and Scheduled are now ONE display path** — a One-time Run is an index entry with a `once` schedule (a chip + record that fires exactly once), the old run-now→indented-block path removed; an append-only **executions log** in the Automerge doc, each Execution snapshotting a **resolved-config hash** (sha256 of the effective Agent⊕Run config) + the output block id; the Run editor's History tab reads the log. | a one-time submit creates a chip + index entry with `once`; `once` fires once then never; a run renders a callout card below the host paragraph; the chip's `↓` jumps to it and the callout `↑` links back; the executions log accrues one record per run with a config hash; history reads the log. |
-| **R4** | **Run-scoped mounted files** | files mounted onto a Run and exposed to the Agent at run time (the Run's layered context can include vault files/attachments the Agent reads). | a Run with a mounted file makes that file available to the Agent's loop at run time; the mount is recorded on the Run and shown in the editor. |
+| **R4 ✅** | **Run-scoped mounted files** (this checkpoint) | a Run-scoped, **additive** `files: Option<Vec<String>>` (vault file paths) on the Run record — the Run owns its mounted file set, the Agent does not; carried through `create_invocation`/`update_invocation`, rendered in the Run editor's "THIS RUN" (Config tab) section as a removable-chip multi-select over the vault's files, folded into the resolved effective-config preview AND the per-Execution `config_hash` (different mounts ⇒ different hashes). At run time the mechanism is **context injection**: each mounted file is read from the vault (resolved OUTSIDE the store lock, per CLAUDE.md) and prepended to the agent's user message as a clearly-delimited "Mounted files:" preamble (a Run with no MCP grants still sees them); the files are ALSO reachable via the vault MCP `read_file` tool when the agent holds that grant. Plus a **chip-`↓` flash polish**: the downward jump now flashes the rendered callout **card element** (the `^runout-<id>` anchor lives inside the card's replaced range, so flashing the line no-op'd). | a Run with a mounted file makes that file's contents available to the Agent's loop at run time (context injection); the mount round-trips through create/update, appears in the resolved config, and changes the config hash; the chip's `↓` flashes the callout card. |
 
 R1–R2 are the inline + editor core (no change to the append/output model beyond
-the running state). R3 formalizes output + history. R4 adds mounted context.
+the running state). R3 formalizes output + history. R4 adds mounted context. The
+**embedded-runs redesign is COMPLETE — R1–R4 all shipped.** Versioning + the
+Handoff-2 smart-objects generalization are the remaining future work (§4, §7).
 Versioning is out of scope for all four (§4).
 
 ---
@@ -157,10 +159,52 @@ build on — it already records *which* effective config produced each Execution
   (`triggerPopup.ts`). The deep per-execution **Observability** trace stays the
   O-series stub (host-side OTLP/Langfuse).
 
+## 7. R4 implementation notes (as built)
+
+- **Run-scoped mounted files (the field).** A Run-scoped, additive
+  `files: Option<Vec<String>>` on the `Invocation` record (`apps/tangram/src/lib.rs`;
+  new field ⇒ `Option<T>` + `#[autosurgeon(missing = "Option::default")]` so older
+  documents hydrate). The values are vault file PATHS. The Run owns its mounted
+  set — the Agent definition carries none — so this is purely Run-scoped + additive
+  (the design's "trigger owns a mounted file set exposed via MCP/tools"). Carried
+  through `create_invocation` / `update_invocation` (and the `vault.*` API +
+  `triggerPopup.ts`'s `onSave`), canonicalized by `canonical_mounted_files`
+  (trim, drop blanks, de-dupe, **order preserved** — the order is the injection
+  order + part of the hash, so NOT sorted; mirrored by `dedupePaths` /
+  `dedupePreserveOrder` on the UI side).
+- **Run-time mechanism = context injection.** At a due run `tick_agents` resolves
+  each mounted file's contents from the SAME `ctx.state()` snapshot
+  (`Vault::resolve_mounted_files` — a pure vault lookup, no I/O) BEFORE the
+  lock-free LLM call (CLAUDE.md: the store lock is never held across an await),
+  then `compose_prompt` prepends a clearly-delimited **"Mounted files:" preamble**
+  (each file as `--- file: <path> --- … --- end: <path> ---`) to the Run's prompt.
+  This is the R4 requirement: a Run with NO MCP grants still sees its mounts. A
+  mounted path whose vault file is gone is carried with a `(missing)` marker
+  rather than dropped. The files are ALSO reachable via the vault MCP `read_file`
+  tool when the Run's agent holds that grant (the secondary path).
+- **Config hash folds in the mounts.** `agents::config_hash` now takes the Run's
+  `files` and folds them in as a count-prefixed, length-prefixed sequence
+  (`["a","b"]` can never collide with `["ab"]` or a reorder), so a different
+  mounted set ⇒ a different per-Execution `config_hash` (the reproducibility seam
+  §4 builds on). The Run editor's Config tab renders the mounts as a removable-chip
+  multi-select in the blue "THIS RUN" section, the Runs tab's resolved
+  effective-config preview lists them (`runConfig.ts` `mountedFiles`,
+  `triggerPopup.ts`).
+- **Chip-`↓` flash polish.** The chip's `↓` jumps to the callout's `^runout-<id>`
+  anchor, which sits INSIDE the callout's replaced (card-widget) decoration range —
+  so `MdEditor.scrollToBlockId` could not resolve a `.cm-line` to flash and the
+  pulse no-op'd. The fix (`editor.ts`): for a callout target, flash the rendered
+  card element directly
+  (`.run-callout-card[data-callout-block-id="runout-<id>"]`), falling back to the
+  `.cm-line` for the chip's host-paragraph anchor (the upward `↑` direction) — the
+  same visible pulse both directions now get. The scroll behavior is unchanged.
+
 ---
 
 *This doc is the source of truth for the embedded-runs (Agent / Run / Execution)
 redesign of the shell's inline agent surface. The terminology, the
-Tangram-adapted platform mapping, and the R1–R4 staging are approved;
-implementation proceeds as the independently-reviewable checkpoints R1–R4. The
-execution model and host runtime remain owned by [agents.md](agents.md).*
+Tangram-adapted platform mapping, and the R1–R4 staging are approved; **the
+redesign is complete — R1–R4 all shipped.** The remaining future work is
+**versioning** (§4) and the **Handoff-2 smart-objects generalization** (a Run's
+mounted set + output as a reusable, composable object). The execution model and
+host runtime remain owned by [agents.md](agents.md).*

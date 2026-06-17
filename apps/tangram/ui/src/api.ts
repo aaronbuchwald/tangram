@@ -40,6 +40,10 @@ export interface Invocation {
   host_file_id: string;
   last_run_ms: number | null;
   status: string;
+  /** Run-scoped mounted files (embedded-runs R4): vault file PATHS whose
+   *  contents are injected into the agent's context at run time. Absent on docs
+   *  written by older binaries (treat as []). A Run-scoped, additive field. */
+  files?: string[] | null;
 }
 
 /** One execution of a Run (embedded-runs R3) — the append-only executions log
@@ -133,6 +137,7 @@ export const vault = {
     trigger: string,
     prompt: string,
     host_file_id: string,
+    files: string[] = [],
   ) =>
     postAction("create_invocation", {
       id,
@@ -140,9 +145,13 @@ export const vault = {
       trigger,
       prompt,
       host_file_id,
+      files,
     }) as Promise<null>,
-  updateInvocation: (id: string, trigger: string, prompt: string) =>
-    postAction("update_invocation", { id, trigger, prompt }) as Promise<null>,
+  // Run-scoped mounted files (embedded-runs R4): `files` is the vault file path
+  // set the Run mounts; the component injects their contents at run time and
+  // folds them into the resolved-config hash.
+  updateInvocation: (id: string, trigger: string, prompt: string, files: string[] = []) =>
+    postAction("update_invocation", { id, trigger, prompt, files }) as Promise<null>,
   deleteInvocation: (id: string) =>
     postAction("delete_invocation", { id }) as Promise<null>,
   // Re-run an agent now (embedded-runs R2 — the Run editor's Runs tab "Re-run

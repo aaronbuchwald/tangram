@@ -111,4 +111,36 @@ describe("bidirectional backlink targeting (editor)", () => {
     expect(editor.scrollToBlockId("runout-nope")).toBe(false);
     editor.destroy();
   });
+
+  // embedded-runs R4: the chip's `↓` jump must FLASH the rendered callout card.
+  // The `^runout-<id>` anchor sits inside the card's replaced (widget) range, so
+  // the flash must target the `.run-callout-card` element, not a `.cm-line`.
+  it("flashes the rendered callout card on the chip → callout jump", async () => {
+    // CM6's scroll-measure calls Range#getClientRects, which jsdom doesn't
+    // implement on text ranges (it throws). Polyfill it to an empty list so the
+    // measure that `scrollIntoView` schedules is a harmless no-op here; this is
+    // a jsdom-only gap (real browsers implement it). Restore afterwards.
+    const proto = Range.prototype as unknown as {
+      getClientRects?: () => DOMRectList;
+    };
+    const had = "getClientRects" in proto;
+    const prev = proto.getClientRects;
+    proto.getClientRects = () => ({ length: 0, item: () => null }) as unknown as DOMRectList;
+
+    const editor = mount();
+    const sel = `.run-callout-card[data-callout-block-id="${calloutBlockId(RUN_ID)}"]`;
+    // The callout block renders as a card (the StateField decoration).
+    expect(editor.view.dom.querySelector(sel)).not.toBeNull();
+    expect(editor.scrollToBlockId(calloutBlockId(RUN_ID))).toBe(true);
+    // The flash lands a frame after the scroll; wait a frame. Re-query the card —
+    // CM may re-render the decoration DOM between scroll and flash.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const card = editor.view.dom.querySelector(sel);
+    expect(card).not.toBeNull();
+    expect(card!.classList.contains("cm-backlink-flash")).toBe(true);
+
+    editor.destroy();
+    if (had) proto.getClientRects = prev;
+    else delete proto.getClientRects;
+  });
 });

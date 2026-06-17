@@ -107,6 +107,20 @@ describe("resolveRunConfig — visible additive inheritance", () => {
     expect(cfg.tags.added).toEqual(["urgent"]);
   });
 
+  it("carries the Run-scoped mounted files (embedded-runs R4), order-preserved + de-duped", () => {
+    // Purely Run-scoped + additive; canonicalized (trim, blank-drop, de-dupe)
+    // but NOT sorted — the order the user picked is the injection order.
+    const cfg = resolveRunConfig(
+      inv({ files: [" notes/b.md ", "notes/a.md", "notes/b.md", "  "] }),
+      def(),
+    );
+    expect(cfg.mountedFiles).toEqual(["notes/b.md", "notes/a.md"]);
+  });
+
+  it("defaults mounted files to empty when the Run has none", () => {
+    expect(resolveRunConfig(inv(), def()).mountedFiles).toEqual([]);
+  });
+
   it("surfaces an UNRESOLVED state when the named Agent is missing", () => {
     const cfg = resolveRunConfig(inv({ agent: "ghost" }), null);
     expect(cfg.resolved).toBe(false);
@@ -124,9 +138,11 @@ describe("resolveRunConfig — visible additive inheritance", () => {
 
 describe("effectiveConfig — resolved-effective preview (inherited ⊕ overrides)", () => {
   it("projects the exact config a run would use", () => {
-    const cfg = resolveRunConfig(inv({ prompt: "go", trigger: "2h" }), def(), {
-      mcpServers: ["feedback"],
-    });
+    const cfg = resolveRunConfig(
+      inv({ prompt: "go", trigger: "2h", files: ["notes/a.md"] }),
+      def(),
+      { mcpServers: ["feedback"] },
+    );
     const eff = effectiveConfig(cfg);
     expect(eff).toEqual({
       resolved: true,
@@ -137,6 +153,7 @@ describe("effectiveConfig — resolved-effective preview (inherited ⊕ override
       schedule: "2h",
       mcpServers: ["feedback", "notes", "nutrition"],
       tags: ["daily", "team"],
+      mountedFiles: ["notes/a.md"],
     });
   });
 

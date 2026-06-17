@@ -87,6 +87,11 @@ export interface ResolvedRunConfig {
   mcpServers: ResolvedList;
   /** Tags: the Agent's labels + any Run-scoped additions. */
   tags: ResolvedList;
+  /** Run-scoped mounted files (embedded-runs R4): vault file paths the Run
+   *  mounts. Purely Run-scoped + additive (an Agent carries no mounts), so the
+   *  whole set is the Run's own — rendered in the "THIS RUN" section and folded
+   *  into the resolved effective config + the component's config hash. */
+  mountedFiles: string[];
 }
 
 /** De-duplicate (case-insensitively) + sort a string list, dropping blanks —
@@ -153,7 +158,24 @@ export function resolveRunConfig(
     },
     mcpServers: mergeList(def?.mcpServers ?? [], additions.mcpServers ?? []),
     tags: mergeList(def?.labels ?? [], additions.tags ?? []),
+    // Run-scoped mounted files: trim + drop blanks + de-dupe, ORDER PRESERVED
+    // (the component injects in the Run's stored order; the hash is order-aware),
+    // so this does NOT use the canonicalize-and-sort path.
+    mountedFiles: dedupePreserveOrder(inv.files ?? []),
   };
+}
+
+/** Trim, drop blanks, and de-duplicate a path list while PRESERVING first-seen
+ *  order — the same canonicalization the component applies to a Run's mounted
+ *  files (`canonical_mounted_files` in lib.rs). Order matters for mounts (it is
+ *  the injection order + part of the config hash), so this is NOT sorted. */
+function dedupePreserveOrder(paths: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of paths) {
+    const p = raw.trim();
+    if (p.length > 0 && !out.includes(p)) out.push(p);
+  }
+  return out;
 }
 
 /** A flat, display-ready preview of the EFFECTIVE config a run would use
@@ -174,6 +196,8 @@ export interface EffectiveConfigPreview {
   mcpServers: string[];
   /** The effective tags (inherited ∪ added). */
   tags: string[];
+  /** The Run-scoped mounted files (embedded-runs R4) the component injects. */
+  mountedFiles: string[];
 }
 
 /** Project a resolved config to the flat effective preview — the exact config a
@@ -188,5 +212,6 @@ export function effectiveConfig(cfg: ResolvedRunConfig): EffectiveConfigPreview 
     schedule: cfg.schedule.value,
     mcpServers: cfg.mcpServers.effective,
     tags: cfg.tags.effective,
+    mountedFiles: cfg.mountedFiles,
   };
 }

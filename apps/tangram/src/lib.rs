@@ -150,6 +150,18 @@ pub struct Invocation {
     /// A short status string for the UI (`"scheduled"` | `"ran"` | `"error"`).
     /// Free-form/forward-compatible; the scheduler writes `"ran"`/`"error"`.
     status: String,
+    /// Run-scoped **mounted files** (embedded-runs R4): vault file PATHS whose
+    /// contents are injected into the agent's context at run time (a "Mounted
+    /// files:" preamble on the user message), and which are also reachable via
+    /// the vault MCP `read_file` tool when the Run's agent holds that grant. This
+    /// is a Run-scoped, **additive** field per the design — the Run owns its
+    /// mounted file set; the Agent definition does not. Folded into the
+    /// resolved-config hash so different mounts produce different
+    /// [`Execution::config_hash`]es. A deterministic `Vec` (not a `HashMap`).
+    /// `None` on documents written by older binaries (the `missing` attribute
+    /// hydrates the absent key — treated as no mounts).
+    #[autosurgeon(missing = "Option::default")]
+    files: Option<Vec<String>>,
 }
 
 /// The user's decision on one `kind: agent` definition's MCP-access request
@@ -436,11 +448,15 @@ impl Vault {
         trigger: String,
         prompt: String,
         host_file_id: String,
+        files: Vec<String>,
     ) -> Result<(), String> {
         let id = id.trim().to_string();
         if id.is_empty() {
             return Err("invocation id must not be empty".to_string());
         }
+        // Run-scoped mounted files (embedded-runs R4): canonicalize the picked
+        // set so the order/dupes don't perturb the resolved-config hash.
+        let files = canonical_mounted_files(files);
         // Compute the next fire from the (fresh, never-run) trigger so the tick
         // can select by stored timestamp. `None` ⇒ a one-time/unknown trigger.
         let now = now_ms();
@@ -451,6 +467,7 @@ impl Vault {
             existing.trigger = trigger;
             existing.prompt = prompt;
             existing.host_file_id = host_file_id;
+            existing.files = Some(files);
             existing.last_run_ms = None;
             existing.next_fire_ms = next_fire_ms;
             existing.status = STATUS_SCHEDULED.to_string();
@@ -461,6 +478,7 @@ impl Vault {
                 trigger,
                 prompt,
                 host_file_id,
+                files: Some(files),
                 last_run_ms: None,
                 next_fire_ms,
                 status: STATUS_SCHEDULED.to_string(),
@@ -477,7 +495,9 @@ impl Vault {
         id: String,
         trigger: String,
         prompt: String,
+        files: Vec<String>,
     ) -> Result<(), String> {
+        let files = canonical_mounted_files(files);
         let inv = self
             .invocations
             .get_or_insert_with(Vec::new)
@@ -487,6 +507,7 @@ impl Vault {
         inv.next_fire_ms = agents::next_fire_ms(&trigger, None, now_ms());
         inv.trigger = trigger;
         inv.prompt = prompt;
+        inv.files = Some(files);
         inv.last_run_ms = None;
         inv.status = STATUS_SCHEDULED.to_string();
         Ok(())
@@ -579,12 +600,18 @@ impl Vault {
         for (inv, def) in due {
             // The per-agent approved MCP subset (T2), from the same snapshot.
             let servers = state.approved_servers_for(&def);
+            // Run-scoped mounted files (embedded-runs R4): resolve each mounted
+            // file's contents from the SAME snapshot (no I/O — the vault is the
+            // store) so they can be injected into the agent's context below. The
+            // store lock is never held across the await (CLAUDE.md): we read here,
+            // run lock-free, then commit.
+            let mounts = state.resolve_mounted_files(&inv);
             // Mark this Run "running" BEFORE the lock-free LLM call so the
             // replicated chip can show an in-flight execution (embedded-runs R1).
             // The append commit below clears it to `ran`/`error`.
             let _ = ctx.mutate("tick_agents", |m| m.mark_invocation_running(&inv.id));
             // Resolve the model response OUTSIDE the lock, then commit.
-            match run_definition(&def, &inv.prompt, &servers).await {
+            match run_definition(&def, &compose_prompt(&inv.prompt, &mounts), &servers).await {
                 Ok(output) => {
                     ctx.mutate("tick_agents", |m| {
                         m.append_invocation_output(&inv, &def, &output, now_ms(), STATUS_RAN);
@@ -782,6 +809,29 @@ impl Vault {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Resolve a Run's Run-scoped **mounted files** (embedded-runs R4) into
+    /// `(path, contents)` pairs, in the Run's stored (canonical) order. A mounted
+    /// path that no longer resolves to a vault file is carried with a clear
+    /// `(missing)` marker rather than dropped, so the agent's context records that
+    /// a declared mount was unavailable. Reading the vault is a pure snapshot
+    /// lookup (no I/O), so the caller resolves this from the `ctx.state()`
+    /// snapshot BEFORE the lock-free LLM call (CLAUDE.md: the store lock is never
+    /// held across an await).
+    fn resolve_mounted_files(&self, inv: &Invocation) -> Vec<(String, String)> {
+        inv.files
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|path| {
+                let contents = self.files.iter().find(|f| &f.path == path).map_or_else(
+                    || "(missing — no such vault file)".to_string(),
+                    |f| f.body.clone(),
+                );
+                (path.clone(), contents)
+            })
+            .collect()
     }
 
     /// The live (canonical) MCP-server request for the `kind: agent` definition
@@ -1017,7 +1067,12 @@ impl Vault {
         at_ms: i64,
         status: &str,
     ) {
-        let config_hash = agents::config_hash(def, &inv.prompt, &inv.trigger);
+        let config_hash = agents::config_hash(
+            def,
+            &inv.prompt,
+            &inv.trigger,
+            inv.files.as_deref().unwrap_or_default(),
+        );
         let execution_id = uuid::Uuid::new_v4().to_string();
         self.executions
             .get_or_insert_with(Vec::new)
@@ -1082,6 +1137,46 @@ fn normalize_folder(path: &str) -> Result<String, String> {
 
 fn now_ms() -> i64 {
     tangram::time::now_ms()
+}
+
+/// Canonicalize a Run's Run-scoped **mounted files** (embedded-runs R4): trim,
+/// drop blanks, and de-duplicate while preserving first-seen order. Stable
+/// canonicalization keeps the mounted set (and therefore the resolved-config
+/// hash, [`agents::config_hash`]) independent of the order/dupes the picker
+/// emitted. NOT sorted — the order the user picked is the order injected.
+fn canonical_mounted_files(files: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for path in files {
+        let path = path.trim().to_string();
+        if !path.is_empty() && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Compose the effective user message for a run (embedded-runs R4): the Run's
+/// mounted-file contents as a clearly-delimited **"Mounted files:" preamble**
+/// followed by the Run's prompt. This is the PRIMARY mechanism by which mounted
+/// files reach the agent — a Run with no MCP grants still sees them. (The files
+/// are ALSO reachable via the vault MCP `read_file` tool when the agent holds
+/// that grant; injection here guarantees availability regardless.) With no
+/// mounts this is exactly the bare prompt.
+fn compose_prompt(prompt: &str, mounts: &[(String, String)]) -> String {
+    if mounts.is_empty() {
+        return prompt.to_string();
+    }
+    let mut s = String::from("Mounted files (provided as context for this run):\n");
+    for (path, contents) in mounts {
+        s.push_str(&format!(
+            "\n--- file: {path} ---\n{contents}\n--- end: {path} ---\n"
+        ));
+    }
+    if !prompt.is_empty() {
+        s.push('\n');
+        s.push_str(prompt);
+    }
+    s
 }
 
 /// A short human label for a Run's trigger, shown in the callout header (e.g.
@@ -1537,6 +1632,7 @@ mod tests {
             trigger.into(),
             "Summarize today.".into(),
             host.clone(),
+            Vec::new(),
         )
         .unwrap();
         v
@@ -1569,8 +1665,15 @@ mod tests {
     fn create_invocation_rejects_empty_id() {
         let mut v = empty();
         assert!(
-            v.create_invocation("".into(), "a".into(), "2h".into(), "p".into(), "f".into())
-                .is_err()
+            v.create_invocation(
+                "".into(),
+                "a".into(),
+                "2h".into(),
+                "p".into(),
+                "f".into(),
+                Vec::new()
+            )
+            .is_err()
         );
     }
 
@@ -1581,6 +1684,7 @@ mod tests {
             "uuid-1".into(),
             "daily at 08:00 UTC".into(),
             "New prompt.".into(),
+            Vec::new(),
         )
         .unwrap();
         let inv = &v.list_invocations()[0];
@@ -1589,9 +1693,103 @@ mod tests {
         assert_eq!(inv.status, STATUS_SCHEDULED);
         // Updating an absent id errors.
         assert!(
-            v.update_invocation("nope".into(), "2h".into(), "p".into())
+            v.update_invocation("nope".into(), "2h".into(), "p".into(), Vec::new())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn create_and_update_carry_mounted_files_canonicalized() {
+        // embedded-runs R4: the Run-scoped mounted files round-trip through
+        // create/update, canonicalized (trim, drop blanks, de-dupe, order kept).
+        let mut v = vault_with_invocation("standup", "uuid-1", "2h");
+        // Re-create with a mounted set carrying whitespace + a dupe + a blank.
+        let host = v.list_invocations()[0].host_file_id.clone();
+        v.create_invocation(
+            "uuid-1".into(),
+            "standup".into(),
+            "2h".into(),
+            "p".into(),
+            host,
+            vec![
+                " notes/a.md ".into(),
+                "notes/b.md".into(),
+                "notes/a.md".into(),
+                "  ".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            v.list_invocations()[0].files.as_deref().unwrap(),
+            &["notes/a.md".to_string(), "notes/b.md".to_string()],
+            "canonical mounted set: trimmed, de-duped, blanks dropped, order kept"
+        );
+        // Update replaces the mounted set (Run-scoped, additive over the agent).
+        v.update_invocation(
+            "uuid-1".into(),
+            "2h".into(),
+            "p".into(),
+            vec!["notes/c.md".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            v.list_invocations()[0].files.as_deref().unwrap(),
+            &["notes/c.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn mounted_files_inject_their_contents_into_the_run_prompt() {
+        // embedded-runs R4: at run time the mounted files' contents are injected
+        // into the agent's user context (a "Mounted files:" preamble) — the
+        // mechanism the lock-free LLM call receives (`compose_prompt`). Assert
+        // the resolved contents + the prompt both appear, clearly delimited.
+        let mut v = vault_with_invocation("standup", "uuid-1", "once");
+        v.create_file("notes/ctx.md".into(), "# Context\n\nimportant facts".into())
+            .unwrap();
+        let host = v.list_invocations()[0].host_file_id.clone();
+        v.create_invocation(
+            "uuid-1".into(),
+            "standup".into(),
+            "once".into(),
+            "Use the context.".into(),
+            host,
+            vec!["notes/ctx.md".into()],
+        )
+        .unwrap();
+        let inv = v.list_invocations()[0].clone();
+
+        // The snapshot resolution the tick does before the lock-free call.
+        let mounts = v.resolve_mounted_files(&inv);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].0, "notes/ctx.md");
+        assert!(mounts[0].1.contains("important facts"));
+
+        // The composed user message carries the preamble + the file body + the
+        // Run's own prompt.
+        let composed = compose_prompt(&inv.prompt, &mounts);
+        assert!(composed.contains("Mounted files"));
+        assert!(composed.contains("--- file: notes/ctx.md ---"));
+        assert!(composed.contains("important facts"));
+        assert!(composed.contains("Use the context."));
+
+        // A Run with no mounts composes to exactly the bare prompt.
+        assert_eq!(compose_prompt("hello", &[]), "hello");
+
+        // A mount whose vault file is gone is carried with a clear marker (the
+        // declared mount is recorded as unavailable, not silently dropped).
+        v.delete_file(
+            v.files
+                .iter()
+                .find(|f| f.path == "notes/ctx.md")
+                .unwrap()
+                .id
+                .clone(),
+        )
+        .unwrap();
+        let missing = v.resolve_mounted_files(&v.list_invocations()[0].clone());
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].1.contains("missing"));
     }
 
     #[test]
@@ -1668,14 +1866,19 @@ mod tests {
         // Updating the trigger recomputes the stored next-fire from the new
         // schedule (and resets the run).
         let mut v = vault_with_invocation("standup", "uuid-1", "1m");
-        v.update_invocation("uuid-1".into(), "daily at 09:00 UTC".into(), "p".into())
-            .unwrap();
+        v.update_invocation(
+            "uuid-1".into(),
+            "daily at 09:00 UTC".into(),
+            "p".into(),
+            Vec::new(),
+        )
+        .unwrap();
         let nf = next_fire_ms_of(&v, "uuid-1").expect("daily ⇒ Some");
         // Must equal what the grammar computes for a never-run daily schedule.
         let expected = agents::next_fire_ms("daily at 09:00 UTC", None, now_ms());
         assert_eq!(Some(nf), expected);
         // Updating to a one-time trigger clears the next-fire.
-        v.update_invocation("uuid-1".into(), "one-time".into(), "p".into())
+        v.update_invocation("uuid-1".into(), "one-time".into(), "p".into(), Vec::new())
             .unwrap();
         assert_eq!(next_fire_ms_of(&v, "uuid-1"), None);
     }
@@ -1693,8 +1896,15 @@ mod tests {
         let hb = v
             .create_file("b.md".into(), "[⚡ b](agent://uuid-b) hi".into())
             .unwrap();
-        v.create_invocation("uuid-b".into(), "b".into(), "1h".into(), "p".into(), hb)
-            .unwrap();
+        v.create_invocation(
+            "uuid-b".into(),
+            "b".into(),
+            "1h".into(),
+            "p".into(),
+            hb,
+            Vec::new(),
+        )
+        .unwrap();
         // Record a run for `a` at T so its next-fire is T + 1h (future).
         let t = 2_000_000_000_000;
         let inv_a = v
@@ -1852,7 +2062,12 @@ mod tests {
         assert_eq!(e.config_hash.len(), 64);
         assert_eq!(
             e.config_hash,
-            agents::config_hash(&standup_def(), &inv.prompt, &inv.trigger)
+            agents::config_hash(
+                &standup_def(),
+                &inv.prompt,
+                &inv.trigger,
+                inv.files.as_deref().unwrap_or_default()
+            )
         );
         // A second run appends a second Execution (append-only log).
         v.append_invocation_output(&inv, &standup_def(), "ok2", 6_000, STATUS_RAN);

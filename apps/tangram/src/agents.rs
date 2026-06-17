@@ -644,15 +644,18 @@ pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
 //   agree without storing extra state.
 
 /// The sha256 (hex) of the **resolved effective config** that produced an
-/// execution (embedded-runs R3): the Agent definition (model, instructions,
-/// canonical MCP servers) layered with the Run's overrides (the effective model,
-/// the Run's prompt, the trigger). Deterministic — the same effective config
-/// always hashes identically — so a stored `config_hash` reproducibly identifies
-/// *which* config ran (the reproducibility seam a later versioning pass builds
-/// on, embedded-runs §4). Each field is tagged and length-prefixed so no field
-/// boundary is ambiguous.
+/// execution (embedded-runs R3+R4): the Agent definition (model, instructions,
+/// canonical MCP servers) layered with the Run's overrides — the Run's prompt,
+/// the trigger, and (R4) the Run-scoped **mounted files**. Deterministic — the
+/// same effective config always hashes identically — so a stored `config_hash`
+/// reproducibly identifies *which* config ran (the reproducibility seam a later
+/// versioning pass builds on, embedded-runs §4). Different mounted-file sets
+/// therefore yield different hashes. Each field is tagged and length-prefixed so
+/// no field boundary is ambiguous; the mounted-file list is folded in as a
+/// count-prefixed, length-prefixed sequence so `["a","b"]` can never collide with
+/// `["ab"]` or a reordering.
 #[must_use]
-pub fn config_hash(def: &AgentDef, prompt: &str, trigger: &str) -> String {
+pub fn config_hash(def: &AgentDef, prompt: &str, trigger: &str, files: &[String]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let mut field = |label: &str, value: &str| {
@@ -673,6 +676,13 @@ pub fn config_hash(def: &AgentDef, prompt: &str, trigger: &str) -> String {
     );
     field("prompt", prompt);
     field("trigger", trigger.trim());
+    // Run-scoped mounted files (R4): count-prefixed so the boundary is
+    // unambiguous, then each path length-prefixed via `field`. The order is the
+    // Run's stored (canonical) mount order — a remount/reorder changes the hash.
+    field("mounted_files_n", &files.len().to_string());
+    for (i, path) in files.iter().enumerate() {
+        field(&format!("mounted_file[{i}]"), path);
+    }
     let digest = hasher.finalize();
     use std::fmt::Write as _;
     let mut out = String::with_capacity(digest.len() * 2);
@@ -1177,16 +1187,39 @@ mod tests {
             instructions: "Write a status.".into(),
             mcp_servers: vec![],
         };
-        let a = config_hash(&def, "prompt", "once");
-        let b = config_hash(&def, "prompt", "once");
+        let a = config_hash(&def, "prompt", "once", &[]);
+        let b = config_hash(&def, "prompt", "once", &[]);
         assert_eq!(a, b, "same config ⇒ same hash");
         assert_eq!(a.len(), 64, "sha256 hex");
         // Any change to the effective config changes the hash.
-        assert_ne!(a, config_hash(&def, "other", "once"));
-        assert_ne!(a, config_hash(&def, "prompt", "daily at 09:00 UTC"));
+        assert_ne!(a, config_hash(&def, "other", "once", &[]));
+        assert_ne!(a, config_hash(&def, "prompt", "daily at 09:00 UTC", &[]));
         let mut def2 = def.clone();
         def2.model = "deepseek-reasoner".into();
-        assert_ne!(a, config_hash(&def2, "prompt", "once"));
+        assert_ne!(a, config_hash(&def2, "prompt", "once", &[]));
+        // embedded-runs R4: the Run-scoped mounted files fold into the hash —
+        // a different mount set (or a reorder) yields a different hash.
+        let one = config_hash(&def, "prompt", "once", &["notes/a.md".into()]);
+        assert_ne!(a, one, "mounting a file changes the hash");
+        let two = config_hash(
+            &def,
+            "prompt",
+            "once",
+            &["notes/a.md".into(), "notes/b.md".into()],
+        );
+        assert_ne!(one, two, "a different mount set changes the hash");
+        let reordered = config_hash(
+            &def,
+            "prompt",
+            "once",
+            &["notes/b.md".into(), "notes/a.md".into()],
+        );
+        assert_ne!(two, reordered, "mount order is part of the hash");
+        // Stable for the same mount set.
+        assert_eq!(
+            one,
+            config_hash(&def, "prompt", "once", &["notes/a.md".into()])
+        );
     }
 
     #[test]

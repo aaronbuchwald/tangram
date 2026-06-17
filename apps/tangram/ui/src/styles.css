@@ -1195,6 +1195,25 @@ body {
   cursor: not-allowed;
 }
 
+/* Run-scoped mounted files (embedded-runs R4): removable chips + a picker. */
+.run-mounts-field .run-chips { margin-bottom: 6px; }
+.run-mount-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.run-mount-remove {
+  border: none;
+  background: transparent;
+  color: var(--blue);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+.run-mount-remove:hover { color: var(--text); }
+.run-mounts-picker { width: 100%; }
+
 /* The Run-scoped prompt input keeps the agent-input look. */
 .run-prompt-input { width: 100%; }
 

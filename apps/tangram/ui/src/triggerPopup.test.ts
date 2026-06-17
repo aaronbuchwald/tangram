@@ -58,6 +58,7 @@ const cbs = (over: Partial<TriggerPopupCallbacks> = {}): TriggerPopupCallbacks =
   agentByName: () => def(),
   onRerun: () => Promise.resolve("ok"),
   executionsForRun: () => [],
+  vaultFiles: () => ["notes/a.md", "notes/b.md", "projects/c.md"],
   ...over,
 });
 
@@ -111,8 +112,9 @@ describe("Config tab — visible additive inheritance", () => {
 
   it("tags a non-empty one-time prompt as a run-scoped addition", () => {
     openTriggerPopup(inv({ prompt: "extra" }), cbs());
-    // Two 'added' origin tags now: the prompt and the schedule.
-    expect($$(".run-section-scoped .run-origin-added").length).toBe(2);
+    // Three 'added' origin tags now: the prompt, the schedule, and the
+    // (always run-scoped) mounted-files field (embedded-runs R4).
+    expect($$(".run-section-scoped .run-origin-added").length).toBe(3);
   });
 
   it("shows a clear unresolved state when the Agent is missing", () => {
@@ -174,6 +176,66 @@ describe("History tab — Executions (the append-only executions log, R3)", () =
     expect(rows[0].querySelector(".run-exec-tag")!.textContent).toBe("most recent");
     expect(rows[0].querySelector(".run-exec-hash")!.textContent).toContain("cfg bbbbbbbb");
     expect(rows[0].textContent).toContain("ran");
+  });
+});
+
+describe("Config tab — Run-scoped mounted files (embedded-runs R4)", () => {
+  const sel = ".run-mounts-picker";
+
+  it("renders the mounted-files field in the THIS RUN (scoped) section", () => {
+    openTriggerPopup(inv(), cbs());
+    const scoped = $(".run-section-scoped")!;
+    const field = scoped.querySelector(".run-mounts-field");
+    expect(field).not.toBeNull();
+    // It reads as the Run's own ("this run") origin, not inherited.
+    expect(field!.querySelector(".run-origin-added")).not.toBeNull();
+    // Empty state when no files mounted.
+    expect(field!.textContent).toContain("no files mounted");
+    // The picker offers the vault files.
+    const opts = Array.from(
+      (field!.querySelector(sel) as HTMLSelectElement).options,
+    ).map((o) => o.value);
+    expect(opts).toContain("notes/a.md");
+    expect(opts).toContain("projects/c.md");
+  });
+
+  it("shows the Run's stored mounts as chips and folds them into the resolved preview", () => {
+    openTriggerPopup(inv({ files: ["notes/b.md", "notes/a.md"] }), cbs());
+    const chips = $$(".run-mount-chip").map((c) => c.textContent?.replace("×", "").trim());
+    expect(chips).toEqual(["notes/b.md", "notes/a.md"]); // order preserved
+    // The Runs tab's resolved effective config lists the mounted files.
+    tabBtn("Runs").click();
+    const preview = $(".run-preview")!;
+    expect(preview.textContent).toContain("Mounted files");
+    expect(preview.textContent).toContain("notes/b.md");
+    expect(preview.textContent).toContain("notes/a.md");
+  });
+
+  it("mounting a vault file via the picker adds it to the resolved preview", () => {
+    openTriggerPopup(inv(), cbs());
+    const picker = $(sel) as HTMLSelectElement;
+    picker.value = "notes/a.md";
+    picker.dispatchEvent(new Event("change"));
+    // The chip now shows the mount.
+    expect($$(".run-mount-chip").map((c) => c.textContent?.replace("×", "").trim())).toContain(
+      "notes/a.md",
+    );
+    // And the resolved preview reflects it.
+    tabBtn("Runs").click();
+    expect($(".run-preview")!.textContent).toContain("notes/a.md");
+  });
+
+  it("Save carries the edited mounted-file set as the third arg", () => {
+    const onSave = vi.fn();
+    openTriggerPopup(inv({ files: ["notes/a.md"] }), cbs({ onSave }));
+    // Mount another file, then Save.
+    const picker = $(sel) as HTMLSelectElement;
+    picker.value = "notes/b.md";
+    picker.dispatchEvent(new Event("change"));
+    ($$(".modal-btn.primary").find((b) => b.textContent === "Save") as HTMLButtonElement).click();
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const [, , files] = onSave.mock.calls[0];
+    expect(files).toEqual(["notes/a.md", "notes/b.md"]);
   });
 });
 
