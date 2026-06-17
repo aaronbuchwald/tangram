@@ -637,7 +637,7 @@ impl Vault {
     /// parity/tests.
     pub fn list_executions(&self) -> Vec<Execution> {
         let mut out = self.executions.clone().unwrap_or_default();
-        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out.sort_by_key(|e| std::cmp::Reverse(e.ts));
         out
     }
 
