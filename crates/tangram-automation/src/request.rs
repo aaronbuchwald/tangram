@@ -126,11 +126,16 @@ pub fn authorize(
         ));
     }
 
-    // domains ∩ ceiling
+    // domains ∩ ceiling. A `"*"` in the ceiling means ANY host — mirroring the
+    // browser egress gate's wildcard (`BrowserEgressGate`), so a `["*"]` ceiling
+    // authorizes the request's domains as-is rather than trimming every real host
+    // away (they never literally equal "*"). When the operator narrows the
+    // ceiling to explicit hosts, the exact-match intersection applies.
+    let any_host = policy.domains_ceiling.iter().any(|d| d == "*");
     let domains: BTreeSet<String> = request
         .domains
         .iter()
-        .filter(|d| policy.domains_ceiling.contains(*d))
+        .filter(|d| any_host || policy.domains_ceiling.contains(*d))
         .cloned()
         .collect();
     if domains.is_empty() {
@@ -222,6 +227,24 @@ mod tests {
         let auth = authorize(&r, &policy()).unwrap();
         assert_eq!(auth.domains, vec!["www.amazon.com"]);
         assert!(!auth.domains.iter().any(|d| d == "attacker.com"));
+    }
+
+    #[test]
+    fn wildcard_ceiling_authorizes_any_domain() {
+        // A `"*"` ceiling (the operator's any-host setting) authorizes the
+        // request's domains as-is, mirroring the browser egress gate — instead
+        // of trimming every real host away (none literally equals "*"). GC1
+        // regression: the grocery-cart request was denied "empty domain set"
+        // under the `["*"]` ceiling that recipe-import enabled.
+        let policy = OperatorPolicy::new()
+            .allow_app("grocery")
+            .approve_template("amazon-grocery-cart")
+            .ceiling(["*"])
+            .grant_credentials("grocery", ["op://Private/Amazon/password"]);
+        let mut r = request();
+        r.domains = vec!["www.wholefoods.com".into(), "www.amazon.com".into()];
+        let auth = authorize(&r, &policy).unwrap();
+        assert_eq!(auth.domains, vec!["www.amazon.com", "www.wholefoods.com"]);
     }
 
     #[test]
