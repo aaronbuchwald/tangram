@@ -40,7 +40,7 @@ import {
   type ResolvedRunConfig,
 } from "./runConfig";
 import type { AgentDef } from "./agents";
-import type { Invocation } from "./api";
+import type { Execution, Invocation } from "./api";
 
 /** Side effects the Run editor needs from the shell. */
 export interface TriggerPopupCallbacks {
@@ -60,6 +60,9 @@ export interface TriggerPopupCallbacks {
   /** Re-run the Agent now (the Runs tab's "Re-run now" → `run_agent`). Resolves
    *  with the produced output text, or rejects with an error message. */
   onRerun: (agent: string) => Promise<string>;
+  /** The Run's executions, newest first (embedded-runs R3 executions log) — the
+   *  History tab lists these. Read live off the vault state frame in main.ts. */
+  executionsForRun: (runId: string) => Execution[];
 }
 
 /** The four tabs of the Run editor, in display order. */
@@ -189,7 +192,7 @@ export function openTriggerPopup(
       case "runs":
         return renderRunsPanel(inv, def, callbacks);
       case "history":
-        return renderHistoryPanel(inv);
+        return renderHistoryPanel(callbacks.executionsForRun(inv.id));
       case "observability":
         return renderObservabilityPanel(inv);
     }
@@ -504,42 +507,51 @@ function renderRunsPanel(
   return panel;
 }
 
-// ── History tab — Executions (current data only; full log is R3) ──────────────
+// ── History tab — Executions (the append-only executions log, R3) ─────────────
 
-function renderHistoryPanel(inv: Invocation): HTMLElement {
+/** Render the History tab: the Run's Executions from the append-only log
+ *  (embedded-runs R3), newest first. Each row shows the outcome, when it ran,
+ *  the model, and the resolved-config hash (the reproducibility snapshot). */
+function renderHistoryPanel(executions: Execution[]): HTMLElement {
   const panel = el("div", "run-history");
   panel.appendChild(el("h3", "run-section-title", "Executions"));
 
   const now = Date.now();
   const list = el("div", "run-executions");
-  if (inv.last_run_ms === null) {
+  if (executions.length === 0) {
     list.appendChild(
       el("div", "run-field-empty micro", "No executions yet — this Run hasn't fired."),
     );
   } else {
-    // R2: a single most-recent Execution row synthesized from the data that
-    // EXISTS now (last_run_ms + status). The append-only log is R3.
-    const row = el("div", "run-execution-row");
-    const dot = el(
-      "span",
-      `run-exec-dot run-exec-${inv.status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
-    );
-    const when = el("span", "run-exec-when", formatRelativeTime(inv.last_run_ms, now));
-    when.title = new Date(inv.last_run_ms).toLocaleString();
-    const st = el("span", "run-exec-status", inv.status);
-    const tag = el("span", "run-exec-tag micro", "most recent");
-    row.append(dot, when, st, tag);
-    list.appendChild(row);
+    executions.forEach((e, i) => {
+      const row = el("div", "run-execution-row");
+      const dot = el(
+        "span",
+        `run-exec-dot run-exec-${e.status.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      );
+      const when = el("span", "run-exec-when", formatRelativeTime(e.ts, now));
+      when.title = new Date(e.ts).toLocaleString();
+      const st = el("span", "run-exec-status", e.status);
+      const model = el("span", "run-exec-model micro", e.model);
+      // The resolved-config hash (short) — the per-execution reproducibility
+      // snapshot. Hover shows the full sha256.
+      const hash = el("span", "run-exec-hash micro", `cfg ${e.config_hash.slice(0, 8)}`);
+      hash.title = `Resolved-config hash (sha256): ${e.config_hash}`;
+      row.append(dot, when, st, model, hash);
+      if (i === 0) row.append(el("span", "run-exec-tag micro", "most recent"));
+      list.appendChild(row);
+    });
   }
   panel.appendChild(list);
 
-  // The deferred-tail affordance: the full append-only executions log is R3.
+  // Note the deep per-execution trace stays the O-series stub.
   panel.appendChild(
     el(
       "div",
       "run-deferred-tail micro",
-      "Full execution history lands with R3 (the append-only executions log). " +
-        "Today only the most-recent Execution is recorded on the Run.",
+      "Each row is an Execution from the append-only log, with the resolved-config " +
+        "hash that produced it. Deep per-execution traces live in the Observability tab " +
+        "(host-side OTLP / Langfuse).",
     ),
   );
   return panel;

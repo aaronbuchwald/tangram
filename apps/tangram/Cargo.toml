@@ -12,6 +12,7 @@ chrono-tz.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 
 # Native-only: the binary's runtime. The library also compiles to

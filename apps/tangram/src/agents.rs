@@ -272,6 +272,12 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 /// builder) — both sides parse the SAME trigger grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Schedule {
+    /// Fire EXACTLY ONCE, then never again (the `once` trigger — embedded-runs
+    /// R3's one-time/scheduled unification). A one-time Run is now an index
+    /// entry with a `once` schedule (a chip + record like any Run), not a
+    /// legacy run-now-and-discard flow. Never run ⇒ due now; once run ⇒ no
+    /// next fire (the scheduler is the authority — it must never re-fire it).
+    Once,
     /// Fire every `n` milliseconds since the last run (`2m`/`2h`/`2d`,
     /// `every 2m`, the `@hourly`/`@daily` back-compat aliases).
     Interval(i64),
@@ -304,6 +310,13 @@ pub enum Schedule {
 #[must_use]
 pub fn parse_schedule(schedule: &str) -> Option<Schedule> {
     let s = schedule.trim();
+
+    // The one-shot kind (embedded-runs R3): a `once` Run lives in the index and
+    // fires exactly once. Distinct from the legacy `one-time` sentinel, which
+    // means "no index entry / no schedule" and is filtered out in `schedule_str`.
+    if s == "once" {
+        return Some(Schedule::Once);
+    }
 
     // Back-compat aliases.
     match s {
@@ -511,6 +524,12 @@ pub fn schedule_next_fire_ms(
     now_ms: i64,
 ) -> Option<i64> {
     match schedule {
+        // One-shot: due now until it runs, then never again. `None` after a run
+        // is what makes the scheduler stop selecting it (fires exactly once).
+        Schedule::Once => match last_run_ms {
+            None => Some(now_ms),
+            Some(_) => None,
+        },
         Schedule::Interval(interval) => match last_run_ms {
             // Never run ⇒ due now: a next-fire at `now` is `<= now` (immediately
             // due), matching `trigger_is_due(.., None, now) == true`.
@@ -611,6 +630,145 @@ pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
     out
 }
 
+// ── run-output callout cards + bidirectional block ids (embedded-runs R3) ─────
+//
+// A Run's output renders as an Obsidian-style `> [!run]+ …` CALLOUT below the
+// chip's host paragraph (not the legacy indented blockquote). The format is
+// portable markdown — a renderer that doesn't know the callout still shows a
+// blockquote — and carries the bidirectional backlink block ids:
+//
+//   The host paragraph carries a stable block id `^run-<id>` (Obsidian block
+//   ref), and the callout carries `^runout-<id>`. The callout header links back
+//   to the chip (`[↑](#^run-<id>)`); the chip's `↓` jumps to `^runout-<id>`.
+//   Both ids derive deterministically from the Run id, so the UI and component
+//   agree without storing extra state.
+
+/// The sha256 (hex) of the **resolved effective config** that produced an
+/// execution (embedded-runs R3): the Agent definition (model, instructions,
+/// canonical MCP servers) layered with the Run's overrides (the effective model,
+/// the Run's prompt, the trigger). Deterministic — the same effective config
+/// always hashes identically — so a stored `config_hash` reproducibly identifies
+/// *which* config ran (the reproducibility seam a later versioning pass builds
+/// on, embedded-runs §4). Each field is tagged and length-prefixed so no field
+/// boundary is ambiguous.
+#[must_use]
+pub fn config_hash(def: &AgentDef, prompt: &str, trigger: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut field = |label: &str, value: &str| {
+        hasher.update(label.as_bytes());
+        hasher.update(b":");
+        hasher.update(value.len().to_le_bytes());
+        hasher.update(b":");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\n");
+    };
+    field("agent", &def.name);
+    field("kind", &def.kind);
+    field("model", &def.model);
+    field("instructions", &def.instructions);
+    field(
+        "mcp_servers",
+        &canonical_servers(def.mcp_servers.clone()).join(","),
+    );
+    field("prompt", prompt);
+    field("trigger", trigger.trim());
+    let digest = hasher.finalize();
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// The host-paragraph block id for a Run (the chip's anchor, the callout's
+/// backlink target). Derived from the Run id so both sides agree.
+#[must_use]
+pub fn host_block_id(run_id: &str) -> String {
+    format!("run-{run_id}")
+}
+
+/// The output-callout block id for a Run (the `↓` jump target, refreshed in
+/// place on each run so the chip always lands on the latest output).
+#[must_use]
+pub fn callout_block_id(run_id: &str) -> String {
+    format!("runout-{run_id}")
+}
+
+/// Build the run-output callout card markdown for one execution (embedded-runs
+/// R3). An Obsidian-style `> [!run]+` foldable callout whose header is
+/// `<status glyph> /<agent> · <model> · <when> [↑](#^<host_block>)` and whose
+/// body is the output (each line prefixed with the blockquote `>`). It carries
+/// its own block id `^<callout_block>` on the last line so the chip's `↓` can
+/// target it. `when` is a short human label (e.g. `manual`, a trigger summary,
+/// or a relative time) the caller supplies. Degrades to a styled blockquote in
+/// any plain-markdown renderer.
+#[must_use]
+pub fn build_run_callout(
+    run_id: &str,
+    agent: &str,
+    model: &str,
+    when: &str,
+    output: &str,
+    is_error: bool,
+) -> String {
+    let host = host_block_id(run_id);
+    let out_block = callout_block_id(run_id);
+    let glyph = if is_error { "✗" } else { "✓" };
+    let mut s = String::new();
+    s.push_str(&format!(
+        "> [!run]+ {glyph} /{agent} · {model} · {when} [↑](#^{host})\n"
+    ));
+    // The output body — every line prefixed with the callout's `>`. A blank
+    // output still yields an empty quoted line so the card has a body.
+    if output.is_empty() {
+        s.push_str(">\n");
+    } else {
+        for line in output.split('\n') {
+            s.push_str("> ");
+            s.push_str(line);
+            s.push('\n');
+        }
+    }
+    // The callout's own block id on its own quoted line (so a renderer keeps it
+    // inside the callout and the `↓` jump targets it).
+    s.push_str(&format!("> ^{out_block}\n"));
+    s
+}
+
+/// The byte offset of the end of the line containing `pos` (the offset of the
+/// `\n`, or `body.len()` at EOF). The host PARAGRAPH for a chip is taken as the
+/// line the chip's link sits on — the callout is inserted just after it and the
+/// `^run-<id>` block id is stamped at its end.
+#[must_use]
+pub fn line_end(body: &str, pos: usize) -> usize {
+    body[pos..].find('\n').map_or(body.len(), |rel| pos + rel)
+}
+
+/// Locate an existing run-output callout for `run_id` in `body` and return the
+/// byte range `[start, end)` that the whole callout block occupies (so the
+/// caller can REPLACE it on a re-run rather than appending a second card). The
+/// callout is identified by its trailing block-id line `> ^runout-<id>`; the
+/// block starts at the preceding `> [!run]` header line. Returns `None` when no
+/// such callout exists yet (the first run appends a fresh one).
+#[must_use]
+pub fn find_run_callout(body: &str, run_id: &str) -> Option<(usize, usize)> {
+    let marker = format!("> ^{}", callout_block_id(run_id));
+    // The end of the block is the end of the line carrying the block-id marker.
+    let marker_at = body.find(&marker)?;
+    let line_end = body[marker_at..]
+        .find('\n')
+        .map_or(body.len(), |rel| marker_at + rel + 1);
+    // The start of the block is the `> [!run]` header line that precedes it. We
+    // scan backwards over contiguous quoted (`>`) lines to the header.
+    let header_marker = "> [!run]";
+    let header_at = body[..marker_at].rfind(header_marker)?;
+    // Back up to the start of the header's line.
+    let start = body[..header_at].rfind('\n').map_or(0, |nl| nl + 1);
+    Some((start, line_end))
+}
+
 /// Whether a recurring schedule described by the raw `trigger` text is DUE at
 /// `now_ms` given its last run. A `one-time`/unknown trigger returns `false`.
 ///
@@ -653,6 +811,8 @@ pub fn trigger_is_scheduled(trigger: &str) -> bool {
 #[must_use]
 pub fn schedule_is_due(schedule: &Schedule, last_run_ms: Option<i64>, now_ms: i64) -> bool {
     match schedule {
+        // One-shot: due iff it has never run (then never again).
+        Schedule::Once => last_run_ms.is_none(),
         Schedule::Interval(interval) => match last_run_ms {
             None => true,
             Some(last) => now_ms.saturating_sub(last) >= *interval,
@@ -951,6 +1111,83 @@ mod tests {
     }
 
     // ── inline `agent://<id>` link parsing + index-keyed due check ────────────
+
+    // ── embedded-runs R3: `once` schedule + callout cards + block ids ─────────
+
+    #[test]
+    fn once_schedule_parses_and_fires_exactly_once() {
+        assert_eq!(parse_schedule("once"), Some(Schedule::Once));
+        assert!(trigger_is_scheduled("once"));
+        // Never run ⇒ due now; once run ⇒ never again (no next fire).
+        assert!(schedule_is_due(&Schedule::Once, None, 1_000));
+        assert!(!schedule_is_due(&Schedule::Once, Some(1_000), 9_999_999));
+        assert_eq!(
+            schedule_next_fire_ms(&Schedule::Once, None, 1_000),
+            Some(1_000)
+        );
+        assert_eq!(
+            schedule_next_fire_ms(&Schedule::Once, Some(1_000), 2_000),
+            None
+        );
+        // The legacy `one-time` sentinel is still "no schedule".
+        assert_eq!(schedule_of("one-time"), None);
+    }
+
+    #[test]
+    fn build_run_callout_is_a_portable_card_with_block_ids() {
+        let card = build_run_callout(
+            "abc",
+            "standup",
+            "deepseek-chat",
+            "one-time",
+            "line1\nline2",
+            false,
+        );
+        // Obsidian-style foldable callout header with the status glyph + backlink.
+        assert!(
+            card.starts_with("> [!run]+ ✓ /standup · deepseek-chat · one-time [↑](#^run-abc)\n")
+        );
+        // Each output line is quoted; the callout carries its own block id.
+        assert!(card.contains("> line1\n"));
+        assert!(card.contains("> line2\n"));
+        assert!(card.contains("> ^runout-abc\n"));
+        // An error run uses the ✗ glyph.
+        let err = build_run_callout("abc", "a", "m", "one-time", "boom", true);
+        assert!(err.contains("> [!run]+ ✗ /a"));
+    }
+
+    #[test]
+    fn find_run_callout_locates_the_block_for_replacement() {
+        let host_line = "Run [⚡ standup](agent://abc) every day. ^run-abc";
+        let card = build_run_callout("abc", "standup", "m", "one-time", "out", false);
+        let body = format!("# Daily\n\n{host_line}\n\n{card}\nmore text\n");
+        let (start, end) = find_run_callout(&body, "abc").expect("callout present");
+        // The located span is exactly the callout card.
+        assert_eq!(&body[start..end], &card[..]);
+        // A body with no callout for the id returns None.
+        assert_eq!(find_run_callout("no callout here", "abc"), None);
+    }
+
+    #[test]
+    fn config_hash_is_deterministic_and_config_sensitive() {
+        let def = AgentDef {
+            kind: "skill".into(),
+            name: "standup".into(),
+            model: "deepseek-chat".into(),
+            instructions: "Write a status.".into(),
+            mcp_servers: vec![],
+        };
+        let a = config_hash(&def, "prompt", "once");
+        let b = config_hash(&def, "prompt", "once");
+        assert_eq!(a, b, "same config ⇒ same hash");
+        assert_eq!(a.len(), 64, "sha256 hex");
+        // Any change to the effective config changes the hash.
+        assert_ne!(a, config_hash(&def, "other", "once"));
+        assert_ne!(a, config_hash(&def, "prompt", "daily at 09:00 UTC"));
+        let mut def2 = def.clone();
+        def2.model = "deepseek-reasoner".into();
+        assert_ne!(a, config_hash(&def2, "prompt", "once"));
+    }
 
     #[test]
     fn parse_agent_links_finds_inline_handles() {

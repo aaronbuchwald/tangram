@@ -262,6 +262,10 @@ export interface AgentsViewCallbacks {
   /** I3: resolve an agent definition by name (case-insensitive) so the
    *  Runs table's Agent cell links to the def file. Null if unindexed. */
   agentByName: (name: string) => AgentDef | null;
+  /** Run an agent once now (the row "Run" action, embedded-runs R3). With no
+   *  editor host note for a chip, this runs the agent once (`run_agent`) and
+   *  appends its output as a callout to the agent's own note. */
+  onRun: (name: string) => void;
 }
 
 // ── Tools/MCP T1: effective per-agent MCP status ──────────────────────────────
@@ -896,7 +900,12 @@ function renderRow(
   const run = el("button", "agents-run", "Run");
   run.title = `Run ${def.name}`;
   run.addEventListener("click", () =>
-    openAgentPopup(def, { onSave: () => {}, onClose: () => {} }),
+    openAgentPopup(def, {
+      // No editor host note here, so submit runs the agent once (`run_agent`),
+      // appending a callout to the agent's own note (embedded-runs R3).
+      onSubmit: () => cb.onRun(def.name),
+      onClose: () => {},
+    }),
   );
   actTd.appendChild(run);
   tr.appendChild(actTd);

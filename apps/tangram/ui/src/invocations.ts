@@ -115,6 +115,7 @@ export function buildInvocationIndex(invocations: Invocation[]): InvocationIndex
 
 /** A parsed v2 schedule (the UI-side mirror of the component's `Schedule`). */
 export type Schedule =
+  | { kind: "once" }
   | { kind: "interval"; ms: number }
   | { kind: "daily"; hh: number; mm: number; tz: string }
   | { kind: "weekly"; days: Weekday[]; hh: number; mm: number; tz: string };
@@ -138,6 +139,9 @@ export function parseSchedule(schedule: string): Schedule | null {
   const cronMatch = /^cron(\s+)(.*)$/.exec(s);
   if (cronMatch) s = cronMatch[2].trim();
 
+  // The one-shot kind (embedded-runs R3): a `once` Run fires exactly once.
+  // Distinct from the legacy `one-time` sentinel (which means "no index entry").
+  if (s === "once") return { kind: "once" };
   if (s === "@hourly") return { kind: "interval", ms: 60 * 60 * 1000 };
   if (s === "@daily") return { kind: "interval", ms: 24 * 60 * 60 * 1000 };
 
@@ -233,8 +237,11 @@ export function browserTz(): string {
   }
 }
 
-/** The picker's emitted recurrence (one-time is handled outside the picker). */
+/** The picker's emitted recurrence. `once` is the unified one-time Run
+ *  (embedded-runs R3): it is now a first-class trigger (a Run with a `once`
+ *  schedule), not handled outside the picker. */
 export type Recurrence =
+  | { mode: "once" }
   | { mode: "interval"; n: number; unit: "m" | "h" | "d" }
   | { mode: "daily"; time: string; tz: string }
   | { mode: "weekly"; days: Weekday[]; time: string; tz: string };
@@ -246,6 +253,8 @@ export type Recurrence =
  */
 export function buildTrigger(rec: Recurrence): string {
   switch (rec.mode) {
+    case "once":
+      return "once";
     case "interval":
       return `${rec.n}${rec.unit}`;
     case "daily":
@@ -296,6 +305,8 @@ export function formatSchedule(trigger: string): string {
   const s = parseSchedule(trigger);
   if (!s) return trigger.trim() || "—";
   switch (s.kind) {
+    case "once":
+      return "One-time";
     case "interval":
       return formatInterval(s.ms);
     case "daily":
@@ -352,6 +363,9 @@ export function nextFireMs(
 ): number | null {
   const s = parseSchedule(trigger);
   if (!s) return null;
+  // A `once` Run has no future fire once it has run; if it hasn't, it fires on
+  // the next tick (no projectable wall-clock instant) — so render no next-fire.
+  if (s.kind === "once") return null;
   if (s.kind === "interval") {
     return lastRunMs === null ? null : lastRunMs + s.ms;
   }

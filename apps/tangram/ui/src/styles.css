@@ -1232,6 +1232,12 @@ body {
 .run-exec-scheduled, .run-exec-running { background: var(--blue); }
 .run-exec-when { color: var(--text); }
 .run-exec-status { color: var(--dim); }
+.run-exec-model { color: var(--dim); }
+.run-exec-hash {
+  color: var(--faint);
+  font-family: var(--mono);
+  margin-left: auto;
+}
 .run-exec-tag { color: var(--faint); }
 .run-deferred-tail {
   margin-top: 10px;
@@ -1252,3 +1258,47 @@ body {
 }
 .run-obs-pointer-title { font-size: 11px; letter-spacing: 0.08em; }
 .run-obs-pointer-hint { letter-spacing: 0; text-transform: none; color: var(--dim); margin-top: 4px; }
+
+/* ── Run-output callout cards (embedded-runs R3) ──────────────────────────────
+ * The `> [!run]+` callout block renders as a CARD below the chip's host
+ * paragraph (in the live-preview editor + the reading view). Matches the shell's
+ * panel chrome + the `.cm-agent-link` chip accent family. */
+.run-callout-card {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green);
+  border-radius: 6px;
+  background: rgba(31, 210, 134, 0.06);
+  margin: 6px 0 10px;
+  padding: 8px 12px;
+  font-family: var(--sans);
+}
+.run-callout-card.run-callout-error {
+  border-left-color: var(--red);
+  background: rgba(255, 69, 84, 0.06);
+}
+.run-callout-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.run-callout-glyph { color: var(--green); }
+.run-callout-error .run-callout-glyph { color: var(--red); }
+.run-callout-title { color: var(--text); }
+.run-callout-meta { color: var(--dim); font-weight: 400; font-size: 12px; }
+.run-callout-backlink {
+  margin-left: auto;
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0 4px;
+}
+.run-callout-backlink:hover { color: var(--text); }
+.run-callout-body {
+  margin-top: 6px;
+  color: var(--text);
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.55;
+}

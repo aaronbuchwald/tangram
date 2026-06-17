@@ -14,13 +14,15 @@
 //   - MCP / Tools, Multi-step, Tags / Labels: disabled "Coming soon"
 //     placeholders (grouped under a divider, tooltips kept).
 //
-// Submit behavior:
-//   - One-time → run NOW via DeepSeek through the host's `/llm/deepseek` proxy
-//     (relative `../llm/deepseek/...`; the host injects the key, never the
-//     browser), show the chat, and on Save replace the `/<name>` token with the
-//     `> Agent:` Input/Output block (unchanged behavior). No durable block.
-//   - Schedule → write a durable ```agent block (use/trigger/prompt) by
-//     replacing the `/<name>` token; do NOT run now — the scheduler picks it up.
+// Submit behavior (embedded-runs R3 UNIFICATION — one display path):
+//   - One-time → emit the `once` trigger. A One-time Run is now a Run that lives
+//     in the index (a chip + record) and fires EXACTLY ONCE, just like a
+//     scheduled Run — NOT the old run-now-and-discard / indented-block flow.
+//   - Schedule → emit the recurrence picker's trigger.
+//   Both call `onSubmit(trigger, prompt)`; the editor flow mints a UUID, inserts
+//   the inline `[⚡ <agent>](agent://<id>)` chip in place of the `/<name>` token,
+//   and records the Run via `create_invocation`. Output renders through the SAME
+//   callout card (docs/design/embedded-runs.md §R3).
 //
 // The call is BOUND to the def: its `model` is passed through and its
 // `instructions` become the system message.
@@ -28,7 +30,7 @@
 // The CREATE/DEFINE popup (`/agent`) lives in createAgentPopup.ts; definitions
 // stay trigger-agnostic.
 
-import { DEFAULT_MODEL, type AgentDef } from "./agents";
+import { type AgentDef } from "./agents";
 import {
   buildTrigger,
   browserTz,
@@ -39,18 +41,20 @@ import {
   type Weekday,
 } from "./invocations";
 
-/** What the popup does with the exchange / the chosen trigger. */
+/** What the popup does with the chosen trigger + prompt.
+ *
+ *  embedded-runs R3 UNIFICATION: One-time and Schedule are now the SAME submit
+ *  path — both call `onSubmit(trigger, prompt)`, where One-time emits the `once`
+ *  trigger (a Run that lives in the index + renders a chip, fires exactly once)
+ *  and Schedule emits a recurring trigger. There is no longer a separate
+ *  run-now/indented-block path; the caller (the editor flow) mints a UUID,
+ *  inserts the inline `[⚡ <agent>](agent://<id>)` chip, and records the Run via
+ *  `create_invocation`. The output renders through the SAME callout card. */
 export interface AgentPopupCallbacks {
-  /** Replace the triggering `/<name>` range with the given markdown block and
-   *  refocus the editor. Wired by main.ts onto the live MdEditor. Used for the
-   *  one-time Output block (on Save). */
-  onSave: (block: string) => void;
-  /** A Schedule submit: the user picked a recurring trigger + prompt. The
-   *  caller mints a UUID, inserts the inline `[⚡ <agent>](agent://<id>)` link in
-   *  place of the `/<name>` token, and records the invocation in the replicated
-   *  index (`create_invocation`). Optional — when omitted, the Schedule tab is
-   *  inert (e.g. a quick-open run popup with no editor target). */
-  onSchedule?: (trigger: string, prompt: string) => void;
+  /** A submit: the user picked a trigger (`once` for One-time, else recurring)
+   *  + prompt. The editor flow inserts the chip + records the Run; a no-editor
+   *  caller (quick-open / Agents view) runs the agent once as a fallback. */
+  onSubmit: (trigger: string, prompt: string) => void;
   /** Close with no document change (Exit / dismiss); refocus the editor. */
   onClose: () => void;
 }
@@ -69,107 +73,17 @@ export function isAgentPopupOpen(): boolean {
   return current !== null;
 }
 
-/** Format the prompt + response as a markdown blockquote block (each line
- *  prefixed with `> `), LEADING with an `Agent:` provenance line that names the
- *  skill/agent + model that generated it (Fix 3, refined), e.g.
- *    > Agent: <name> · model: <model>
- *    > Input: <prompt>
- *    > Output: <line 1 of response>
- *    > <line 2 of response>
- *
- *  Leading (not trailing) so the attribution is always visible at the top of
- *  the block — a trailing line gets lost after a long multi-line Output, which
- *  read as "no agent reference at all". Multi-line responses keep every line
- *  inside the quote so live-preview renders one clean indented block.
- *
- *  The `<name>` segment is built separately so it can later become a backlink
- *  (`[[<name>]]` / a live `/<name>` reference) without reformatting the line;
- *  `model` rides on the same line via ` · `, and more ` · `-joined segments
- *  (e.g. `version: x.y.z`) can be appended later. A blank/missing name falls
- *  back to a sensible label so the line never renders empty. */
-export function formatAgentBlock(
-  prompt: string,
-  response: string,
-  name: string,
-  model: string,
-): string {
-  const quote = (text: string) =>
-    text
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n");
-  // The name segment is isolated so it can be wrapped as a backlink later
-  // (e.g. `[[${safeName}]]`) without touching the rest of the line. It should
-  // never be empty in either run path, but fall back defensively.
-  const safeName = name.trim() || "agent";
-  const nameSegment = `/${safeName}`;
-  // Forward-compatible provenance: ` · `-joined segments, so `version: x.y.z`
-  // (or other metadata) can be appended later without reformatting the line.
-  const provenanceSegments = [nameSegment];
-  if (model.trim().length > 0) provenanceSegments.push(`model: ${model.trim()}`);
-  const agentLine = `> Agent: ${provenanceSegments.join(" · ")}`;
-  const promptLines = quote(`Input: ${prompt}`);
-  const lines = response.split("\n");
-  const first = `> Output: ${lines[0] ?? ""}`;
-  const rest = lines.slice(1).map((line) => `> ${line}`);
-  return [agentLine, promptLines, first, ...rest].join("\n");
-}
-
-interface DeepSeekResponse {
-  choices?: Array<{ message?: { content?: string } }>;
-}
-
-// POST the prompt to DeepSeek through the host proxy. The shell is mounted at
-// `/tangram/`, so the RELATIVE path `../llm/deepseek/...` resolves to the host's
-// `/llm/deepseek` proxy. No API key here — the host injects it. The call is
-// bound to the def: `model` is passed through and `instructions` (if any) ride
-// as the system message ahead of the user's prompt. (P1 always uses the
-// `/llm/deepseek` route; provider routing by model is later.)
-async function callDeepSeek(
-  prompt: string,
-  model: string,
-  instructions: string,
-): Promise<string> {
-  const messages: Array<{ role: string; content: string }> = [];
-  if (instructions.trim().length > 0) {
-    messages.push({ role: "system", content: instructions });
-  }
-  messages.push({ role: "user", content: prompt });
-  const res = await fetch("../llm/deepseek/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: model || DEFAULT_MODEL,
-      messages,
-    }),
-  });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = (await res.text()).slice(0, 300);
-    } catch {
-      /* ignore */
-    }
-    throw new Error(`LLM request failed (${res.status})${detail ? `: ${detail}` : ""}`);
-  }
-  const json = (await res.json()) as DeepSeekResponse;
-  const content = json.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || content.length === 0) {
-    throw new Error("LLM returned an empty response");
-  }
-  return content;
-}
-
 /**
  * Open the `/<name>` RUN popup, bound to the resolved `def`. Single-instance:
- * any open popup is dismissed first. The popup walks Prompt → Waiting → Chat
- * (with Save/Exit) or Error (Retry); the title reads "Running: <name>".
- * Backdrop click / Esc dismiss at any state via `callbacks.onClose`.
+ * any open popup is dismissed first. The popup is a one-screen prompt + trigger
+ * picker (One-time / Schedule); Submit hands the chosen trigger + prompt to
+ * `onSubmit` (One-time = the `once` trigger — embedded-runs R3 unification).
+ * Backdrop click / Esc dismiss via `callbacks.onClose`.
  */
 export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): void {
   current?.dismiss();
 
-  const runTitle = `Running: ${def.name}`;
+  const runTitle = `Run: ${def.name}`;
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -300,24 +214,22 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
 
     function refresh() {
       const hasPrompt = input.value.trim().length > 0;
+      // One-time is always valid given a prompt (its trigger is the constant
+      // `once`); Schedule additionally needs a valid recurrence.
       const ok = mode === "one-time" ? hasPrompt : hasPrompt && picker.isValid();
       submitBtn.disabled = !ok;
     }
     function submit() {
       const prompt = input.value.trim();
       if (!prompt) return;
-      if (mode === "one-time") {
-        void runPrompt(prompt);
-        return;
-      }
-      const trigger = picker.trigger();
+      // embedded-runs R3 unification: One-time and Schedule share the submit
+      // path. One-time emits the `once` trigger (a Run that fires exactly once);
+      // Schedule emits the recurrence picker's trigger. Both create a chip +
+      // index entry and render output through the same callout card.
+      const trigger = mode === "one-time" ? "once" : picker.trigger();
       if (!trigger) return;
-      if (!callbacks.onSchedule) return; // Schedule inert without a target
-      // Hand the trigger + prompt to the caller; it mints the UUID, inserts the
-      // inline `agent://<id>` link, and records the invocation in the index. Do
-      // NOT run now — the scheduler picks it up.
       teardown();
-      callbacks.onSchedule(trigger, prompt);
+      callbacks.onSubmit(trigger, prompt);
     }
 
     input.addEventListener("input", refresh);
@@ -334,128 +246,8 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     input.focus();
   }
 
-  // ── Waiting state ───────────────────────────────────────────────────────────
-  function renderWaiting(prompt: string) {
-    dialog.replaceChildren();
-    const title = document.createElement("div");
-    title.className = "modal-title";
-    title.textContent = runTitle;
-
-    const chat = document.createElement("div");
-    chat.className = "agent-chat";
-    chat.appendChild(bubble("user", prompt));
-
-    const thinking = document.createElement("div");
-    thinking.className = "agent-thinking";
-    const spinner = document.createElement("span");
-    spinner.className = "agent-spinner";
-    thinking.append(spinner, document.createTextNode("thinking…"));
-    chat.appendChild(thinking);
-
-    dialog.append(title, chat);
-  }
-
-  // ── Chat (result) state: prompt + response bubbles, then Save / Exit ────────
-  function renderChat(prompt: string, response: string) {
-    dialog.replaceChildren();
-    const title = document.createElement("div");
-    title.className = "modal-title";
-    title.textContent = runTitle;
-
-    const chat = document.createElement("div");
-    chat.className = "agent-chat";
-    chat.appendChild(bubble("user", prompt));
-    chat.appendChild(bubble("assistant", response));
-
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const exitBtn = document.createElement("button");
-    exitBtn.type = "button";
-    exitBtn.className = "modal-btn";
-    exitBtn.textContent = "Exit";
-    const saveBtn = document.createElement("button");
-    saveBtn.type = "button";
-    saveBtn.className = "modal-btn primary";
-    saveBtn.textContent = "Save";
-    actions.append(exitBtn, saveBtn);
-
-    dialog.append(title, chat, actions);
-
-    // Exit: discard the response, leave the original `/<name>` untouched.
-    exitBtn.addEventListener("click", () => dismiss());
-    // Save: replace `/<name>` with the indented blockquote that LEADS with the
-    // def's name + model (`> Agent: /<name> · model: <model>`) above
-    // Input/Output (Fix 3, refined).
-    saveBtn.addEventListener("click", () => {
-      teardown();
-      callbacks.onSave(formatAgentBlock(prompt, response, def.name, def.model));
-    });
-    saveBtn.focus();
-  }
-
-  // ── Error state: message + Retry / Cancel ───────────────────────────────────
-  function renderError(prompt: string, message: string) {
-    dialog.replaceChildren();
-    const title = document.createElement("div");
-    title.className = "modal-title";
-    title.textContent = runTitle;
-
-    const chat = document.createElement("div");
-    chat.className = "agent-chat";
-    chat.appendChild(bubble("user", prompt));
-
-    const err = document.createElement("div");
-    err.className = "agent-error";
-    err.textContent = message;
-    chat.appendChild(err);
-
-    const actions = document.createElement("div");
-    actions.className = "modal-actions";
-    const cancelBtn = document.createElement("button");
-    cancelBtn.type = "button";
-    cancelBtn.className = "modal-btn";
-    cancelBtn.textContent = "Cancel";
-    const retryBtn = document.createElement("button");
-    retryBtn.type = "button";
-    retryBtn.className = "modal-btn primary";
-    retryBtn.textContent = "Retry";
-    actions.append(cancelBtn, retryBtn);
-
-    dialog.append(title, chat, actions);
-
-    cancelBtn.addEventListener("click", () => dismiss());
-    // Retry goes back to the prompt state, preserving the typed prompt.
-    retryBtn.addEventListener("click", () => renderPrompt(prompt));
-    retryBtn.focus();
-  }
-
-  async function runPrompt(prompt: string) {
-    renderWaiting(prompt);
-    try {
-      const response = await callDeepSeek(prompt, def.model, def.instructions);
-      if (settled) return;
-      renderChat(prompt, response);
-    } catch (e) {
-      if (settled) return;
-      renderError(prompt, e instanceof Error ? e.message : String(e));
-    }
-  }
-
   document.body.appendChild(overlay);
   renderPrompt();
-}
-
-function bubble(role: "user" | "assistant", text: string): HTMLElement {
-  const wrap = document.createElement("div");
-  wrap.className = `agent-bubble ${role}`;
-  const who = document.createElement("div");
-  who.className = "agent-bubble-role micro";
-  who.textContent = role === "user" ? "You" : "Agent";
-  const body = document.createElement("div");
-  body.className = "agent-bubble-text";
-  body.textContent = text;
-  wrap.append(who, body);
-  return wrap;
 }
 
 // ── options-pass helpers ──────────────────────────────────────────────────────
@@ -577,8 +369,11 @@ export function buildRecurrencePicker(
       ? initial.tz
       : browserTz();
   // The default recurrence sub-mode when Schedule is selected, or the prefilled
-  // schedule's mode when editing an existing invocation.
-  const DEFAULT_MODE: RecurringMode = initial ? initial.kind : "daily";
+  // schedule's mode when editing an existing invocation. A `once` Run has no
+  // recurrence sub-mode (one-time is the top-level trigger), so it falls back to
+  // the default Daily here — the picker only drives the recurring sub-selector.
+  const DEFAULT_MODE: RecurringMode =
+    initial && initial.kind !== "once" ? initial.kind : "daily";
   let mode: RecurringMode = DEFAULT_MODE;
 
   const el = document.createElement("div");
@@ -699,7 +494,7 @@ export function buildRecurrencePicker(
       applyUnit();
     } else if (initial.kind === "daily") {
       dailyTime.value = hhmm(initial.hh, initial.mm);
-    } else {
+    } else if (initial.kind === "weekly") {
       weeklyTime.value = hhmm(initial.hh, initial.mm);
       for (const chip of chips.querySelectorAll<HTMLButtonElement>(".agent-day-chip")) {
         const day = chip.title as Weekday;

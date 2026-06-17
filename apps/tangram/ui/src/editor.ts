@@ -59,6 +59,7 @@ import {
   wikiCompletionSource,
 } from "./wikiComplete";
 import { livePreview } from "./livePreview";
+import { type CalloutBacklink, runCalloutCard } from "./callout";
 
 // Token colouring (Lezer highlight tags). The heading scale/weight and the
 // emphasis/code/link inline rendering are driven by the `livePreview`
@@ -186,6 +187,13 @@ const theme = EditorView.theme(
     },
     // The Done chip's `↓` jump-to-output affordance — a slightly louder hit area.
     ".cm-agent-link-jump": { cursor: "pointer", fontWeight: "700" },
+    // The bidirectional-backlink flash (R3): a brief highlight on the line a
+    // chip/callout backlink jumps to (the `↓`/`↑` targets).
+    ".cm-backlink-flash": {
+      backgroundColor: "rgba(0,158,238,0.18)",
+      borderRadius: "4px",
+      transition: "background-color 0.4s ease-out",
+    },
     // Blockquote: a left bar + dim text, drawn on the line so it survives the
     // concealed `>` marker.
     ".cm-lp-quote": {
@@ -236,6 +244,9 @@ export class MdEditor {
   // The body we last pushed to the model (and thus expect to echo back over
   // SSE). Lets syncRemote distinguish "our own write" from a real remote edit.
   private lastWritten: string;
+  // Pending backlink-flash timers, cleared on destroy so a flash scheduled just
+  // before teardown never fires against a torn-down view (or leaks past a test).
+  private flashTimers = new Set<number>();
 
   constructor(
     parent: HTMLElement,
@@ -288,9 +299,12 @@ export class MdEditor {
     // reads as Idle, a harmless no-op for non-vault editors.
     resolveRunStatus: RunStatusResolver = () => null,
     // The Done chip's `↓` affordance: scroll the note to the Run's latest
-    // appended output (best-effort in R1; the formal callout + block-id backlink
-    // is R3). Defaults to a no-op.
+    // appended output (the output callout's block id, R3). Defaults to a no-op.
     onScrollToOutput: ScrollToOutput = () => {},
+    // The run-output callout's `↑` backlink: scroll to + highlight the chip
+    // whose host block id matches (the callout→chip direction, R3). Defaults to
+    // a no-op so non-vault editors are unchanged.
+    onCalloutBacklink: CalloutBacklink = () => {},
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -336,6 +350,10 @@ export class MdEditor {
         // the click is a no-op.
         agentChip(resolveRunStatus, onScrollToOutput),
         agentLinkClick(onOpenAgentLink),
+        // Run-output callout cards (embedded-runs R3): replace each `> [!run]+`
+        // callout block with a styled card; its `↑` backlinks to the chip. The
+        // raw source reveals on the active line (editable), like livePreview.
+        runCalloutCard(onCalloutBacklink),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
         // mounts (notes stop rendering). So the slash `/<partial>` popup and the
@@ -396,6 +414,50 @@ export class MdEditor {
     this.view.dispatch({ effects: EditorView.scrollIntoView(clamped, { y: "center" }) });
   }
 
+  /**
+   * Scroll to the Obsidian-style block id `^<blockId>` in the doc and briefly
+   * highlight the line carrying it. The bidirectional backlink target: the
+   * chip's `↓` jumps to the output callout's `^runout-<id>`; a callout's `↑`
+   * jumps to the chip's host paragraph `^run-<id>`. No-op when the anchor is
+   * absent. Returns true when the anchor was found.
+   */
+  scrollToBlockId(blockId: string): boolean {
+    const doc = this.doc;
+    const anchor = `^${blockId}`;
+    const at = doc.indexOf(anchor);
+    if (at === -1) return false;
+    this.scrollToPos(at);
+    // Flash a highlight on the anchor's line via a transient DOM class. The line
+    // DOM resolves after the scroll lands, so defer one frame. Guarded so a view
+    // torn down between the scroll and the frame is a harmless no-op.
+    const lineFrom = this.view.state.doc.lineAt(at).from;
+    const flashTimers = this.flashTimers;
+    const rafId = window.requestAnimationFrame(() => {
+      flashTimers.delete(rafId);
+      let lineEl: Element | null = null;
+      try {
+        const dom = this.view.domAtPos(lineFrom)?.node as HTMLElement | undefined;
+        lineEl =
+          dom?.nodeType === Node.ELEMENT_NODE
+            ? (dom.closest?.(".cm-line") ?? null)
+            : (dom?.parentElement?.closest(".cm-line") ?? null);
+      } catch {
+        return; // view destroyed (or pos unmapped) — nothing to flash
+      }
+      if (lineEl) {
+        const el = lineEl;
+        el.classList.add("cm-backlink-flash");
+        const timer = window.setTimeout(() => {
+          flashTimers.delete(timer);
+          el.classList.remove("cm-backlink-flash");
+        }, 1200);
+        flashTimers.add(timer);
+      }
+    });
+    this.flashTimers.add(rafId);
+    return true;
+  }
+
   /** The current editor contents. */
   get doc(): string {
     return this.view.state.doc.toString();
@@ -437,6 +499,13 @@ export class MdEditor {
   }
 
   destroy(): void {
+    // Cancel any pending backlink-flash frame/timer so nothing fires against the
+    // torn-down view (and so a test that destroys immediately leaves no leak).
+    for (const id of this.flashTimers) {
+      window.clearTimeout(id);
+      window.cancelAnimationFrame(id);
+    }
+    this.flashTimers.clear();
     this.view.destroy();
   }
 }

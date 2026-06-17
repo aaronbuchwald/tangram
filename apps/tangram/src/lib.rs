@@ -58,6 +58,43 @@ pub struct Vault {
     /// by older binaries (the `missing` attribute hydrates the empty default).
     #[autosurgeon(missing = "Option::default")]
     mcp_grants: Option<Vec<McpGrant>>,
+    /// The replicated, append-only **executions log** (embedded-runs R3): one
+    /// [`Execution`] record per Run execution, out of the note body. Backs the
+    /// Run editor's History (Executions) tab and gives each run a reproducible
+    /// snapshot (`config_hash` of the resolved effective config + the
+    /// `output_block_id` the callout carries). A deterministic `Vec` (not a
+    /// `HashMap`). Absent on documents written by older binaries (the `missing`
+    /// attribute hydrates the empty default).
+    #[autosurgeon(missing = "Option::default")]
+    executions: Option<Vec<Execution>>,
+}
+
+/// One execution of a Run (embedded-runs R3) — the append-only executions log
+/// entry. Records WHAT ran, WHEN, the OUTCOME, and a reproducibility snapshot:
+/// `config_hash` is the sha256 of the resolved effective config (the Agent's
+/// definition ⊕ the Run's overrides) at run time, and `output_block_id` is the
+/// callout's block id so a row can deep-link to its card. Keyed by
+/// `execution_id`; `run_id` ties it to the `invocations` index entry.
+#[model]
+pub struct Execution {
+    /// A stable per-execution id (a UUID minted at append time).
+    execution_id: String,
+    /// The Run (`Invocation.id`) this execution belongs to.
+    run_id: String,
+    /// The agent/skill definition name that ran.
+    agent: String,
+    /// Wall-clock ms of the execution.
+    ts: i64,
+    /// `"ran"` | `"error"` (mirrors the Run status the execution produced).
+    status: String,
+    /// The model the execution called.
+    model: String,
+    /// The callout's block id (`agents::callout_block_id`) for deep-linking.
+    output_block_id: String,
+    /// sha256 (hex) of the resolved effective config that produced this
+    /// execution (`agents::config_hash`) — the reproducibility seam a later
+    /// versioning pass builds on (embedded-runs §4).
+    config_hash: String,
 }
 
 /// LEGACY (retired block-scheduling path): one invocation's last-run timestamp,
@@ -200,6 +237,7 @@ impl Default for Vault {
             agent_runs: Some(Vec::new()),
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
+            executions: Some(Vec::new()),
         }
     }
 }
@@ -594,6 +632,15 @@ impl Vault {
         Ok(output)
     }
 
+    /// List the executions log (embedded-runs R3), newest first. The UI reads
+    /// the log off the vault state frame; this is also a queryable action for
+    /// parity/tests.
+    pub fn list_executions(&self) -> Vec<Execution> {
+        let mut out = self.executions.clone().unwrap_or_default();
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out
+    }
+
     // ── Tools/MCP T1: per-agent MCP access requests + user approval ───────────
     //
     // The REQUEST is the `kind: agent` definition's `mcp_servers:` declaration;
@@ -868,6 +915,14 @@ impl Vault {
         }
     }
 
+    /// Record a Run execution (embedded-runs R3): render the output as a
+    /// **callout card** below the chip's host paragraph (stamping the host's
+    /// `^run-<id>` block id and the callout's `^runout-<id>` so the chip ⇄
+    /// callout backlinks both resolve), refresh that card in place on a re-run
+    /// (one card per Run, always the latest), update the index entry's
+    /// last-run/next-fire/status, and append one [`Execution`] to the
+    /// append-only log. This is the SINGLE display path for both one-time
+    /// (`once`) and recurring Runs (embedded-runs R3 unification).
     fn append_invocation_output(
         &mut self,
         inv: &Invocation,
@@ -876,41 +931,27 @@ impl Vault {
         at_ms: i64,
         status: &str,
     ) {
-        let block = format!(
-            "\n\n> Agent: /{name} · model: {model} · {trigger}\n> Output: {output}\n",
-            name = def.name,
-            model = def.model,
-            trigger = inv.trigger.trim(),
-        );
-        // Prefer the recorded host note, then fall back to any note carrying the
-        // link (the user may have moved it). Insert just past the link.
-        let mut inserted = false;
-        for file in self.files.iter_mut() {
-            if file.id != inv.host_file_id {
-                continue;
-            }
-            if let Some(link) = agents::parse_agent_links(&file.body)
-                .into_iter()
-                .find(|l| l.id == inv.id)
-            {
-                file.body.insert_str(link.link_end, &block);
-                file.updated_at_ms = Some(at_ms);
-                inserted = true;
-            }
-            break;
-        }
-        if !inserted {
-            for file in self.files.iter_mut() {
-                if let Some(link) = agents::parse_agent_links(&file.body)
-                    .into_iter()
-                    .find(|l| l.id == inv.id)
-                {
-                    file.body.insert_str(link.link_end, &block);
-                    file.updated_at_ms = Some(at_ms);
+        let is_error = status == STATUS_ERROR;
+        let when = run_when_label(&inv.trigger);
+        let callout =
+            agents::build_run_callout(&inv.id, &def.name, &def.model, &when, output, is_error);
+
+        // Locate the host note carrying the chip (recorded id first, then any
+        // note carrying the link — the user may have moved it) and insert/refresh
+        // the callout below the chip's paragraph, stamping the host block id.
+        let mut placed = self.place_callout(inv.host_file_id.as_str(), &inv.id, &callout, at_ms);
+        if !placed {
+            // Fall back to any note carrying the link (host_file_id stale).
+            let ids: Vec<String> = self.files.iter().map(|f| f.id.clone()).collect();
+            for fid in ids {
+                if self.place_callout(&fid, &inv.id, &callout, at_ms) {
+                    placed = true;
                     break;
                 }
             }
         }
+        let _ = placed; // a vanished link records the run but appends no card
+
         // Record the run on the index entry by id (the source of truth).
         if let Some(entry) = self
             .invocations
@@ -921,24 +962,91 @@ impl Vault {
             entry.last_run_ms = Some(at_ms);
             // Advance the stored next fire from this run so the next tick selects
             // it only when the next occurrence/interval is reached (DST-aware).
+            // For a `once` Run this is `None` — it never re-fires.
             entry.next_fire_ms = agents::next_fire_ms(&entry.trigger, Some(at_ms), at_ms);
             entry.status = status.to_string();
         }
+
+        // Append the Execution record (embedded-runs R3 executions log).
+        self.append_execution(inv, def, at_ms, status);
     }
 
-    /// Append a MANUAL run's output block to the agent definition's own note
-    /// (the `run_agent` path — not bound to an invocation block, so it appends
-    /// to the def note like the one-time inline flow does, and records no
-    /// invocation last-run).
+    /// Insert (or refresh in place) the run-output callout for `run_id` in the
+    /// note `file_id`, just below the chip's host paragraph, stamping the host
+    /// block id `^run-<id>` on that paragraph. Returns true when the note
+    /// carried the chip's link (so the card was placed). A re-run REPLACES the
+    /// existing callout for the Run rather than appending a second card.
+    fn place_callout(&mut self, file_id: &str, run_id: &str, callout: &str, at_ms: i64) -> bool {
+        let Some(file) = self.files.iter_mut().find(|f| f.id == file_id) else {
+            return false;
+        };
+        let Some(link) = agents::parse_agent_links(&file.body)
+            .into_iter()
+            .find(|l| l.id == run_id)
+        else {
+            return false;
+        };
+
+        // Stamp the host paragraph's block id once (idempotent), at the end of
+        // the line the chip sits on, so the callout header's `[↑]` resolves.
+        let host_anchor = format!("^{}", agents::host_block_id(run_id));
+        if !file.body.contains(&host_anchor) {
+            let para_end = agents::line_end(&file.body, link.link_end);
+            file.body.insert_str(para_end, &format!(" {host_anchor}"));
+        }
+
+        // Refresh in place if a card for this Run already exists; else insert a
+        // fresh card after the host paragraph (a blank line separates them).
+        if let Some((start, end)) = agents::find_run_callout(&file.body, run_id) {
+            file.body.replace_range(start..end, callout);
+        } else {
+            let para_end = agents::line_end(&file.body, link.link_end);
+            file.body.insert_str(para_end, &format!("\n\n{callout}"));
+        }
+        file.updated_at_ms = Some(at_ms);
+        true
+    }
+
+    /// Append one [`Execution`] to the replicated, append-only executions log
+    /// (embedded-runs R3), snapshotting the resolved-effective-config hash and
+    /// the callout's block id for the History tab + reproducibility.
+    fn append_execution(
+        &mut self,
+        inv: &Invocation,
+        def: &agents::AgentDef,
+        at_ms: i64,
+        status: &str,
+    ) {
+        let config_hash = agents::config_hash(def, &inv.prompt, &inv.trigger);
+        let execution_id = uuid::Uuid::new_v4().to_string();
+        self.executions
+            .get_or_insert_with(Vec::new)
+            .push(Execution {
+                execution_id,
+                run_id: inv.id.clone(),
+                agent: def.name.clone(),
+                ts: at_ms,
+                status: status.to_string(),
+                model: def.model.clone(),
+                output_block_id: agents::callout_block_id(&inv.id),
+                config_hash,
+            });
+    }
+
+    /// Append a MANUAL run's output (the `run_agent` Re-run-now path) to the
+    /// agent definition's own note as a callout card — the same visual language
+    /// as a Run's output, but unbound (no chip, so no host-paragraph block id /
+    /// backlink). Records no invocation last-run and no Execution (it is not a
+    /// scheduled/once Run).
     fn append_manual_output(&mut self, def: &agents::AgentDef, output: &str, at_ms: i64) {
-        let block = format!(
-            "\n\n> Agent: /{name} · model: {model} · (manual)\n> Output: {output}\n",
-            name = def.name,
-            model = def.model,
-        );
+        // A synthetic, def-scoped block id keeps the card self-consistent without
+        // colliding with a real Run's `^run-*`/`^runout-*` ids.
+        let manual_id = format!("manual-{}", def.name.to_ascii_lowercase());
+        let callout =
+            agents::build_run_callout(&manual_id, &def.name, &def.model, "manual", output, false);
         for file in self.files.iter_mut() {
             if agents::parse_agent(&file.body).is_some_and(|d| d.name == def.name) {
-                file.body.push_str(&block);
+                file.body.push_str(&format!("\n\n{callout}"));
                 file.updated_at_ms = Some(at_ms);
                 break;
             }
@@ -974,6 +1082,17 @@ fn normalize_folder(path: &str) -> Result<String, String> {
 
 fn now_ms() -> i64 {
     tangram::time::now_ms()
+}
+
+/// A short human label for a Run's trigger, shown in the callout header (e.g.
+/// `one-time` for a `once` Run, otherwise the raw trigger text trimmed). Kept
+/// minimal — the Run editor renders the full schedule summary.
+fn run_when_label(trigger: &str) -> String {
+    match trigger.trim() {
+        "once" => "one-time".to_string(),
+        "" => "manual".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// The DeepSeek chat-completions endpoint (the default LLM target).
@@ -1330,6 +1449,7 @@ mod tests {
             agent_runs: Some(Vec::new()),
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
+            executions: Some(Vec::new()),
         }
     }
 
@@ -1665,7 +1785,10 @@ mod tests {
     }
 
     #[test]
-    fn output_appends_near_the_inline_link_and_records_last_run_by_id() {
+    fn output_renders_a_callout_card_with_block_ids_and_records_last_run_by_id() {
+        // embedded-runs R3: a run renders a `> [!run]+` CALLOUT below the host
+        // paragraph (not the legacy indented blockquote), stamps the host
+        // paragraph's `^run-<id>` block id, and the callout carries `^runout-<id>`.
         let mut v = vault_with_invocation("standup", "uuid-1", "1m");
         let inv = v.list_invocations()[0].clone();
         v.append_invocation_output(&inv, &standup_def(), "all good", 1_234, STATUS_RAN);
@@ -1675,15 +1798,83 @@ mod tests {
             .find(|f| f.path == "daily.md")
             .unwrap()
             .clone();
-        // The output lands right after the `)` of the link.
-        let link_end = host.body.find("(agent://uuid-1)").unwrap() + "(agent://uuid-1)".len();
-        assert!(host.body[link_end..].starts_with("\n\n> Agent: /standup"));
-        assert!(host.body.contains("> Output: all good"));
+        // The callout card is present with the agent + output.
+        assert!(host.body.contains("> [!run]+ ✓ /standup"));
+        assert!(host.body.contains("> all good"));
+        // The bidirectional block ids: host paragraph anchor + callout block id.
+        assert!(host.body.contains("^run-uuid-1"), "host block id stamped");
+        assert!(host.body.contains("> ^runout-uuid-1"), "callout block id");
+        // The header backlinks to the chip's host block.
+        assert!(host.body.contains("[↑](#^run-uuid-1)"));
         // The tail text after the link is preserved.
         assert!(host.body.contains("every day."));
         // Run recorded by id + status updated.
         assert_eq!(v.last_run_ms("uuid-1"), Some(1_234));
         assert_eq!(v.list_invocations()[0].status, STATUS_RAN);
+    }
+
+    #[test]
+    fn rerun_refreshes_the_callout_in_place_not_a_second_card() {
+        // A re-run REPLACES the Run's existing callout (one card per Run, always
+        // the latest output) rather than appending a second.
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = v.list_invocations()[0].clone();
+        v.append_invocation_output(&inv, &standup_def(), "first", 1_000, STATUS_RAN);
+        v.append_invocation_output(&inv, &standup_def(), "second", 2_000, STATUS_RAN);
+        let host = v.files.iter().find(|f| f.path == "daily.md").unwrap();
+        // Exactly one callout header and one callout block id remain.
+        assert_eq!(host.body.matches("> [!run]+").count(), 1);
+        assert_eq!(host.body.matches("^runout-uuid-1").count(), 1);
+        // The card shows the latest output, not the first.
+        assert!(host.body.contains("> second"));
+        assert!(!host.body.contains("> first"));
+        // The host block id is stamped exactly once (idempotent).
+        assert_eq!(host.body.matches("^run-uuid-1").count(), 2); // anchor + the `[↑]` ref
+    }
+
+    #[test]
+    fn each_run_appends_an_execution_with_config_hash_and_block_id() {
+        // embedded-runs R3 executions log: one Execution per run, carrying the
+        // resolved-config hash + the callout's output block id.
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = v.list_invocations()[0].clone();
+        assert!(v.list_executions().is_empty());
+        v.append_invocation_output(&inv, &standup_def(), "ok", 5_000, STATUS_RAN);
+        let log = v.list_executions();
+        assert_eq!(log.len(), 1);
+        let e = &log[0];
+        assert_eq!(e.run_id, "uuid-1");
+        assert_eq!(e.agent, "standup");
+        assert_eq!(e.ts, 5_000);
+        assert_eq!(e.status, STATUS_RAN);
+        assert_eq!(e.output_block_id, "runout-uuid-1");
+        // The config hash is a 64-hex sha256 and stable for the same config.
+        assert_eq!(e.config_hash.len(), 64);
+        assert_eq!(
+            e.config_hash,
+            agents::config_hash(&standup_def(), &inv.prompt, &inv.trigger)
+        );
+        // A second run appends a second Execution (append-only log).
+        v.append_invocation_output(&inv, &standup_def(), "ok2", 6_000, STATUS_RAN);
+        assert_eq!(v.list_executions().len(), 2);
+    }
+
+    #[test]
+    fn once_run_fires_once_then_never_again() {
+        // embedded-runs R3 one-time unification: a `once` Run is an index entry
+        // (chip + record) that fires exactly once. Never run ⇒ due now; once run
+        // ⇒ next_fire is None (the scheduler never re-selects it).
+        let v = vault_with_invocation("standup", "uuid-1", "once");
+        // Created with the `once` trigger and immediately due.
+        assert_eq!(v.list_invocations()[0].trigger, "once");
+        let nf = next_fire_ms_of(&v, "uuid-1").expect("once, never run ⇒ due now");
+        assert!(nf <= now_ms() + 5_000);
+        // After the (single) run, it never fires again.
+        let mut v2 = v;
+        let inv = v2.list_invocations()[0].clone();
+        v2.append_invocation_output(&inv, &standup_def(), "done", 9_000, STATUS_RAN);
+        assert_eq!(next_fire_ms_of(&v2, "uuid-1"), None, "once never re-fires");
+        assert!(due_now_ids(&v2, 9_000 + 1_000_000).is_empty());
     }
 
     #[test]

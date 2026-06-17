@@ -9,6 +9,7 @@ import {
   SHELL_APP,
   subscribeVault,
   vault,
+  type Execution,
   type FleetApp,
   type McpGrant,
   type MdFile,
@@ -37,6 +38,7 @@ import {
   type InvocationIndex,
 } from "./invocations";
 import { wikiCandidatesFromFiles } from "./wikiComplete";
+import { calloutBlockId } from "./callout";
 import {
   type CreatedAgent,
   isCreateAgentPopupOpen,
@@ -116,6 +118,10 @@ let linkIndex: LinkIndex = buildLinkIndex([]);
 // note is only the handle; the trigger/prompt/last-run live in this index. The
 // Run editor reads a Run from here by id.
 let invocationIndex: InvocationIndex = buildInvocationIndex([]);
+// The append-only executions log (embedded-runs R3): the app's REPLICATED
+// `executions` records, carried on the vault state frame. The Run editor's
+// History tab reads a Run's executions from here by run id.
+let executions: Execution[] = [];
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -583,7 +589,7 @@ function renderAgentsBadge() {
     ).length;
     head.title =
       scheduled > 0
-        ? `Open the Agents view — ${scheduled} scheduled invocation${scheduled === 1 ? "" : "s"}`
+        ? `Open the Agents view — ${scheduled} scheduled run${scheduled === 1 ? "" : "s"}`
         : "Open the Agents view";
   }
 }
@@ -661,10 +667,18 @@ function quickOpenPick(item: QuickOpenItem): void {
     tabs.openApp(item.id);
     return;
   }
-  // agent | skill — open the run popup bound to the def.
+  // agent | skill — open the run popup bound to the def. With no editor target
+  // (quick-open has no host note for a chip), submit runs the agent once as a
+  // best-effort fallback (`run_agent`) rather than minting an unanchored Run.
   const def = agentIndex.findAgent(item.id);
   if (def) {
-    openAgentPopup(def, { onSave: () => {}, onClose: () => {} });
+    openAgentPopup(def, {
+      onSubmit: () =>
+        void vault
+          .runAgent(def.name)
+          .catch((e) => showError(String(e instanceof Error ? e.message : e))),
+      onClose: () => {},
+    });
   } else {
     tabs.openAgents();
   }
@@ -916,6 +930,10 @@ function renderContent() {
       invocations: () => invocationIndex,
       hostNoteTitle: (fileId) => hostNoteTitle(fileId),
       agentByName: (name) => agentIndex.findAgent(name),
+      onRun: (name) =>
+        void vault
+          .runAgent(name)
+          .catch((e) => showError(String(e instanceof Error ? e.message : e))),
     });
     return;
   }
@@ -1031,6 +1049,12 @@ function openAgentLinkTrigger(id: string): void {
     agentByName: (name) => agentIndex.findAgent(name),
     // Re-run now (Runs tab): the existing `run_agent` action, by agent name.
     onRerun: (agent) => vault.runAgent(agent),
+    // History (Executions) tab: the Run's executions from the live replicated
+    // log (embedded-runs R3), newest first.
+    executionsForRun: (runId) =>
+      executions
+        .filter((e) => e.run_id === runId)
+        .sort((a, b) => b.ts - a.ts),
   });
 }
 
@@ -1052,21 +1076,22 @@ function stripAgentLink(id: string): void {
   editor.replaceRange(open, to, label);
 }
 
-// Best-effort scroll-to-latest-output for a Run chip's `↓` (R1; the formal
-// output callout + block-id backlink is R3). The component appends each run's
-// output as a `> Agent: …` block right after the `](agent://<id>)` link in the
-// host note. We find the chip's link in the active editor, then scroll to the
-// FIRST `> Agent:` block following it (the most recent append lands closest to
-// the link, since `append_invocation_output` inserts at the link end). Falls
-// back to scrolling to the link itself when no output block is found yet.
+// The Done chip's `↓` (chip→callout backlink, R3): jump to the Run's output
+// callout via its `^runout-<id>` block id and flash it. Falls back to scrolling
+// to the chip's link when no callout exists yet (a Run that hasn't produced
+// output).
 function scrollToLatestOutput(id: string): void {
   const editor = activeEditor?.editor;
   if (!editor) return;
-  const doc = editor.doc;
-  const link = parseAgentLinks(doc).find((l) => l.id === id);
-  if (!link) return;
-  const after = doc.indexOf("\n> Agent:", link.to);
-  editor.scrollToPos(after === -1 ? link.to : after + 1);
+  if (editor.scrollToBlockId(calloutBlockId(id))) return;
+  const link = parseAgentLinks(editor.doc).find((l) => l.id === id);
+  if (link) editor.scrollToPos(link.to);
+}
+
+// The callout header's `↑` (callout→chip backlink, R3): scroll to + highlight
+// the chip's host paragraph via its `^run-<id>`/`^<hostBlockId>` anchor.
+function scrollToChip(hostBlockId: string): void {
+  activeEditor?.editor.scrollToBlockId(hostBlockId);
 }
 
 // A single Obsidian-style "Live Preview" CodeMirror 6 editor (issue #11): the
@@ -1113,11 +1138,12 @@ function renderNoteTab(fileId: string) {
       // Exit/dismiss leaves the live `/<name>` reference in place.
       const openRun = (def: AgentDef, tokFrom: number, tokTo: number) => {
         openAgentPopup(def, {
-          onSave: (block) => editor.replaceRange(tokFrom, tokTo, block),
-          // Schedule submit: mint a UUID, swap the `/<name>` token for the inline
-          // `[⚡ <agent>](agent://<id>)` handle, and record the invocation in the
-          // replicated index. The scheduler picks it up; the popup did not run.
-          onSchedule: (trigger, prompt) => {
+          // embedded-runs R3 unification: One-time (`once`) and Schedule share
+          // this submit. Mint a UUID, swap the `/<name>` token for the inline
+          // `[⚡ <agent>](agent://<id>)` chip, and record the Run in the
+          // replicated index. The scheduler runs it (a `once` Run fires once on
+          // the next tick); output renders through the callout card.
+          onSubmit: (trigger, prompt) => {
             const id = crypto.randomUUID();
             const link = buildAgentLink(def.name, id);
             editor.replaceRange(tokFrom, tokTo, link);
@@ -1203,9 +1229,12 @@ function renderNoteTab(fileId: string) {
     // Run progresses (the index is rebuilt on each vault state; the note tab
     // re-mounts the editor so the chip refreshes).
     (id) => invocationIndex.byId(id),
-    // The Done chip's `↓` affordance: scroll to the Run's latest appended output
-    // (best-effort in R1 — the formal callout + block-id backlink is R3).
+    // The Done chip's `↓` affordance: jump to the Run's output callout via its
+    // `^runout-<id>` block id (chip→callout backlink, R3).
     (id) => scrollToLatestOutput(id),
+    // The callout header's `↑` backlink: scroll to + highlight the chip's host
+    // paragraph via its `^run-<id>` block id (callout→chip backlink, R3).
+    (hostBlockId) => scrollToChip(hostBlockId),
   );
   state.editor = editor;
 
@@ -1524,6 +1553,9 @@ function onVaultState(state: VaultState) {
   // state frame (the source of truth — not the markdown). The Trigger popup
   // reads invocations from here by id; the component prunes orphans server-side.
   invocationIndex = buildInvocationIndex(state.invocations ?? []);
+  // The executions log (embedded-runs R3) — the Run editor's History tab reads
+  // a Run's executions from here by run id.
+  executions = state.executions ?? [];
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();

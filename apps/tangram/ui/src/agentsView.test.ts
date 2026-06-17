@@ -156,6 +156,7 @@ const callbacks = (invocations: Invocation[]): AgentsViewCallbacks => ({
   }),
   hostNoteTitle: (fileId) => (fileId === "missing" ? null : `Note ${fileId}`),
   agentByName: () => null,
+  onRun: () => {},
 });
 
 const sampleInvocations: Invocation[] = [

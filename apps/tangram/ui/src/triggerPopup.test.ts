@@ -11,7 +11,19 @@ import {
   type TriggerPopupCallbacks,
 } from "./triggerPopup";
 import type { AgentDef } from "./agents";
-import type { Invocation } from "./api";
+import type { Execution, Invocation } from "./api";
+
+const exec = (over: Partial<Execution> = {}): Execution => ({
+  execution_id: "e1",
+  run_id: "i1",
+  agent: "standup",
+  ts: Date.now() - 1000,
+  status: "ran",
+  model: "deepseek-chat",
+  output_block_id: "runout-i1",
+  config_hash: "a".repeat(64),
+  ...over,
+});
 
 const inv = (over: Partial<Invocation> = {}): Invocation => ({
   id: "i1",
@@ -45,6 +57,7 @@ const cbs = (over: Partial<TriggerPopupCallbacks> = {}): TriggerPopupCallbacks =
   onClose: vi.fn(),
   agentByName: () => def(),
   onRerun: () => Promise.resolve("ok"),
+  executionsForRun: () => [],
   ...over,
 });
 
@@ -139,20 +152,28 @@ describe("Runs tab — re-run now + resolved preview", () => {
   });
 });
 
-describe("History tab — Executions (current data; full log is R3)", () => {
-  it("shows an empty Executions state when the Run hasn't fired", () => {
-    openTriggerPopup(inv({ last_run_ms: null }), cbs());
+describe("History tab — Executions (the append-only executions log, R3)", () => {
+  it("shows an empty Executions state when there are no executions", () => {
+    openTriggerPopup(inv(), cbs({ executionsForRun: () => [] }));
     tabBtn("History").click();
     expect($(".run-executions")!.textContent).toContain("No executions yet");
-    expect($(".run-deferred-tail")!.textContent).toContain("R3");
   });
 
-  it("synthesizes one most-recent Execution row from last_run_ms + status", () => {
-    openTriggerPopup(inv({ last_run_ms: Date.now() - 1000, status: "ran" }), cbs());
+  it("reads the executions log: a row per Execution with its config hash", () => {
+    const executionsForRun = vi.fn(() => [
+      exec({ execution_id: "e2", ts: Date.now() - 500, config_hash: "b".repeat(64) }),
+      exec({ execution_id: "e1", ts: Date.now() - 5000 }),
+    ]);
+    openTriggerPopup(inv(), cbs({ executionsForRun }));
     tabBtn("History").click();
-    const row = $(".run-execution-row")!;
-    expect(row.textContent).toContain("ran");
-    expect(row.querySelector(".run-exec-tag")!.textContent).toBe("most recent");
+    // The callback was asked for THIS Run's executions.
+    expect(executionsForRun).toHaveBeenCalledWith("i1");
+    const rows = $$(".run-execution-row");
+    expect(rows.length).toBe(2);
+    // Newest first carries the "most recent" tag + a short config-hash chip.
+    expect(rows[0].querySelector(".run-exec-tag")!.textContent).toBe("most recent");
+    expect(rows[0].querySelector(".run-exec-hash")!.textContent).toContain("cfg bbbbbbbb");
+    expect(rows[0].textContent).toContain("ran");
   });
 });
 

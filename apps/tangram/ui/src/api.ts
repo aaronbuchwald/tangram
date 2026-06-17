@@ -42,6 +42,22 @@ export interface Invocation {
   status: string;
 }
 
+/** One execution of a Run (embedded-runs R3) — the append-only executions log
+ *  entry. Mirrors `Execution` in `apps/tangram/src/lib.rs`; carried on the vault
+ *  state frame. `config_hash` is the sha256 of the resolved effective config
+ *  (Agent ⊕ Run overrides) at run time; `output_block_id` is the callout's
+ *  block id for deep-linking. */
+export interface Execution {
+  execution_id: string;
+  run_id: string;
+  agent: string;
+  ts: number;
+  status: string;
+  model: string;
+  output_block_id: string;
+  config_hash: string;
+}
+
 export interface VaultState {
   files: MdFile[];
   /** Present on documents written by this binary or newer; absent (treat as
@@ -50,6 +66,9 @@ export interface VaultState {
   /** The replicated scheduled-invocation index (the redesign). Absent on older
    *  docs (treat as []). */
   invocations?: Invocation[] | null;
+  /** The replicated append-only executions log (embedded-runs R3). Absent on
+   *  older docs (treat as []). */
+  executions?: Execution[] | null;
 }
 
 // The shell's own app name on the host. The shell is the outer container and

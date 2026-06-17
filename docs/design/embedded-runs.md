@@ -62,7 +62,7 @@ Each checkpoint is independently shippable + reviewable.
 |---|---|---|---|
 | **R1** | **Doc + rename + atomic chip + live status** (this checkpoint) | this design doc; user-facing **Triggers → Runs** rename across the shell UI (Agents view sub-tab, the click-to-edit popup, empty states/counts/filters/aria), Executions wording where executions are surfaced; the inline chip made a **CM6 atomic widget** (`EditorView.atomicRanges`) so the cursor steps over it (click still opens the editor, EOF-safe hit test kept); **live status** rendered on the chip from the Run's index record (Idle / Running / Done / Error) with a best-effort `↓` scroll-to-latest-output; a minimal **running→done/error** transition in the component run flow so the chip can show "running". | typing creates a chip; the caret cannot enter the chip (steps over it); clicking opens the editor; the chip reflects the Run's status and a running tick shows "running…"; the UI says "Runs"/"Run"/"Execution", never "Trigger"/"Invocation". |
 | **R2** | **The Run editor surface** | the modal **Run editor** opened by a chip click, with tabs: **Config** (trigger + prompt + the layered context), **Runs** (sibling Runs of the same Agent), **History = Executions** (this Run's executions), **Observability** (per-execution timing/tokens/cost stubs). **Visible additive inheritance**: inherited-from-Agent vs Run-override fields are visually distinguished. | the editor opens with all four tabs; editing Config round-trips through `update_invocation`; inherited vs overridden config is visibly distinct; the Runs/History tabs read the live index. |
-| **R3** | **Inline output callout + bidirectional backlinks + executions log** | the component appends each Execution's output as a markdown **callout below the host block** (not just after the link); a **block id** stamped on the host block and the output gives a **bidirectional backlink** (chip ⇄ output); an append-only **executions log** in the Automerge doc, each Execution snapshotting a **resolved-config hash** (the effective Agent+Run config that produced it). | a run appends a callout below the host block; the chip's `↓` jumps to it and the callout links back to the chip; the executions log accrues one record per run with a config hash; history reads the log. |
+| **R3 ✅** | **Inline output callout card + bidirectional backlinks + one-time/scheduled unification + executions log** (this checkpoint) | the component renders each Execution's output as a **callout CARD below the host paragraph** (an Obsidian `> [!run]+` callout — a styled card in the live-preview editor + reading view, degrading to a portable blockquote); a **block id** stamped on the host paragraph (`^run-<id>`) and on the callout (`^runout-<id>`) gives the **bidirectional backlink** (chip `↓` ⇄ callout `↑`); **One-time and Scheduled are now ONE display path** — a One-time Run is an index entry with a `once` schedule (a chip + record that fires exactly once), the old run-now→indented-block path removed; an append-only **executions log** in the Automerge doc, each Execution snapshotting a **resolved-config hash** (sha256 of the effective Agent⊕Run config) + the output block id; the Run editor's History tab reads the log. | a one-time submit creates a chip + index entry with `once`; `once` fires once then never; a run renders a callout card below the host paragraph; the chip's `↓` jumps to it and the callout `↑` links back; the executions log accrues one record per run with a config hash; history reads the log. |
 | **R4** | **Run-scoped mounted files** | files mounted onto a Run and exposed to the Agent at run time (the Run's layered context can include vault files/attachments the Agent reads). | a Run with a mounted file makes that file available to the Agent's loop at run time; the mount is recorded on the Run and shown in the editor. |
 
 R1–R2 are the inline + editor core (no change to the append/output model beyond
@@ -107,6 +107,55 @@ build on — it already records *which* effective config produced each Execution
   existing append commit sets `ran`/`error`. This keeps the lock-never-held-
   across-await invariant (CLAUDE.md) and lets the replicated chip show "running"
   between the two commits.
+
+## 6. R3 implementation notes (as built)
+
+- **Output callout format (chosen).** An **Obsidian-style `> [!run]+` callout**
+  rendered below the chip's host paragraph (replacing R1's `> Agent:`/`> Output:`
+  indented blockquote). Built by `agents::build_run_callout`
+  (`apps/tangram/src/agents.rs`); shape:
+  ```
+  > [!run]+ ✓ /<agent> · <model> · <when> [↑](#^run-<id>)
+  > <output line 1>
+  > <output line 2>
+  > ^runout-<id>
+  ```
+  The header carries the status glyph (`✓` ran / `✗` error), the agent/model/when,
+  and a `[↑]` backlink to the chip. It's **portable markdown** — a renderer that
+  doesn't know callouts shows a blockquote — and renders as a **card** in the
+  shell via a CM6 **StateField** decoration (`apps/tangram/ui/src/callout.ts`,
+  `runCalloutCard`; a StateField, not a ViewPlugin, because a block
+  `Decoration.replace` spans line breaks). The raw source reveals on the active
+  block (editable), like livePreview. `renderRunCalloutCard` is the same card as
+  detached DOM for a reading view. A **re-run refreshes the card in place** (one
+  card per Run, always the latest) via `agents::find_run_callout`.
+- **Bidirectional block-id backlinks.** Derived deterministically from the Run id
+  (`agents::host_block_id` = `run-<id>`, `callout_block_id` = `runout-<id>`;
+  mirrored in `callout.ts`). The host paragraph is stamped with `^run-<id>` once
+  (idempotent); the callout carries `^runout-<id>`. The chip's `↓` jumps to
+  `^runout-<id>`; the callout header's `↑` jumps to `^run-<id>` — both via
+  `MdEditor.scrollToBlockId`, which scrolls and briefly flashes the target line
+  (`.cm-backlink-flash`).
+- **One-time / scheduled unification.** One-time is now the **`once` schedule
+  kind** (`Schedule::Once` in `agents.rs`, `{kind:"once"}` in `invocations.ts`):
+  a Run that lives in the index (a chip + record) and fires **exactly once**
+  (`next_fire_ms` = `Some(now)` until it runs, then `None` — the scheduler never
+  re-selects it). The run popup's One-time submit now emits the `once` trigger
+  through the SAME `onSubmit(trigger, prompt)` path as Schedule
+  (`agentPopup.ts`), so both insert the inline chip + `create_invocation` and
+  render through the same callout card. The legacy run-now→indented-block path
+  (the popup's live DeepSeek call + `formatAgentBlock`) is **removed**. The
+  legacy `one-time` string still parses to "no schedule" (distinct from `once`).
+- **Executions log shape.** A replicated, append-only `Vec<Execution>` on the
+  Vault (`executions`), out of the note body, one record per run:
+  `{ execution_id, run_id, agent, ts, status, model, output_block_id,
+  config_hash }`. `config_hash` = **sha256 (hex) of the resolved effective
+  config** (`agents::config_hash`: the Agent's kind/model/instructions/canonical
+  MCP servers ⊕ the Run's prompt + trigger), the reproducibility seam §4 builds
+  on. Surfaced by `list_executions` + the vault state frame; the Run editor's
+  **History** tab lists them newest-first with the short config hash
+  (`triggerPopup.ts`). The deep per-execution **Observability** trace stays the
+  O-series stub (host-side OTLP/Langfuse).
 
 ---
 
