@@ -79,6 +79,18 @@ pub struct Vault {
     /// `missing` attribute hydrates the empty default).
     #[autosurgeon(missing = "Option::default")]
     objects: Option<Vec<SmartObject>>,
+    /// Whether the smart-object DEMOS (the SO2 reactive rollup note + the SO3
+    /// meal-plan recipe→grocery→cart note, with their backing objects) have been
+    /// seeded into this vault. A fresh vault gets them from `Default` and so is
+    /// born `Some(true)`. Documents written by older binaries — or any vault
+    /// whose Automerge doc was created before the demos existed — hydrate this as
+    /// `None` (the `missing` attribute), which marks them eligible for the
+    /// idempotent `seed_demos` backfill (run on the first `tick_agents`). Once the
+    /// backfill runs the marker is set `true` and never re-seeds, so deleting a
+    /// demo afterwards does NOT bring it back (issue #111). A deterministic
+    /// scalar (the model `Default` must stay deterministic).
+    #[autosurgeon(missing = "Option::default")]
+    demos_seeded: Option<bool>,
 }
 
 /// One **smart object** (Smart Objects SO1) — a typed node in the replicated
@@ -390,92 +402,117 @@ pub struct McpStatus {
 /// engine end to end on a fresh vault.
 impl Default for Vault {
     fn default() -> Self {
-        // SO2 reactive demo: two `tag` sources carrying a numeric `qty`, plus a
-        // `rollup` derived object summing `qty` across them. The engine computes
-        // the rollup's cached `data` deterministically (pure), so genesis is
-        // byte-identical across replicas.
-        let mut objects = vec![
-            SmartObject {
-                id: "demo-apples".to_string(),
-                obj_type: "tag".to_string(),
-                data: "{\"qty\":3}".to_string(),
-                links: Vec::new(),
-                render: "chip".to_string(),
-                derive: None,
-                derive_error: None,
-            },
-            SmartObject {
-                id: "demo-oranges".to_string(),
-                obj_type: "tag".to_string(),
-                data: "{\"qty\":5}".to_string(),
-                links: Vec::new(),
-                render: "chip".to_string(),
-                derive: None,
-                derive_error: None,
-            },
-            SmartObject {
-                id: "demo-total".to_string(),
-                obj_type: "rollup".to_string(),
-                data: String::new(), // computed below by the engine
-                links: vec![
-                    ObjLink {
-                        rel: "depends-on".to_string(),
-                        target: "demo-apples".to_string(),
-                        url: None,
-                    },
-                    ObjLink {
-                        rel: "depends-on".to_string(),
-                        target: "demo-oranges".to_string(),
-                        url: None,
-                    },
-                ],
-                render: "chip".to_string(),
-                derive: Some(DeriveSpec {
-                    kind: "rollup".to_string(),
-                    deps: vec!["demo-apples".to_string(), "demo-oranges".to_string()],
-                    params: Some("{\"op\":\"sum\",\"field\":\"qty\"}".to_string()),
-                }),
-                derive_error: None,
-            },
-        ];
-        // Smart Objects SO3: the reactive recipe→grocery-list→cart-preview chain
-        // (the meal-plan demo). Seeded with fixed ids + zero timestamps so genesis
-        // stays byte-identical; the grocery-list + cart-preview caches are computed
-        // by the engine right here, so a fresh vault opens with a working chain.
-        objects.extend(meal_plan_objects());
+        // The demo objects + files come from the SAME genesis builders the
+        // backfill (`seed_demos`) reuses, so a fresh vault and a backfilled one
+        // converge byte-for-byte. The engine computes the derived caches here so
+        // genesis opens with a working chain.
+        let mut objects = demo_seed_objects();
         reactive::recompute(&mut objects);
 
+        let mut files = vec![MdFile {
+            id: "welcome".to_string(),
+            path: "welcome.md".to_string(),
+            body: welcome_body(),
+            created_at_ms: 0,
+            updated_at_ms: None,
+        }];
+        files.extend(demo_seed_files());
+
         Self {
-            files: vec![
-                MdFile {
-                    id: "welcome".to_string(),
-                    path: "welcome.md".to_string(),
-                    body: welcome_body(),
-                    created_at_ms: 0,
-                    updated_at_ms: None,
-                },
-                MdFile {
-                    id: "smart-objects-demo".to_string(),
-                    path: "smart-objects-demo.md".to_string(),
-                    body: reactive_demo_body(),
-                    created_at_ms: 0,
-                    updated_at_ms: None,
-                },
-                MdFile {
-                    id: "meal-plan-demo".to_string(),
-                    path: "meal-plan-demo.md".to_string(),
-                    body: meal_plan_demo_body(),
-                    created_at_ms: 0,
-                    updated_at_ms: None,
-                },
-            ],
+            files,
             agent_runs: Some(Vec::new()),
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
             executions: Some(Vec::new()),
             objects: Some(objects),
+            // A fresh vault already carries the demos (above), so it must NOT
+            // re-seed: born sealed. Older docs hydrate `None` → eligible.
+            demos_seeded: Some(true),
         }
     }
+}
+
+/// The genesis **demo objects** (Smart Objects): the SO2 reactive rollup demo
+/// (two `tag` sources + a `rollup` summing them) AND the SO3 meal-plan chain
+/// (`recipe` defs → derived `grocery-list` → derived `cart-preview`). Returned
+/// un-recomputed (derived caches blank) — the caller runs `reactive::recompute`
+/// after merging so the cached values are filled. Fixed ids + a stable shape so
+/// the seed is byte-identical across replicas. THE one source of truth shared by
+/// `Default` (genesis) and `Vault::backfill_demos` (existing-vault backfill).
+fn demo_seed_objects() -> Vec<SmartObject> {
+    // SO2 reactive demo: two `tag` sources carrying a numeric `qty`, plus a
+    // `rollup` derived object summing `qty` across them.
+    let mut objects = vec![
+        SmartObject {
+            id: "demo-apples".to_string(),
+            obj_type: "tag".to_string(),
+            data: "{\"qty\":3}".to_string(),
+            links: Vec::new(),
+            render: "chip".to_string(),
+            derive: None,
+            derive_error: None,
+        },
+        SmartObject {
+            id: "demo-oranges".to_string(),
+            obj_type: "tag".to_string(),
+            data: "{\"qty\":5}".to_string(),
+            links: Vec::new(),
+            render: "chip".to_string(),
+            derive: None,
+            derive_error: None,
+        },
+        SmartObject {
+            id: "demo-total".to_string(),
+            obj_type: "rollup".to_string(),
+            data: String::new(), // computed by the engine after merge
+            links: vec![
+                ObjLink {
+                    rel: "depends-on".to_string(),
+                    target: "demo-apples".to_string(),
+                    url: None,
+                },
+                ObjLink {
+                    rel: "depends-on".to_string(),
+                    target: "demo-oranges".to_string(),
+                    url: None,
+                },
+            ],
+            render: "chip".to_string(),
+            derive: Some(DeriveSpec {
+                kind: "rollup".to_string(),
+                deps: vec!["demo-apples".to_string(), "demo-oranges".to_string()],
+                params: Some("{\"op\":\"sum\",\"field\":\"qty\"}".to_string()),
+            }),
+            derive_error: None,
+        },
+    ];
+    // Smart Objects SO3: the reactive recipe→grocery-list→cart-preview chain.
+    objects.extend(meal_plan_objects());
+    objects
+}
+
+/// The genesis **demo files** (the two seeded `.md` notes carrying the inline
+/// `obj://` chips): the SO2 reactive demo and the SO3 meal-plan demo. Fixed ids
+/// and zero timestamps so the seed is byte-identical across replicas. Shared by
+/// `Default` and `Vault::backfill_demos` (one source of truth — no copy-paste of
+/// the demo bodies).
+fn demo_seed_files() -> Vec<MdFile> {
+    vec![
+        MdFile {
+            id: "smart-objects-demo".to_string(),
+            path: "smart-objects-demo.md".to_string(),
+            body: reactive_demo_body(),
+            created_at_ms: 0,
+            updated_at_ms: None,
+        },
+        MdFile {
+            id: "meal-plan-demo".to_string(),
+            path: "meal-plan-demo.md".to_string(),
+            body: meal_plan_demo_body(),
+            created_at_ms: 0,
+            updated_at_ms: None,
+        },
+    ]
 }
 
 /// One markdown file in the vault. Its `path` is a `/`-separated virtual
@@ -778,6 +815,18 @@ impl Vault {
     /// A no-op when nothing is due — the host dispatches this on a ~60s
     /// interval, so the common case is cheap (a snapshot scan, no egress).
     pub async fn tick_agents(ctx: Ctx<Self>) -> Result<Vec<String>, String> {
+        // Demo backfill (issue #111): an existing vault whose Automerge doc
+        // predates the smart-object demos never received them (genesis-only
+        // `Default` seeds don't reach an already-created doc). Backfill them on
+        // the first tick after restart — idempotent (sealed by the `demos_seeded`
+        // marker), lock-safe (pure, no I/O), and BEFORE the orphan-prune below so
+        // the freshly-seeded demo objects' backing chips already exist. A no-op
+        // once sealed (the common case), so it costs one flag check per tick.
+        ctx.mutate("tick_agents", |m| {
+            m.backfill_demos();
+        })
+        .map_err(|e| e.to_string())?;
+
         // Stray-ref reconcile up front (self-cleaning, like the link index): an
         // invocation whose inline link was deleted should not keep firing.
         ctx.mutate("tick_agents", Self::prune_orphan_invocations)
@@ -1052,6 +1101,21 @@ impl Vault {
         let mut out = self.objects.clone().unwrap_or_default();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out
+    }
+
+    /// Idempotent **smart-object demo backfill** (issue #111): seed the SO2
+    /// reactive rollup demo + the SO3 meal-plan recipe→grocery→cart demo into a
+    /// vault whose Automerge doc predates the demos (genesis-only `Default` seeds
+    /// never reach a doc created before they existed). Reuses the genesis builders
+    /// so a fresh vault and a backfilled one converge byte-for-byte.
+    ///
+    /// A no-op once seeded — auto-invoked from the first `tick_agents`, also
+    /// exposed here for a manual trigger + tests. Only what is ABSENT (matched by
+    /// stable id) is added (a user-edited demo is never clobbered); the marker is
+    /// then sealed, so deleting a demo afterwards does NOT re-create it. Returns
+    /// whether it seeded anything (`false` ⇒ already sealed).
+    pub fn seed_demos(&mut self) -> bool {
+        self.backfill_demos()
     }
 
     /// Prune store entries whose backing `obj://<id>` link no longer exists in
@@ -1410,6 +1474,50 @@ impl Vault {
     fn recompute_reactive_graph(&mut self) {
         let objs = self.objects.get_or_insert_with(Vec::new);
         reactive::recompute(objs);
+    }
+
+    /// Idempotent **demo backfill** (issue #111): create any MISSING smart-object
+    /// demo files + objects on a vault whose Automerge doc predates the demos
+    /// (genesis-only `Default` seeds never reach a doc created before they
+    /// existed). Reuses the genesis builders ([`demo_seed_objects`] /
+    /// [`demo_seed_files`]) — one source of truth with `Default`, so a fresh vault
+    /// and a backfilled one converge byte-for-byte.
+    ///
+    /// A no-op once `demos_seeded` is `Some(true)` — so deleting a demo after the
+    /// backfill ran does NOT bring it back. Within a run we add only what is
+    /// ABSENT (matched by stable id), so a user-edited demo is never clobbered.
+    /// Pure + lock-safe (no I/O, no clock): runs the reactivity recompute after
+    /// seeding so the derived demo objects carry their cached values, then seals
+    /// the marker. Returns whether it seeded anything (false ⇒ already sealed).
+    fn backfill_demos(&mut self) -> bool {
+        if self.demos_seeded == Some(true) {
+            return false;
+        }
+
+        // Add only the objects whose stable id is absent — never clobber a
+        // user-edited demo object.
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        for obj in demo_seed_objects() {
+            if !objs.iter().any(|o| o.id == obj.id) {
+                objs.push(obj);
+            }
+        }
+
+        // Add only the files whose stable id is absent — never clobber a
+        // user-edited demo note.
+        for file in demo_seed_files() {
+            if !self.files.iter().any(|f| f.id == file.id) {
+                self.files.push(file);
+            }
+        }
+
+        // Recompute so the (possibly freshly-added) derived demo objects carry
+        // their cached values, exactly as genesis does.
+        self.recompute_reactive_graph();
+
+        // Seal: never re-seed, even if a demo is deleted later (#111).
+        self.demos_seeded = Some(true);
+        true
     }
 
     /// Backfill the stored `next_fire_ms` for any index entry that still has it
@@ -2171,6 +2279,7 @@ mod tests {
             mcp_grants: Some(Vec::new()),
             executions: Some(Vec::new()),
             objects: Some(Vec::new()),
+            demos_seeded: Some(true),
         }
     }
 
@@ -3398,6 +3507,188 @@ mod tests {
             v.toggle_recipe_in_plan("recipe-pasta".into(), "recipe-salad".into(), true)
                 .is_err()
         );
+    }
+
+    // ── Demo backfill (#111): existing vaults get the smart-object demos ──────
+
+    /// An "old" vault: the doc predates the smart-object demos — no demo files,
+    /// no demo objects, and `demos_seeded` hydrated as `None` (the `missing`
+    /// attribute). Eligible for the idempotent `seed_demos` backfill.
+    fn old_vault_without_demos() -> Vault {
+        Vault {
+            files: vec![MdFile {
+                id: "welcome".to_string(),
+                path: "welcome.md".to_string(),
+                body: welcome_body(),
+                created_at_ms: 0,
+                updated_at_ms: None,
+            }],
+            agent_runs: Some(Vec::new()),
+            invocations: Some(Vec::new()),
+            mcp_grants: Some(Vec::new()),
+            executions: Some(Vec::new()),
+            objects: Some(Vec::new()),
+            demos_seeded: None,
+        }
+    }
+
+    #[test]
+    fn fresh_default_is_sealed_and_carries_the_demos() {
+        // A fresh vault already has the demos from `Default`, so it is born
+        // sealed (`demos_seeded == Some(true)`) and `seed_demos` is a no-op that
+        // leaves it byte-identical.
+        let mut v = Vault::default();
+        assert_eq!(v.demos_seeded, Some(true));
+        let proj = |v: &Vault| -> Vec<(String, String, String)> {
+            v.list_objects()
+                .into_iter()
+                .map(|o| (o.id, o.obj_type, o.data))
+                .collect()
+        };
+        let before = proj(&v);
+        let files_before: Vec<String> = v.list_files().into_iter().map(|f| f.path).collect();
+        assert!(!v.seed_demos(), "a sealed vault must not re-seed");
+        assert_eq!(proj(&v), before, "objects unchanged");
+        assert_eq!(
+            v.list_files()
+                .into_iter()
+                .map(|f| f.path)
+                .collect::<Vec<_>>(),
+            files_before,
+            "files unchanged"
+        );
+    }
+
+    #[test]
+    fn backfill_seeds_demos_and_seals_with_caches_computed() {
+        let mut v = old_vault_without_demos();
+        assert!(v.list_objects().is_empty());
+
+        assert!(v.seed_demos(), "an unsealed vault seeds on first call");
+        assert_eq!(v.demos_seeded, Some(true), "marker is sealed after seeding");
+
+        // Both demo notes (with their inline chips) now exist.
+        let paths: Vec<String> = v.list_files().into_iter().map(|f| f.path).collect();
+        assert!(paths.contains(&"smart-objects-demo.md".to_string()));
+        assert!(paths.contains(&"meal-plan-demo.md".to_string()));
+
+        // The SO2 rollup carries its computed cache (3 + 5 = 8), not a blank.
+        let total = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "demo-total")
+            .expect("the backfilled derived rollup");
+        let cached: serde_json::Value = serde_json::from_str(&total.data).unwrap();
+        assert_eq!(cached["sum"], 8);
+        assert!(total.derive_error.is_none());
+
+        // The SO3 grocery-list is derived + non-empty (the chain recomputed).
+        let grocery = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "meal-plan-grocery")
+            .expect("the backfilled derived grocery-list");
+        assert!(grocery.derive.is_some());
+        assert!(grocery.data.contains("olive oil"));
+    }
+
+    #[test]
+    fn second_seed_call_is_a_noop() {
+        let mut v = old_vault_without_demos();
+        assert!(v.seed_demos());
+        let proj = |v: &Vault| -> Vec<(String, String, String)> {
+            v.list_objects()
+                .into_iter()
+                .map(|o| (o.id, o.obj_type, o.data))
+                .collect()
+        };
+        let after_first = proj(&v);
+        // A second call (e.g. a second tick) seeds nothing.
+        assert!(!v.seed_demos(), "marker sealed → no-op");
+        assert_eq!(proj(&v), after_first);
+    }
+
+    #[test]
+    fn deleting_a_demo_after_seeding_does_not_re_create_it() {
+        // The #111 requirement: once sealed, a deleted demo stays deleted.
+        let mut v = old_vault_without_demos();
+        assert!(v.seed_demos());
+
+        let demo = v
+            .list_files()
+            .into_iter()
+            .find(|f| f.path == "meal-plan-demo.md")
+            .expect("seeded meal-plan demo");
+        v.delete_file(demo.id).unwrap();
+        assert!(
+            !v.list_files().iter().any(|f| f.path == "meal-plan-demo.md"),
+            "demo deleted"
+        );
+
+        // A subsequent seed (the next tick) must NOT bring it back.
+        assert!(!v.seed_demos(), "marker stays sealed");
+        assert!(
+            !v.list_files().iter().any(|f| f.path == "meal-plan-demo.md"),
+            "deleted demo must NOT be re-created"
+        );
+    }
+
+    #[test]
+    fn backfill_does_not_clobber_a_user_edited_demo() {
+        // If a demo file/object already exists (matched by stable id), the
+        // backfill leaves it untouched and only adds what is absent.
+        let mut v = old_vault_without_demos();
+        // The user already has a smart-objects-demo.md (edited body, same id).
+        v.files.push(MdFile {
+            id: "smart-objects-demo".to_string(),
+            path: "smart-objects-demo.md".to_string(),
+            body: "# my own notes\n".to_string(),
+            created_at_ms: 0,
+            updated_at_ms: None,
+        });
+        assert!(v.seed_demos());
+
+        // The existing file is preserved verbatim (not duplicated, not replaced).
+        let matches: Vec<MdFile> = v
+            .list_files()
+            .into_iter()
+            .filter(|f| f.path == "smart-objects-demo.md")
+            .collect();
+        assert_eq!(matches.len(), 1, "no duplicate");
+        assert_eq!(matches[0].body, "# my own notes\n", "user body preserved");
+        // The absent meal-plan demo is still added.
+        assert!(v.list_files().iter().any(|f| f.path == "meal-plan-demo.md"));
+    }
+
+    #[test]
+    fn backfilled_vault_byte_matches_a_fresh_default() {
+        // Determinism: a backfilled vault's demo objects are byte-identical to a
+        // fresh `Default`'s (same ids, types, derive specs, computed caches), so
+        // the two replicas converge.
+        let mut backfilled = old_vault_without_demos();
+        assert!(backfilled.seed_demos());
+        let fresh = Vault::default();
+
+        let proj = |v: &Vault| -> Vec<(String, String, String, Option<String>)> {
+            v.list_objects()
+                .into_iter()
+                .map(|o| (o.id, o.obj_type, o.data, o.derive_error))
+                .collect()
+        };
+        assert_eq!(proj(&backfilled), proj(&fresh), "objects byte-match");
+
+        // The demo note bodies match too (same source-of-truth builders).
+        let body = |v: &Vault, path: &str| -> String {
+            v.list_files()
+                .into_iter()
+                .find(|f| f.path == path)
+                .map(|f| f.body)
+                .unwrap_or_default()
+        };
+        for path in ["smart-objects-demo.md", "meal-plan-demo.md"] {
+            assert_eq!(body(&backfilled, path), body(&fresh, path), "{path} body");
+        }
+        assert_eq!(backfilled.demos_seeded, fresh.demos_seeded);
     }
 
     // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────

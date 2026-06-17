@@ -202,6 +202,42 @@ the doc.)
 The recipe → grocery-list reactive demo (§6) remains the SO3/SO4 acceptance
 vehicle; SO2's `rollup` demo proves the engine end to end now.
 
+### Seeding the demos onto existing vaults — the `seed_demos` backfill (#111)
+
+The demos (the SO2 `smart-objects-demo.md` rollup note + the SO3
+`meal-plan-demo.md` chain, with their backing objects) are seeded by the
+deterministic `Default` — but `Default` is the **genesis commit only**. A vault
+whose Automerge doc was created *before* a demo existed never receives it: a new
+`Default` seed does not retro-apply to an already-created replicated doc. So the
+live vault had no `smart-objects-demo.md` / `meal-plan-demo.md`.
+
+The fix is an **idempotent backfill**, component-only:
+
+- **Marker.** `Vault.demos_seeded: Option<bool>` (`#[autosurgeon(missing =
+  "Option::default")]`). A fresh `Default` already carries the demos, so it is
+  born `Some(true)` (sealed — it must NOT re-seed). An older doc hydrates `None`
+  → eligible for backfill.
+- **One source of truth.** `Default` and the backfill both build the demo
+  objects/files from the shared `demo_seed_objects()` / `demo_seed_files()`
+  builders (extracted from the old inline `Default`), so a fresh vault and a
+  backfilled one are **byte-identical** (same ids, paths, derive specs, and —
+  after the post-seed `reactive::recompute` — the same cached derived values).
+- **`seed_demos` (idempotent).** When `demos_seeded != Some(true)`, it adds only
+  the demo files/objects whose stable id is **absent** (never clobbering a
+  user-edited demo), runs the reactivity recompute so the derived demo objects
+  carry their caches, then **seals** `demos_seeded = Some(true)`. Once sealed it
+  is a no-op — so **deleting a demo afterwards does NOT bring it back** (the #111
+  requirement). Exposed as an action (manual trigger + tests).
+- **Auto-invoke.** The first `tick_agents` (already driven host-side on a ~60s
+  cadence by `tangram-host/src/scheduler.rs`) runs the backfill in its own
+  lock-safe `Ctx::mutate` before the orphan-prune — so an existing vault
+  backfills within one scheduler tick of the next restart, with no host change.
+  After the first run the marker is sealed and the per-tick cost is one flag
+  check.
+
+Redeploy: rebuild the `tangram` wasm component + restart `tangram-host`; the
+backfill then runs on the first tick.
+
 ---
 
 ## 5. SOx / Build-3 — the action pipeline (PLANNED, maps to `tangram-automation`)
