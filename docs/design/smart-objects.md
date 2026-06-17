@@ -331,6 +331,24 @@ The Handoff-2 flagship demo, staged:
     use, never bypassed. Default-deny: no `[automation]` ceiling ⇒ the route
     403s. The component reaches it over loopback (already in `allow_hosts`) via
     a declared `[[apps.tangram.calls]]` `GET 127.0.0.1 /recipe/fetch` grant.
+    - **Any-host `*` ceiling (operator decision).** To let a user import a
+      recipe from ANY site by URL, the operator may set
+      `browser_domains_ceiling = ["*"]`. The `*` is a deliberate **widening of
+      the allowlist only**: the `BrowserEgressGate` still canonicalizes and
+      fails closed on an unparseable URL, still honors its denylist, and still
+      fires call-level path-denies — `*` bypasses ONLY the
+      `NotAllowlisted` check (one tested behavior, `tangram-automation`
+      `egress.rs`). This is safe for THIS surface because the fetch is a
+      read-only, user-initiated GET, size/time-capped in `recipe.rs`
+      (`MAX_BODY_BYTES` / `FETCH_TIMEOUT`).
+    - **Process-once / opaque-to-LLM stance.** The fetched page is
+      **LLM-normalized EXACTLY ONCE** (Normalize, below) into the fixed,
+      structured ingredient model; the SO2/SO3 reactive chain over that model is
+      **pure** — it never re-feeds the raw page (or the normalized fields) back
+      into an LLM. So even under `*`, an untrusted recipe page cannot steer a
+      later LLM step. Making the ingested page data **fully opaque to downstream
+      LLMs** (a stronger guarantee than process-once) is a further hardening,
+      tracked as **future work** — NOT built in this pass.
   - **Extract (component, pure).** `ingest::extract_recipe_jsonld` pulls the
     schema.org/Recipe JSON-LD from the returned HTML — handles `@graph`, top-
     level arrays, multiple `<script type="application/ld+json">` blocks, and

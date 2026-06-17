@@ -209,4 +209,32 @@ mod tests {
             Decision::Deny(_)
         ));
     }
+
+    #[test]
+    fn gate_with_wildcard_ceiling_allows_any_host() {
+        // The operator-accepted broad recipe-fetch egress: a non-empty ceiling
+        // of just `["*"]` builds a gate (default-deny is NOT triggered — the
+        // ceiling is non-empty), and that gate's any-host wildcard admits any
+        // recipe host the operator never enumerated.
+        let settings = AutomationSettings {
+            enabled: true,
+            browser_domains_ceiling: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let gate = recipe_gate(&settings).expect("non-empty ceiling → a gate");
+        assert_eq!(
+            gate.decide("GET", "https://cooking.nytimes.com/recipes/123"),
+            Decision::Allow
+        );
+        assert_eq!(
+            gate.decide("GET", "https://random-recipe-site.example/r/pasta"),
+            Decision::Allow
+        );
+        // The wildcard widens the allowlist only — an unparseable URL still
+        // fails closed (the canonicalizer is never disabled).
+        assert!(matches!(
+            gate.decide("GET", "https://attacker.com\u{0}.evil/x"),
+            Decision::Deny(_)
+        ));
+    }
 }

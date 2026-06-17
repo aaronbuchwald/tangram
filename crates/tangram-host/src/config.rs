@@ -1552,6 +1552,35 @@ mod tests {
             gate.decide("GET", "https://evil.test/x"),
             tangram_automation::egress::Decision::Deny(_)
         ));
+
+        // Any-host `*` ceiling (the operator-accepted broad recipe-fetch egress,
+        // smart-objects §6): a non-empty ceiling of just `["*"]` still derives a
+        // gate (NOT default-deny — the ceiling is non-empty), and that gate
+        // admits any host (the wildcard widens the allowlist) while still
+        // failing closed on an unparseable URL.
+        let config = HostConfig::parse(
+            r#"
+            [automation]
+            enabled = true
+            browser_domains_ceiling = ["*"]
+
+            [apps.a]
+            component = "a.wasm"
+            ui = "u"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.automation.browser_domains_ceiling, vec!["*"]);
+        let gate =
+            crate::recipe::recipe_gate(&config.automation).expect("a non-empty ceiling → a gate");
+        assert_eq!(
+            gate.decide("GET", "https://cooking.nytimes.com/recipes/9"),
+            tangram_automation::egress::Decision::Allow
+        );
+        assert!(matches!(
+            gate.decide("GET", "https://attacker.com\u{0}.evil/x"),
+            tangram_automation::egress::Decision::Deny(_)
+        ));
     }
 
     #[test]

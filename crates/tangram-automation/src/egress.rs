@@ -60,9 +60,30 @@ pub struct PathDeny {
 
 /// The browser session's egress policy. Default-deny: an empty `allow` list
 /// permits no navigation (today's `allow_hosts` posture — kept).
+///
+/// ## The any-host `*` wildcard
+///
+/// When the allow ceiling contains the literal `"*"`, the gate treats ANY host
+/// as allowlisted — it bypasses ONLY the [`DenyReason::NotAllowlisted`] check.
+/// This is a deliberate operator decision to widen the allowlist (e.g. accept
+/// broad recipe-fetch egress); it is the ONLY thing `*` does. Every other fence
+/// is unchanged and STILL APPLIES under `*`:
+///   * canonicalization + fail-closed-on-unparseable (a `*` gate still denies an
+///     unparseable URL with [`DenyReason::Unparseable`]);
+///   * the denylist (`deny`) — a denylisted host is STILL denied
+///     ([`DenyReason::Denied`]) even with `*` on the allowlist (denylist wins);
+///   * the call-level path-denies (`path_denies`) — a `/gp/buy/` path-deny STILL
+///     fires ([`DenyReason::PathDenied`]) under `*`.
+///
+/// `*` widens the allowlist; it does NOT disable the deny rules, the path-denies,
+/// or the canonicalizer.
 #[derive(Debug, Clone, Default)]
 pub struct BrowserEgressGate {
     allow: BTreeSet<String>,
+    /// The any-host `*` wildcard: when set, every (canonicalizable, non-denied)
+    /// host is treated as allowlisted. Set when the input ceiling contained the
+    /// literal `"*"`. Bypasses ONLY the `NotAllowlisted` check.
+    any_host: bool,
     deny: BTreeSet<String>,
     path_denies: Vec<PathDeny>,
 }
@@ -70,14 +91,24 @@ pub struct BrowserEgressGate {
 impl BrowserEgressGate {
     /// Build a gate from an allowlist (and optional denylist). Hosts are
     /// canonicalized on the way in so the stored set matches canonicalized
-    /// request hosts byte-for-byte.
+    /// request hosts byte-for-byte. The literal `"*"` in the allowlist is not a
+    /// host — it sets the any-host wildcard (see the type docs); it does not
+    /// canonicalize and is not stored as a host.
     pub fn new(
         allow: impl IntoIterator<Item = impl Into<String>>,
         deny: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let mut any_host = false;
         let allow = allow
             .into_iter()
-            .filter_map(|h| canonicalize_host(&h.into()))
+            .filter_map(|h| {
+                let h = h.into();
+                if h.trim() == "*" {
+                    any_host = true;
+                    return None;
+                }
+                canonicalize_host(&h)
+            })
             .collect();
         let deny = deny
             .into_iter()
@@ -85,6 +116,7 @@ impl BrowserEgressGate {
             .collect();
         Self {
             allow,
+            any_host,
             deny,
             path_denies: Vec::new(),
         }
@@ -110,9 +142,10 @@ impl BrowserEgressGate {
     /// Decide on a request by its raw method + URL, exactly as the browser
     /// route hook sees it. Canonicalizes both, then:
     ///   1. unparseable host → Deny(Unparseable)  (fail closed)
-    ///   2. host on denylist → Deny(Denied)       (denylist wins)
-    ///   3. host not on allowlist → Deny(NotAllowlisted)
-    ///   4. a call-level path-deny matches → Deny(PathDenied)
+    ///   2. host on denylist → Deny(Denied)       (denylist wins, even under `*`)
+    ///   3. host not on allowlist → Deny(NotAllowlisted)  (bypassed by the
+    ///      any-host `*` wildcard — and ONLY this step is)
+    ///   4. a call-level path-deny matches → Deny(PathDenied)  (still fires under `*`)
     ///   5. otherwise Allow
     pub fn decide(&self, method: &str, url: &str) -> Decision {
         let Some((host, path)) = canonicalize_url(url) else {
@@ -121,7 +154,10 @@ impl BrowserEgressGate {
         if self.deny.contains(&host) {
             return Decision::Deny(DenyReason::Denied);
         }
-        if !self.allow.contains(&host) {
+        // The any-host `*` wildcard widens the allowlist to every host — it
+        // bypasses ONLY this NotAllowlisted check. The denylist above and the
+        // path-denies below still apply.
+        if !self.any_host && !self.allow.contains(&host) {
             return Decision::Deny(DenyReason::NotAllowlisted);
         }
         let method = method.to_ascii_uppercase();
@@ -380,6 +416,100 @@ mod tests {
         assert_eq!(
             g.decide("GET", "https://www.amazon.com/"),
             Decision::Deny(DenyReason::NotAllowlisted)
+        );
+    }
+
+    // ── any-host `*` wildcard (operator-accepted broad recipe-fetch egress) ──
+
+    fn any_host_gate() -> BrowserEgressGate {
+        // `*` widens the allowlist; the denylist still names a blocked host.
+        BrowserEgressGate::new(["*"], ["evil.example"])
+    }
+
+    #[test]
+    fn wildcard_allows_arbitrary_host() {
+        let g = any_host_gate();
+        // Any recipe host the operator never enumerated is now allowed.
+        assert_eq!(
+            g.decide("GET", "https://cooking.nytimes.com/recipes/123"),
+            Decision::Allow
+        );
+        assert_eq!(
+            g.decide("GET", "https://random-recipe-site.example/r/pasta"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn wildcard_still_denies_denylisted_host() {
+        // `*` widens the ALLOWLIST only — a denylisted host is STILL denied
+        // (the denylist wins over the wildcard, just as it wins over an
+        // explicit allowlist entry).
+        let g = any_host_gate();
+        assert_eq!(
+            g.decide("GET", "https://evil.example/x"),
+            Decision::Deny(DenyReason::Denied)
+        );
+    }
+
+    #[test]
+    fn wildcard_still_fires_path_deny() {
+        // A call-level path-deny (the order-submit backstop) STILL fires under
+        // `*` — the wildcard does not disable path-denies.
+        let g = BrowserEgressGate::new(["*"], std::iter::empty::<String>()).deny_path(
+            "www.amazon.com",
+            "*",
+            "/gp/buy/",
+        );
+        // A normal page on the same host is allowed (wildcard admits the host)…
+        assert_eq!(
+            g.decide("GET", "https://www.amazon.com/gp/cart/view.html"),
+            Decision::Allow
+        );
+        // …but the checkout path is still denied at the network layer.
+        assert_eq!(
+            g.decide(
+                "POST",
+                "https://www.amazon.com/gp/buy/spc/handlers/display.html"
+            ),
+            Decision::Deny(DenyReason::PathDenied)
+        );
+        // And the dot-segment/percent bypass still normalizes into the deny.
+        assert_eq!(
+            g.decide("POST", "https://www.amazon.com/gp/cart/../buy/now"),
+            Decision::Deny(DenyReason::PathDenied)
+        );
+    }
+
+    #[test]
+    fn wildcard_still_fails_closed_on_unparseable() {
+        // The NUL-byte SOCKS5 differential is unparseable → fail closed even
+        // under `*` (the wildcard never disables the canonicalizer).
+        let g = any_host_gate();
+        assert_eq!(
+            g.decide("GET", "https://attacker.com\u{0}.evil/x"),
+            Decision::Deny(DenyReason::Unparseable)
+        );
+        // A CR/LF-smuggling URL is also unparseable → fail closed under `*`.
+        assert_eq!(
+            g.decide("GET", "https://recipe.test/\r\nGET /admin"),
+            Decision::Deny(DenyReason::Unparseable)
+        );
+    }
+
+    #[test]
+    fn wildcard_mixed_with_explicit_hosts() {
+        // `*` alongside enumerated hosts: the wildcard dominates the allowlist
+        // (any host allowed) while the canonicalization of the explicit entries
+        // is unaffected.
+        let g = BrowserEgressGate::new(["www.allrecipes.com", "*"], std::iter::empty::<String>());
+        assert_eq!(
+            g.decide("GET", "https://www.allrecipes.com/recipe/1"),
+            Decision::Allow
+        );
+        assert_eq!(
+            g.decide("GET", "https://some-other-host.test/r"),
+            Decision::Allow
         );
     }
 

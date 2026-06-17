@@ -329,6 +329,19 @@ enforcement points, one shared policy + canonicalizer.
   *narrow* further, never widen (§4.3).
 - **Default-deny:** empty allowlist ⇒ no navigation (today's `allow_hosts`
   default posture — keep).
+- **Any-host `*` ceiling (operator opt-in):** `browser_domains_ceiling = ["*"]`
+  widens the allowlist to **any host** — an explicit operator decision (e.g. the
+  Smart Objects SO4 recipe-URL import, where a user may paste a recipe from any
+  site; `docs/design/smart-objects.md` §6). `*` is a deliberate widening of the
+  ALLOWLIST ONLY: the `BrowserEgressGate` still canonicalizes + fails closed on
+  an unparseable URL, still honors the denylist (a denylisted host is still
+  denied), and still fires call-level path-denies (the `/gp/buy/` order-submit
+  backstop, §5.1). It bypasses ONLY the `NotAllowlisted` check — a single tested
+  behavior (`tangram-automation/src/egress.rs`). For surfaces that LLM-process
+  the fetched content, the safe posture is **process-once**: normalize the page
+  exactly once into a fixed structured model and keep the reactive chain pure
+  (no LLM re-feed of the raw page); making the ingested data fully opaque to
+  downstream LLMs is further hardening, tracked as future work.
 
 ---
 

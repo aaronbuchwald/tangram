@@ -86,13 +86,27 @@ key      = "env://DEEPSEEK_API_KEY"         # env-ref; put DEEPSEEK_API_KEY=sk-�
 # needs only `enabled = true` + a `browser_domains_ceiling` listing the recipe
 # hosts you allow — NOT the `driver` (that's for the deferred JS-render path).
 # With no ceiling, /recipe/fetch is disabled (403, default-deny).
-# [automation]
-# enabled = true
-# driver = "/usr/local/bin/playwright"   # default: `playwright` on $PATH (JS-render path)
+[automation]
+enabled = true
 # headless = true                         # false = headed (attended record)
 # run_timeout_secs = 300
-# SO4 recipe-fetch ceiling — the recipe hosts a pasted URL may be fetched from:
-# browser_domains_ceiling = ["www.allrecipes.com", "www.seriouseats.com", "cooking.nytimes.com"]
+#
+# Recipe-URL import egress ceiling. `"*"` = ANY host: the operator has ACCEPTED
+# broad recipe-fetch egress so a user can import a recipe from any site by URL.
+# This is safe for THIS surface because the recipe fetch is a read-only,
+# user-initiated GET, size/time-capped in `tangram-host/src/recipe.rs`
+# (MAX_BODY_BYTES, FETCH_TIMEOUT). The fetched page is LLM-normalized EXACTLY
+# ONCE into the fixed, structured ingredient model; the reactive chain over that
+# model is pure (no LLM re-feed of the raw page), so an untrusted page can't
+# steer later LLM steps. NOTE: `*` widens the egress ALLOWLIST only — the
+# `tangram-automation` browser egress gate still canonicalizes + fails closed on
+# unparseable URLs, still honors its denylist, and still fires call-level
+# path-denies. Making ingested page data fully opaque to downstream LLMs is a
+# further hardening, tracked as future work (see docs/design/smart-objects.md
+# §6, docs/design/task-automation-browser.md). To NARROW this back to specific
+# recipe hosts, replace `["*"]` with an explicit list, e.g.:
+#   browser_domains_ceiling = ["www.allrecipes.com", "cooking.nytimes.com"]
+browser_domains_ceiling = ["*"]
 
 [apps.registry]
 component = "target/wasm32-wasip2/release/registry.wasm"
