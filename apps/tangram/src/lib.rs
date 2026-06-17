@@ -25,6 +25,7 @@
 use tangram::prelude::*;
 
 mod agents;
+mod ingest;
 mod mcp_client;
 mod reactive;
 
@@ -91,6 +92,16 @@ pub struct Vault {
     /// scalar (the model `Default` must stay deterministic).
     #[autosurgeon(missing = "Option::default")]
     demos_seeded: Option<bool>,
+    /// Smart Objects SO4 — the recipe-URL ingestion **cache**, keyed by
+    /// `URL + JSON-LD hash` (`ingest::cache_key`). A re-import of the same URL
+    /// whose page content is unchanged is a CACHE HIT — it returns the already-
+    /// created recipe object id WITHOUT a re-fetch / re-LLM-call (the design's
+    /// "re-import is free"). A changed page (new JSON-LD ⇒ new hash) misses and
+    /// re-normalizes. A deterministic `Vec` (not a `HashMap`). Absent on
+    /// documents written by older binaries (the `missing` attribute hydrates the
+    /// empty default).
+    #[autosurgeon(missing = "Option::default")]
+    recipe_cache: Option<Vec<RecipeCacheEntry>>,
 }
 
 /// One **smart object** (Smart Objects SO1) — a typed node in the replicated
@@ -194,6 +205,21 @@ pub struct ObjectType {
     label: String,
     /// The default `render` hint for a freshly-created object of this type.
     render: String,
+}
+
+/// One entry in the Smart Objects SO4 **recipe-import cache** (`recipe_cache`):
+/// a successful URL ingestion, keyed by `URL + JSON-LD hash`. A re-import that
+/// matches `key` returns `object_id` directly — no re-fetch, no re-LLM call (the
+/// design's "re-import is free"). Keyed by the stable `key` (a deterministic
+/// `Vec`, not a `HashMap`).
+#[model]
+pub struct RecipeCacheEntry {
+    /// The cache key = `sha256(url + extracted JSON-LD)` (`ingest::cache_key`).
+    key: String,
+    /// The imported recipe URL (provenance / a human-readable cache index).
+    url: String,
+    /// The id of the `recipe` smart object this import produced.
+    object_id: String,
 }
 
 /// The seed type registry (Smart Objects SO1): 1–2 trivial types so the
@@ -428,6 +454,8 @@ impl Default for Vault {
             // A fresh vault already carries the demos (above), so it must NOT
             // re-seed: born sealed. Older docs hydrate `None` → eligible.
             demos_seeded: Some(true),
+            // SO4: the recipe-import cache is born empty (deterministic genesis).
+            recipe_cache: Some(Vec::new()),
         }
     }
 }
@@ -1179,6 +1207,139 @@ impl Vault {
         // in topological order, in this same commit (the chain recalculates live).
         self.recompute_reactive_graph();
         Ok(())
+    }
+
+    /// Smart Objects SO4 — **recipe URL ingestion**. Turn a pasted recipe URL
+    /// into a normalized `recipe` smart object (the SO3 shape) that flows into
+    /// the reactive grocery→cart chain. The full pipeline + where each step runs
+    /// is documented in `ingest.rs`:
+    ///
+    /// 1. **Fetch** the page HTML via the HOST's `/recipe/fetch` route (a
+    ///    component cannot fetch arbitrary URLs — the host does it through the
+    ///    `tangram-automation` egress gate). Resolved OUTSIDE the lock.
+    /// 2. **Extract** the schema.org/Recipe JSON-LD (pure). No JSON-LD ⇒ a clear
+    ///    error (the LLM page-parse fallback is a documented SO4 stub).
+    /// 3. **Cache check** by `URL + JSON-LD hash`: a hit returns the existing
+    ///    recipe object id with NO LLM call (re-import is free).
+    /// 4. **Normalize** the free-text ingredients via DeepSeek (host-injected
+    ///    key; fixture-testable), then **create** the `recipe` object + record
+    ///    the cache entry — committed in one `Ctx::mutate` (lock-discipline-safe;
+    ///    the LLM resolves before the lock is taken).
+    ///
+    /// `object_id` is the UUID the UI minted for the inline `obj://<id>` chip
+    /// (so the chip and the object agree). Returns the created/cached object id.
+    pub async fn ingest_recipe(
+        ctx: Ctx<Self>,
+        url: String,
+        object_id: String,
+    ) -> Result<String, String> {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("recipe url must not be empty".to_string());
+        }
+        let object_id = object_id.trim().to_string();
+        if object_id.is_empty() {
+            return Err("object id must not be empty".to_string());
+        }
+
+        // (1) Fetch the page + (2) extract — all OUTSIDE the lock (the host fetch
+        // is an await; CLAUDE.md forbids holding the store lock across it).
+        let html = ingest::fetch_page_html(&url).await?;
+        let extracted =
+            ingest::extract_recipe_jsonld(&html).ok_or_else(ingest::Fallback::message)?;
+
+        // (3) Cache check by URL + JSON-LD hash — a hit short-circuits the LLM.
+        let key = ingest::cache_key(&url, &extracted);
+        let state = ctx.state().map_err(|e| e.to_string())?;
+        if let Some(hit) = state.recipe_cache_hit(&key) {
+            return Ok(hit);
+        }
+
+        // (4) Normalize via the live LLM (host-injected key), still OUTSIDE the
+        // lock. The model matches the agent default.
+        let recipe = ingest::Llm::Live {
+            model: agents::DEFAULT_MODEL.to_string(),
+        }
+        .normalize(&extracted, &url)
+        .await?;
+
+        // Commit: create the recipe object + record the cache entry atomically.
+        ctx.mutate("ingest_recipe", |m| {
+            m.apply_recipe_ingest(&object_id, &key, &url, &recipe);
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(object_id)
+    }
+
+    /// Return a cached recipe import's object id for `key`, if the cache holds a
+    /// matching entry AND the object it points at still exists (a deleted object
+    /// invalidates the cache row so a re-import re-creates it). The pure
+    /// cache-lookup half of [`Self::ingest_recipe`] (snapshot-readable + tested).
+    fn recipe_cache_hit(&self, key: &str) -> Option<String> {
+        let object_id = self
+            .recipe_cache
+            .as_ref()?
+            .iter()
+            .find(|e| e.key == key)
+            .map(|e| e.object_id.clone())?;
+        // Only a hit if the object is still present (otherwise re-create).
+        self.objects
+            .as_ref()
+            .is_some_and(|objs| objs.iter().any(|o| o.id == object_id))
+            .then_some(object_id)
+    }
+
+    /// Create (or overwrite) the `recipe` smart object from a normalized import
+    /// and record the cache entry — the commit half of [`Self::ingest_recipe`].
+    /// Pure (no I/O): a snapshot transition + the SO2 reactive recompute, so it
+    /// is unit-testable with a fixture-normalized recipe (no network). Mirrors
+    /// `create_object`'s upsert + recompute, plus the cache bookkeeping.
+    fn apply_recipe_ingest(
+        &mut self,
+        object_id: &str,
+        key: &str,
+        url: &str,
+        recipe: &ingest::NormalizedRecipe,
+    ) {
+        let data = serde_json::to_string(recipe).unwrap_or_default();
+        // Upsert the recipe object (idempotent on id — a re-ingest of the same
+        // chip overwrites). A definition object: no `derive`.
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        if let Some(existing) = objs.iter_mut().find(|o| o.id == object_id) {
+            existing.obj_type = "recipe".to_string();
+            existing.data = data;
+            existing.render = "card".to_string();
+            existing.derive = None;
+            existing.derive_error = None;
+        } else {
+            objs.push(SmartObject {
+                id: object_id.to_string(),
+                obj_type: "recipe".to_string(),
+                data,
+                links: Vec::new(),
+                render: "card".to_string(),
+                derive: None,
+                derive_error: None,
+            });
+        }
+
+        // Record the cache entry (idempotent on key — a re-normalize updates the
+        // object id it points at).
+        let cache = self.recipe_cache.get_or_insert_with(Vec::new);
+        if let Some(entry) = cache.iter_mut().find(|e| e.key == key) {
+            entry.url = url.to_string();
+            entry.object_id = object_id.to_string();
+        } else {
+            cache.push(RecipeCacheEntry {
+                key: key.to_string(),
+                url: url.to_string(),
+                object_id: object_id.to_string(),
+            });
+        }
+
+        // SO2: a new recipe definition recomputes any grocery-list that includes
+        // it (when later toggled in) — keep the graph consistent in this commit.
+        self.recompute_reactive_graph();
     }
 
     // ── Tools/MCP T1: per-agent MCP access requests + user approval ───────────
@@ -2280,6 +2441,7 @@ mod tests {
             executions: Some(Vec::new()),
             objects: Some(Vec::new()),
             demos_seeded: Some(true),
+            recipe_cache: Some(Vec::new()),
         }
     }
 
@@ -3509,6 +3671,125 @@ mod tests {
         );
     }
 
+    // ── Smart Objects SO4: recipe URL ingestion (the commit + cache halves) ───
+    //
+    // The fetch + LLM legs are I/O (covered by `ingest.rs`'s pure + fixture-LLM
+    // tests); here we test the pure component halves of `ingest_recipe`:
+    // `apply_recipe_ingest` (the recipe-object shape it writes) and
+    // `recipe_cache_hit` (the URL+JSON-LD-hash cache hit/miss).
+
+    /// A fixture-normalized recipe (what `ingest::Llm` would return), so the
+    /// commit half is testable with no network.
+    fn fixture_recipe() -> ingest::NormalizedRecipe {
+        ingest::NormalizedRecipe {
+            name: "Tomato Pasta".into(),
+            servings: 2,
+            ingredients: vec![
+                ingest::NormalizedIngredient {
+                    canonical_name: "olive oil".into(),
+                    quantity: 2.0,
+                    unit: "tbsp".into(),
+                    category: "Oils".into(),
+                    raw: "2 tbsp olive oil".into(),
+                },
+                ingest::NormalizedIngredient {
+                    canonical_name: "tomato".into(),
+                    quantity: 3.0,
+                    unit: "ct".into(),
+                    category: "Produce".into(),
+                    raw: "3 tomatoes, chopped".into(),
+                },
+            ],
+            source: "https://example.com/pasta".into(),
+        }
+    }
+
+    #[test]
+    fn ingest_writes_a_recipe_object_in_the_so3_shape() {
+        let mut v = Vault::default();
+        let recipe = fixture_recipe();
+        v.apply_recipe_ingest("imported-1", "k1", "https://example.com/pasta", &recipe);
+
+        let obj = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "imported-1")
+            .expect("the imported recipe object exists");
+        assert_eq!(obj.obj_type, "recipe");
+        assert_eq!(obj.render, "card");
+        assert!(
+            obj.derive.is_none(),
+            "a recipe is a definition, not derived"
+        );
+
+        // The data is the SO3 recipe shape the grocery-list derive reads.
+        let data: serde_json::Value = serde_json::from_str(&obj.data).unwrap();
+        assert_eq!(data["name"], "Tomato Pasta");
+        assert_eq!(data["servings"], 2);
+        assert_eq!(data["source"], "https://example.com/pasta");
+        assert_eq!(data["ingredients"][0]["canonicalName"], "olive oil");
+        assert_eq!(data["ingredients"][0]["unit"], "tbsp");
+        assert_eq!(data["ingredients"][1]["canonicalName"], "tomato");
+        // Provenance is carried through.
+        assert_eq!(data["ingredients"][1]["raw"], "3 tomatoes, chopped");
+    }
+
+    #[test]
+    fn ingest_records_a_cache_entry_and_hits_on_re_import() {
+        let mut v = Vault::default();
+        // Miss before any import.
+        assert_eq!(v.recipe_cache_hit("k1"), None);
+
+        v.apply_recipe_ingest(
+            "imported-1",
+            "k1",
+            "https://example.com/pasta",
+            &fixture_recipe(),
+        );
+        // Hit after the import — re-import is free (returns the same object id).
+        assert_eq!(v.recipe_cache_hit("k1"), Some("imported-1".to_string()));
+        // A different key still misses.
+        assert_eq!(v.recipe_cache_hit("k2"), None);
+    }
+
+    #[test]
+    fn cache_is_invalidated_when_the_object_is_deleted() {
+        let mut v = Vault::default();
+        v.apply_recipe_ingest(
+            "imported-1",
+            "k1",
+            "https://example.com/pasta",
+            &fixture_recipe(),
+        );
+        assert_eq!(v.recipe_cache_hit("k1"), Some("imported-1".to_string()));
+        // Deleting the recipe object invalidates the cache row → a re-import must
+        // re-create it (no stale hit pointing at a vanished object).
+        v.delete_object("imported-1".into()).unwrap();
+        assert_eq!(v.recipe_cache_hit("k1"), None);
+    }
+
+    #[test]
+    fn an_imported_recipe_flows_into_the_grocery_chain() {
+        // The SO4→SO3 bridge: an ingested recipe, when toggled into the seeded
+        // meal-plan grocery-list, contributes to the reactive aggregate.
+        let mut v = Vault::default();
+        v.apply_recipe_ingest(
+            "imported-pasta",
+            "k1",
+            "https://example.com/pasta",
+            &fixture_recipe(),
+        );
+        // Baseline olive oil over the three seeded recipes is 5 tbsp.
+        let base = grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp").unwrap();
+        v.toggle_recipe_in_plan("meal-plan-grocery".into(), "imported-pasta".into(), true)
+            .unwrap();
+        // The imported recipe adds its 2 tbsp olive oil to the live aggregate.
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(base + 2.0)
+        );
+    }
+
     // ── Demo backfill (#111): existing vaults get the smart-object demos ──────
 
     /// An "old" vault: the doc predates the smart-object demos — no demo files,
@@ -3529,6 +3810,7 @@ mod tests {
             executions: Some(Vec::new()),
             objects: Some(Vec::new()),
             demos_seeded: None,
+            recipe_cache: None,
         }
     }
 

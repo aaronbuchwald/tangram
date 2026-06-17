@@ -15,7 +15,8 @@ unchanged, and converge onto this primitive in a **later** checkpoint (§7). Thi
 doc owns the primitive, the locked Handoff-2 decisions, and the SO checkpoint
 roadmap. SO1 (the foundation: the object store + the `@` chip + the basic popup +
 typed links) is the first shippable slice and what this doc's "as built" notes
-describe; SO2–SO4 are specified here as plans.
+describe; SO2 (reactivity), SO3 (recipe types + the reactive chain), and SO4
+(recipe URL ingestion) are **built**; SO5 (the §8 mockup + cart-fill) is planned.
 
 ---
 
@@ -301,15 +302,57 @@ The Handoff-2 flagship demo, staged:
   "auto-synced". Per-type chip glyphs (🍳 / 🛒 / 🧺 / 🔗 / 🏷 / ∑) resolve from
   the store (#109 fix 2); deleting a chip strips its whole inline span (#109
   fix 1).
-- **SO4 — ingestion + the full §8 mockup + the cart-fill action (PLANNED).**
-  Recipe **URL ingestion**: create a `recipe` from a URL via a
-  `tangram-automation` **browser fetch** + an **LLM normalization** to
-  schema.org/Recipe (the AI-enabled-component pattern — fetch → prompt → write
-  the normalized object to the store, not an egress of user data); free-text
-  ingredient-line canonicalization to the pantry vocabulary the SO3 derives
-  already aggregate over. The pixel-exact **§8 two-column + chat-panel** mockup
-  over the wired primitive, and the "add to cart" **action**-role object/stub
-  (§5) that runs the pipeline to a cart-preview run object.
+- **SO4 — recipe URL ingestion (AS BUILT).** Paste a recipe URL → a normalized
+  `recipe` smart object that flows into the SO3 reactive grocery→cart chain. The
+  **§8 two-column + chat-panel mockup and the "add to cart" action-role
+  object/stub move to SO5** (below) — SO4 lands the ingestion pipeline (the
+  handoff's flagged core technical risk).
+
+  **The architecture split (LOCKED): host fetches, the component
+  extracts + normalizes + dispatches.** A WASM component cannot fetch arbitrary
+  recipe URLs (its egress is a closed, operator-declared allow-list), so
+  ingestion is **host-mediated**, but normalization + the object write stay
+  in-component (the AI-enabled-component pattern — write the normalized object to
+  the store, not an egress of user data):
+  - **Fetch (host).** A new loopback route `GET /recipe/fetch?url=…`
+    (`tangram-host/src/recipe.rs`) performs the read-only, user-initiated,
+    bounded page GET, **gated by the `tangram-automation` browser egress gate**
+    (`BrowserEgressGate`) built from the operator policy ceiling
+    `[automation].browser_domains_ceiling` over the shared `tangram-egress`
+    canonicalizer — the SAME fence the component egress + the manifest verifier
+    use, never bypassed. Default-deny: no `[automation]` ceiling ⇒ the route
+    403s. The component reaches it over loopback (already in `allow_hosts`) via
+    a declared `[[apps.tangram.calls]]` `GET 127.0.0.1 /recipe/fetch` grant.
+  - **Extract (component, pure).** `ingest::extract_recipe_jsonld` pulls the
+    schema.org/Recipe JSON-LD from the returned HTML — handles `@graph`, top-
+    level arrays, multiple `<script type="application/ld+json">` blocks, and
+    `@type` as string or array.
+  - **Normalize (component, LLM — the core risk).** `ingest::Llm` turns each
+    free-text `recipeIngredient` ("2 tbsp olive oil", "½ medium onion, diced")
+    into `{canonicalName, quantity, unit, category, raw}` via DeepSeek (the same
+    host-injected-key egress the agent run uses; `[[apps.tangram.calls]] POST
+    api.deepseek.com`). A small canonical dictionary (`ingest::canonicalize`)
+    collapses `tomato`/`tomatoes`, `scallion`/`green onion`, `garbanzo`/
+    `chickpea`, … so the SO3 grocery-list does not fragment. **Fixture-testable**
+    (`Llm::Fixture` / `Llm::Live` — the morning-brief precedent): CI is offline
+    + deterministic, NO live LLM/network.
+  - **Create + cache (component).** `ingest_recipe(url, object_id)` creates the
+    `recipe` object (the SO3 `data` shape, so it flows into the chain when
+    toggled into a meal plan) and records a `recipe_cache` entry keyed by
+    **URL + JSON-LD hash** — a re-import of an unchanged page is a CACHE HIT (no
+    re-fetch, no re-LLM-call). The cache row is invalidated if its object is
+    deleted.
+  - **UI.** Picking `@recipe` prompts "Import a recipe — paste a URL, or Cancel
+    to add one manually": a URL imports (a placeholder chip relabels when the
+    object lands); Cancel falls through to the SO3 manual path (never lost).
+  - **DEFERRED (the seam is wired):** the no-JSON-LD **LLM page-parse fallback**
+    is a clearly-marked stub (`ingest::Fallback` — a clear, actionable error
+    today); `tangram-host/src/recipe.rs::fetch_recipe_html` is the single choke
+    point a later change routes through the `tangram-automation` **browser-driver
+    runner** for JS-rendered pages. Neither needs new policy — the egress gate,
+    the request shape, and the operator ceiling are already in place. The live
+    `tangram-automation` browser SUPERVISION (`runner.rs`) is not wired into the
+    host for SO4; the static-page GET is the smallest correct end-to-end slice.
 
 ---
 
@@ -336,11 +379,12 @@ The Handoff-2 flagship demo, staged:
 | **SO1** | **Primitive foundation + reconciled doc** | this doc; the `objects` store + `SmartObject`/`ObjLink` model; `create/update/delete/list/reconcile_objects` + the type registry (seed `note-ref`/`tag`); the `@` type-picker (in the single autocompletion override); the generalized atomic `obj://` chip; the basic object popup; typed links + orphan reconcile. Objects are **inert**. | **THIS CHECKPOINT** |
 | **SO2** | **Reactivity engine** | the `derive`/`derive_error` model + a topological recompute engine (`reactive.rs`), cached-inline derived, cycle detection, the single-doc simplification, a real derived type (`rollup`) + a seeded live demo, and the chip/popup derived rendering (§4). | **DONE** |
 | **SO3** | **Recipe types + the reactive chain** | the `recipe`/`grocery-list`/`cart-preview` types + the two derive kinds (`reactive::grocery`, with unit reconciliation); the seeded reactive `meal-plan-demo.md` (3 overlapping recipes → derived grocery-list → derived cart-preview); the Include-in-plan toggle (`toggle_recipe_in_plan`) driving the live recompute; functional §8-styled rendering (recipe card / grocery table / cart-by-aisle, purple accent); the two #109 fix-forwards (whole-span delete-strip + per-type chip glyph) (§6). | **DONE** |
-| **SO4** | **Ingestion + the §8 mockup + cart-fill** | recipe URL ingestion (`tangram-automation` browser fetch + LLM schema.org/Recipe normalization + free-text ingredient canonicalization); the pixel-exact §8 two-column + chat-panel mockup; the "add to cart" action-role object/stub (§5) (§6). | PLANNED |
+| **SO4** | **Recipe URL ingestion** | host-mediated fetch (`GET /recipe/fetch`, gated by the `tangram-automation` egress ceiling) + in-component schema.org/Recipe JSON-LD extraction + LLM ingredient normalization (DeepSeek, fixture-testable) + the canonical dictionary + the `recipe` object & URL+JSON-LD-hash cache + the `@recipe` import affordance (§6). Deferred (seam wired): the no-JSON-LD LLM page-parse fallback + the JS-render browser-driver fetch. | **DONE** |
+| **SO5** | **The §8 mockup + cart-fill** | the pixel-exact §8 two-column + chat-panel mockup over the wired primitive; the "add to cart" action-role object/stub (§5) that runs the pipeline to a cart-preview run object. | PLANNED |
 | — | **Agent/Run convergence + versioning** | re-home agents/runs onto the primitive behind the unchanged surface; versioning (§7). | LATER / PARALLEL |
 
 The **action pipeline** (§5) lands with the action role — Build-3/SOx — alongside
-SO3/SO4 (the cart-preview action needs the recipe types to act on).
+SO5 (the cart-preview action needs the recipe types to act on).
 
 ---
 

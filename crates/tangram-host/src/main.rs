@@ -36,6 +36,7 @@ mod mcp;
 mod multitenant;
 mod oauth;
 mod policy;
+mod recipe;
 mod registry;
 mod routes;
 mod runtime;
@@ -138,6 +139,12 @@ pub struct Host {
     /// Read once at startup (not converged live, like `[gateway]`), behind
     /// the loopback/auth gate in `main`.
     pub artifacts_upload_enabled: bool,
+    /// Smart Objects SO4: the recipe-URL fetch egress gate, built from
+    /// `[automation].browser_domains_ceiling` (the operator policy ceiling).
+    /// `None` ⇒ recipe fetch is disabled (automation off / empty ceiling), so
+    /// `GET /recipe/fetch` 403s — default-deny. Read once at startup like
+    /// `[gateway]` (not converged live). See `crate::recipe`.
+    pub recipe_gate: Option<tangram_automation::egress::BrowserEgressGate>,
 }
 
 impl Host {
@@ -791,6 +798,19 @@ async fn main() -> anyhow::Result<()> {
     let gateway_settings = HostConfig::load(&config_path)
         .map(|config| config.gateway)
         .unwrap_or_default();
+
+    // Smart Objects SO4: the recipe-URL fetch egress gate, built once from the
+    // operator's `[automation].browser_domains_ceiling` (the policy ceiling that
+    // bounds which hosts a pasted recipe URL may be fetched from). `None` ⇒ no
+    // recipe-fetch capability (default-deny), `GET /recipe/fetch` then 403s.
+    let recipe_gate = HostConfig::load(&config_path)
+        .ok()
+        .and_then(|config| recipe::recipe_gate(&config.automation));
+    if recipe_gate.is_some() {
+        tracing::info!(
+            "recipe fetch: /recipe/fetch is enabled (gated by [automation].browser_domains_ceiling)"
+        );
+    }
     let mut internal_listener = None;
     let mcp_gateway = if gateway_settings.enabled {
         match gateway_settings.resolve_binary() {
@@ -865,6 +885,7 @@ async fn main() -> anyhow::Result<()> {
         fetcher: fetch::Fetcher::new(fetch::default_cache_dir()),
         secrets,
         artifacts_upload_enabled,
+        recipe_gate,
     });
     host.converge().await;
 

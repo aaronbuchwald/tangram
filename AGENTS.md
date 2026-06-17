@@ -115,7 +115,8 @@ symlink to `.agents/skills`.
   is `docs/design/embedded-runs.md`. **Smart objects** generalize that chip
   system into one typed-graph primitive (`objects` store + `@` type-picker +
   atomic `obj://` chip + typed links; built alongside agents/runs) —
-  `docs/design/smart-objects.md` (SO1 foundation; SO2–SO4 roadmap). A
+  `docs/design/smart-objects.md` (SO1–SO4 built — foundation, reactivity,
+  recipe chain, recipe URL ingestion; SO5 = §8 mockup + cart-fill). A
   right-sidebar **app chat** wires DeepSeek to the active app's MCP tools via
   a browser MCP client + tool-calling loop (`ui/src/{chatPanel,mcpClient,llmChat}.ts`)
 - Two execution paths to serve all apps on one port (README "Run them all in

@@ -25,6 +25,7 @@ edition = "2024"
 
 [workspace.dependencies]
 tangram = { path = "crates/tangram" }
+tangram-automation = { path = "crates/tangram-automation" }
 tangram-core = { path = "crates/tangram-core" }
 tangram-egress = { path = "crates/tangram-egress" }
 tangram-macros = { path = "crates/tangram-macros" }

@@ -79,12 +79,20 @@ key      = "env://DEEPSEEK_API_KEY"         # env-ref; put DEEPSEEK_API_KEY=sk-�
 # navigation): list the absolute maximum any automation may touch on this
 # host. Credentials come from the op:// resolver (OP_SERVICE_ACCOUNT_TOKEN in
 # .env, scoped to a single 1Password item). Read at startup; restart to change.
+#
+# Smart Objects SO4 (recipe URL ingestion) reuses THIS ceiling as the operator
+# policy that bounds which hosts a pasted recipe URL may be fetched from
+# (GET /recipe/fetch, `tangram-host/src/recipe.rs`). The SO4 static-page fetch
+# needs only `enabled = true` + a `browser_domains_ceiling` listing the recipe
+# hosts you allow — NOT the `driver` (that's for the deferred JS-render path).
+# With no ceiling, /recipe/fetch is disabled (403, default-deny).
 # [automation]
 # enabled = true
-# driver = "/usr/local/bin/playwright"   # default: `playwright` on $PATH
+# driver = "/usr/local/bin/playwright"   # default: `playwright` on $PATH (JS-render path)
 # headless = true                         # false = headed (attended record)
 # run_timeout_secs = 300
-# browser_domains_ceiling = ["www.amazon.com", "fls-na.amazon.com"]
+# SO4 recipe-fetch ceiling — the recipe hosts a pasted URL may be fetched from:
+# browser_domains_ceiling = ["www.allrecipes.com", "www.seriouseats.com", "cooking.nytimes.com"]
 
 [apps.registry]
 component = "target/wasm32-wasip2/release/registry.wasm"
@@ -161,6 +169,17 @@ path = "/nutrition/mcp"
 method = "POST"
 host = "127.0.0.1"
 path = "/notes/mcp"
+
+# Smart Objects SO4 (recipe URL ingestion): the component cannot fetch arbitrary
+# recipe URLs (this closed call list IS the egress allow-list), so it GETs the
+# HOST's loopback `/recipe/fetch?url=…` route — the host performs the read-only,
+# user-initiated fetch through the `tangram-automation` egress gate and returns
+# the page HTML for in-component JSON-LD extraction + LLM normalization. The
+# host fence (127.0.0.1, above) composes with this call grant.
+[[apps.tangram.calls]]
+method = "GET"
+host = "127.0.0.1"
+path = "/recipe/fetch"
 
 # The AUTHORITY (host:port) the agent tool-loop addresses an app's MCP endpoint
 # under — the loop builds `http://<authority>/<server>/mcp`. Defaults to the

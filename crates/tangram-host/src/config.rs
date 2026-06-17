@@ -1219,6 +1219,15 @@ pub struct HostConfig {
     /// (see `crate::gateway`). Applied at startup, not converged live.
     #[serde(default)]
     pub gateway: crate::gateway::GatewaySettings,
+    /// `[automation]` — the host-side browser/fetch automation substrate
+    /// (ADR-0010, `docs/design/task-automation-browser.md`). Smart Objects SO4
+    /// uses its `browser_domains_ceiling` as the operator-policy ceiling that
+    /// gates the user-initiated, read-only recipe-URL fetch (`/recipe/fetch`),
+    /// via the shared `tangram-automation::BrowserEgressGate` over the one
+    /// `tangram-egress` canonicalizer. Default-off; an empty ceiling denies
+    /// every fetch (default-deny). Read once at startup, not converged live.
+    #[serde(default)]
+    pub automation: tangram_automation::runner::AutomationSettings,
     /// `[artifacts]` — WASM blob upload + hosting (Phase S2b). DEFAULT OFF.
     #[serde(default)]
     pub artifacts: ArtifactsConfig,
@@ -1510,6 +1519,39 @@ mod tests {
         // No [gateway] section → disabled (direct serving, today's behavior).
         let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
         assert!(!config.gateway.enabled);
+    }
+
+    #[test]
+    fn parses_automation_section_and_derives_the_recipe_gate() {
+        // Smart Objects SO4: the [automation] ceiling drives the recipe-fetch
+        // gate. No section → disabled (default-deny, no recipe fetch).
+        let config = HostConfig::parse("[apps.a]\ncomponent = \"a\"\nui = \"u\"").unwrap();
+        assert!(!config.automation.enabled);
+        assert!(crate::recipe::recipe_gate(&config.automation).is_none());
+
+        // Enabled with a ceiling → a gate that admits ONLY the ceiling hosts.
+        let config = HostConfig::parse(
+            r#"
+            [automation]
+            enabled = true
+            browser_domains_ceiling = ["www.allrecipes.com"]
+
+            [apps.a]
+            component = "a.wasm"
+            ui = "u"
+            "#,
+        )
+        .unwrap();
+        assert!(config.automation.enabled);
+        let gate = crate::recipe::recipe_gate(&config.automation).expect("a ceiling → a gate");
+        assert_eq!(
+            gate.decide("GET", "https://www.allrecipes.com/recipe/123"),
+            tangram_automation::egress::Decision::Allow
+        );
+        assert!(matches!(
+            gate.decide("GET", "https://evil.test/x"),
+            tangram_automation::egress::Decision::Deny(_)
+        ));
     }
 
     #[test]

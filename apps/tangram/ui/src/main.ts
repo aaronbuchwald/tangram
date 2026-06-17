@@ -46,6 +46,8 @@ import {
   parseObjectLinks,
 } from "./objectLink";
 import { isObjectPopupOpen, openObjectPopup } from "./objectPopup";
+import { IMPORTING_LABEL, validateRecipeUrl } from "./recipeImport";
+import type { EditorView } from "@codemirror/view";
 import { calloutBlockId } from "./callout";
 import {
   type CreatedAgent,
@@ -1336,6 +1338,13 @@ function renderNoteTab(fileId: string) {
     // type's human label; `data`/`links` start empty (edited via the popup).
     (view, objType, from, to) => {
       const id = crypto.randomUUID();
+      // Smart objects SO4: picking `@recipe` offers a URL IMPORT (paste a recipe
+      // URL → host fetch + schema.org JSON-LD + LLM normalization → recipe
+      // object). Leaving the prompt blank falls through to the SO3 manual path.
+      if (objType.name === "recipe") {
+        void importRecipeFlow(view, objType, id, from, to);
+        return;
+      }
       const link = buildObjectLink(objType.label, id);
       view.dispatch({
         changes: { from, to, insert: link },
@@ -1364,6 +1373,72 @@ function renderNoteTab(fileId: string) {
   wrap.appendChild(renderBacklinksPanel(fileId));
   contentEl.appendChild(wrap);
   activeEditor = state;
+}
+
+// Smart objects SO4 — the recipe-URL import flow. Picking `@recipe` prompts for
+// a URL; pasting one runs `ingest_recipe` (host fetch → schema.org JSON-LD →
+// LLM normalize → recipe object, cached by URL+JSON-LD hash). A placeholder chip
+// is inserted immediately and relabels to the imported recipe name when the
+// object lands on the next vault state. Leaving the prompt BLANK falls through to
+// the SO3 manual path (an empty recipe + the popup), so the manual entry path is
+// never lost. No live calls in tests — the flow is driven by `vault.ingestRecipe`.
+async function importRecipeFlow(
+  view: EditorView,
+  objType: ObjectType,
+  id: string,
+  from: number,
+  to: number,
+): Promise<void> {
+  const raw = await promptName({
+    title: "Import a recipe",
+    hint: "Paste a recipe URL — or Cancel to add one manually.",
+    placeholder: "https://example.com/recipes/…",
+    confirmLabel: "Import",
+    // The modal blocks confirming an empty value, so a non-empty URL is the only
+    // way to confirm; Cancel (null) is the manual path below.
+    validate: (value) => {
+      const r = validateRecipeUrl(value);
+      return "error" in r ? r.error : null;
+    },
+  });
+
+  // Cancelled (Esc / backdrop / Cancel) → the SO3 MANUAL path: insert an empty
+  // recipe object the user fills via the popup. The manual entry path is never
+  // lost; importing is the additive SO4 affordance.
+  if (raw === null) {
+    const link = buildObjectLink(objType.label, id);
+    view.dispatch({
+      changes: { from, to, insert: link },
+      selection: { anchor: from + link.length },
+    });
+    view.focus();
+    void vault
+      .createObject(id, objType.name, "", [], objType.render)
+      .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+    return;
+  }
+
+  const checked = validateRecipeUrl(raw);
+  if ("error" in checked) {
+    showError(checked.error);
+    return;
+  }
+
+  // Insert a placeholder chip immediately so the import is visible in the doc;
+  // it relabels to the recipe name when the normalized object arrives.
+  const link = buildObjectLink(IMPORTING_LABEL, id);
+  view.dispatch({
+    changes: { from, to, insert: link },
+    selection: { anchor: from + link.length },
+  });
+  view.focus();
+  try {
+    await vault.ingestRecipe(checked.url, id);
+    // The recipe object now exists in the store; the next vault state rebuilds
+    // the chips (relabeling this one via the object index) — no extra work here.
+  } catch (e) {
+    showError(`recipe import failed: ${String(e instanceof Error ? e.message : e)}`);
+  }
 }
 
 // Repopulate the active note's Backlinks panel from the live index, in place

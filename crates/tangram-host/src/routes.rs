@@ -225,6 +225,14 @@ pub fn root_router(host: Arc<Host>, via_gateway: bool) -> Router {
         // routes (like `/mcp`) so they take precedence over `/<app>/` dispatch.
         .route("/llm", axum::routing::any(llm_proxy))
         .route("/llm/{*rest}", axum::routing::any(llm_proxy))
+        // Smart Objects SO4: the host-mediated recipe-URL fetch plane
+        // (`crate::recipe`). The `tangram` component cannot fetch arbitrary
+        // recipe URLs (closed egress allow-list), so it POSTs the pasted URL
+        // here over loopback; the host performs the read-only, user-initiated
+        // fetch GATED by the `tangram-automation` egress ceiling and returns the
+        // page HTML for in-component JSON-LD extraction + LLM normalization.
+        // Explicit route (like `/mcp`) so it precedes `/<app>/` dispatch.
+        .route("/recipe/fetch", get(crate::recipe::recipe_fetch))
         // The artifact store (Phase S2b): upload a WASM blob (the host
         // computes its sha and content-addresses it) and serve it back by
         // hash. Both routes consult `host.artifacts_upload_enabled` — when

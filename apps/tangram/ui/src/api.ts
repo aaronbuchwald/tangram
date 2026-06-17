@@ -250,6 +250,13 @@ export const vault = {
     }) as Promise<null>,
   deleteObject: (id: string) => postAction("delete_object", { id }) as Promise<null>,
   listObjects: () => postAction("list_objects", {}) as Promise<SmartObject[]>,
+  // Smart objects SO4: ingest a recipe URL into a normalized `recipe` object.
+  // The host fetches the page (gated egress), the component extracts schema.org
+  // JSON-LD + LLM-normalizes the ingredients, creates the recipe object keyed by
+  // `object_id` (the UUID the UI minted for the inline chip), and caches by
+  // URL+JSON-LD hash (re-import is free). Returns the created/cached object id.
+  ingestRecipe: (url: string, object_id: string) =>
+    postAction("ingest_recipe", { url, object_id }) as Promise<string>,
   objectTypes: () => postAction("object_types", {}) as Promise<ObjectType[]>,
   // SO3: toggle a recipe in/out of a derived grocery-list's included set (drives
   // the live recompute of the grocery-list + downstream cart-preview).
