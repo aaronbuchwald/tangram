@@ -11,8 +11,11 @@ import { describe, expect, it } from "vitest";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import {
+  DERIVED_BADGE,
+  DERIVED_ERROR_GLYPH,
   OBJECT_GLYPH,
   buildObjectLink,
+  derivedValueLabel,
   parseObjectLinks,
 } from "./objectLink";
 import { MdEditor } from "./editor";
@@ -121,6 +124,108 @@ describe("object chip atomicity + render (DOM)", () => {
     const editor = mountWithObjectChip(null);
     const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
     expect(chip?.dataset.objectType).toBe("unknown");
+    editor.destroy();
+  });
+});
+
+// ── SO2: derived-value rendering + the cycle/error chip ───────────────────────
+
+describe("derivedValueLabel (the cached value shown inline)", () => {
+  it("renders a rollup sum as its number", () => {
+    expect(derivedValueLabel('{"op":"sum","sum":8,"count":2}')).toBe("8");
+  });
+  it("renders a rollup count when there is no sum", () => {
+    expect(derivedValueLabel('{"op":"count","count":3}')).toBe("3");
+  });
+  it("joins concat values", () => {
+    expect(derivedValueLabel('{"op":"concat","values":["a","b"]}')).toBe("a, b");
+  });
+  it("falls back to raw payload for non-JSON and `…` for empty", () => {
+    expect(derivedValueLabel("plain text")).toBe("plain text");
+    expect(derivedValueLabel("")).toBe("…");
+  });
+});
+
+describe("derived chip render (DOM)", () => {
+  it("shows the computed value + the auto badge for a healthy derived object", () => {
+    const editor = mountWithObjectChip(
+      obj({
+        type: "rollup",
+        data: '{"op":"sum","sum":8,"count":2}',
+        derive: { kind: "rollup", deps: ["a", "b"] },
+        derive_error: null,
+      }),
+    );
+    const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
+    expect(chip?.classList.contains("cm-object-link-derived")).toBe(true);
+    expect(chip?.dataset.derived).toBe("auto");
+    expect(chip?.textContent).toContain("8");
+    expect(chip?.textContent).toContain(DERIVED_BADGE);
+    editor.destroy();
+  });
+
+  it("shows an error chip for a derived object in a cycle", () => {
+    const editor = mountWithObjectChip(
+      obj({
+        type: "rollup",
+        derive: { kind: "rollup", deps: ["self"] },
+        derive_error: "dependency cycle: this derived object depends on itself",
+      }),
+    );
+    const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
+    expect(chip?.classList.contains("cm-object-link-derived-error")).toBe(true);
+    expect(chip?.dataset.derived).toBe("error");
+    expect(chip?.textContent).toContain(DERIVED_ERROR_GLYPH);
+    expect(chip?.title).toContain("cycle");
+    editor.destroy();
+  });
+
+  it("renders a plain (non-derived) object with no badge or error class", () => {
+    const editor = mountWithObjectChip(obj({ type: "tag" }));
+    const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
+    expect(chip?.classList.contains("cm-object-link-derived")).toBe(false);
+    expect(chip?.classList.contains("cm-object-link-derived-error")).toBe(false);
+    expect(chip?.dataset.derived).toBeUndefined();
+    expect(chip?.textContent).not.toContain(DERIVED_BADGE);
+    editor.destroy();
+  });
+
+  it("updates the rendered value when the resolved object changes (live)", () => {
+    // The chip reads the store through the resolver and rebuilds on a
+    // refreshObjectChips nudge — the SO2 live-update path.
+    let record: SmartObject = obj({
+      type: "rollup",
+      data: '{"sum":1}',
+      derive: { kind: "rollup", deps: ["a"] },
+    });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const editor = new MdEditor(
+      host,
+      DOC,
+      () => {},
+      () => {},
+      () => false,
+      () => false,
+      () => [],
+      () => null,
+      () => {},
+      () => [],
+      () => null,
+      () => {},
+      () => null,
+      () => {},
+      () => {},
+      () => [],
+      () => {},
+      () => {},
+      () => record,
+    );
+    expect(editor.view.dom.querySelector(".cm-object-link")?.textContent).toContain("1");
+    // The engine recomputed the dependency → the cached value changed.
+    record = obj({ type: "rollup", data: '{"sum":42}', derive: { kind: "rollup", deps: ["a"] } });
+    editor.refreshObjectChips();
+    expect(editor.view.dom.querySelector(".cm-object-link")?.textContent).toContain("42");
     editor.destroy();
   });
 });

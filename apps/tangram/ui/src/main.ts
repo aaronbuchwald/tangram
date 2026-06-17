@@ -1112,9 +1112,9 @@ function openObjectLinkPopup(id: string): void {
     return;
   }
   openObjectPopup(obj, {
-    onSave: (objType, data, links, render) => {
+    onSave: (objType, data, links, render, derive) => {
       void vault
-        .updateObject(id, objType, data, links, render)
+        .updateObject(id, objType, data, links, render, derive)
         .catch((e) => showError(String(e instanceof Error ? e.message : e)));
       activeEditor?.editor.focus();
     },
@@ -1663,6 +1663,10 @@ function onVaultState(state: VaultState) {
   // objects change without an editor re-mount; the component prunes orphans
   // server-side.
   objectIndex = buildObjectIndex(state.objects ?? []);
+  // Smart objects SO2: a derived chip's cached value can change with NO doc edit
+  // (the reactivity engine recomputed a dependency — possibly on another replica),
+  // so nudge the active editor's object chips to rebuild from the fresh store.
+  activeEditor?.editor.refreshObjectChips();
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();

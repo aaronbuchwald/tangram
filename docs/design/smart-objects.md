@@ -30,7 +30,7 @@ SmartObject {
   data:   string            // a JSON / opaque payload, shape owned by the type
   links:  ObjLink[]         // first-class, typed edges (may cross documents)
   render: string            // the inline/detail presentation hint (chip|panel|table|…)
-  derive? // SO2 — a recompute rule (a derived object's data is computed)
+  derive? // SO2 (built) — DeriveSpec{kind,deps,params}; a derived object's data is computed (cached inline)
   act?    // SOx — an action binding (maps to tangram-automation, §5)
 }
 
@@ -76,7 +76,7 @@ onto a Tangram pillar instead — the same discipline as embedded-runs §2:
 | **Chip is atomic & click-to-edit** | a CM6 **atomic widget** — the replaced range is in `EditorView.atomicRanges`, so the cursor *steps over* it; a click opens the **object popup** (view/edit `type`/`data`/`links`). The chip is opaque by design — we do NOT reveal raw source on cursor entry. A per-type glyph distinguishes it from the agent `⚡` chip. |
 | **Object store is the source of truth; the document holds references** | the markdown carries `{id}`; `type`/`data`/`links`/`render` live in the replicated store, keyed by id. |
 | **Links are first-class, typed, may cross documents** | `links: Vec<ObjLink{rel, target, url?}>` — an edge in the graph, independent of where the chip sits. Cross-document is free: the target is an object id, not a doc offset. |
-| **Reactivity (derived objects recompute)** | **SO2** (§4) — a topological recompute engine. Inert in SO1: an object's `data` is whatever was written. |
+| **Reactivity (derived objects recompute)** | **SO2 (built)** (§4) — a topological recompute engine in the component (`reactive.rs`), cached inline in the doc, cycle-detecting. The Handoff-2 push-in-doc/stale-cross-doc split **collapses** to one in-doc graph (single replicated doc; §4). Inert in SO1. |
 | **Action pipeline (explore→compile→run→verify→repair)** | **Build-3/SOx** (§5) — mapped onto the existing `tangram-automation` crate (browser/credential substrate), NOT a new runtime. |
 | **Versioning** | **DEFERRED** — same posture as embedded-runs §4. SO1 objects reference types by name; no semver/pinning/snapshots. |
 | **Secrets** | host-side only (ADR-0005) — any action-role egress injects credentials at the boundary; never in the object `data` or the replicated doc. |
@@ -103,8 +103,9 @@ types.** Objects are **inert** (their `data` is whatever was written).
 - Actions, mirroring the invocations index:
   - `create_object(id, obj_type, data, links, render)` — idempotent on `id`
     (a re-create overwrites). Defaults `render` to the type's default when blank.
+    (SO2 adds a trailing `derive` arg + triggers a reactive recompute.)
   - `update_object(id, obj_type, data, links, render)` — edit in place; errors
-    if absent.
+    if absent. (SO2 adds a trailing `derive` arg + triggers a reactive recompute.)
   - `delete_object(id)` — remove by id; errors if absent.
   - `list_objects()` — the store, sorted by id (deterministic).
   - `reconcile_objects()` — prune objects whose `obj://<id>` reference no longer
@@ -142,25 +143,64 @@ the invocations index. SO1 links are **inert** — no reactivity reads them yet.
 
 ---
 
-## 4. SO2 — the reactivity engine (PLANNED)
+## 4. SO2 — the reactivity engine (AS BUILT)
 
-Make **derived** objects live. A derived object carries a `derive` rule; its
-`data` is *computed* from its `links`' targets rather than written.
+**Derived** objects are now live. A derived object carries a `derive` descriptor;
+its `data` is *computed* from its dependency objects rather than written, cached
+inline, and recomputed on every mutation. **As shipped:**
 
-- **Topological recompute.** Build the dependency DAG from `links` (a derived
-  object depends on each `target`). On a source change, recompute downstream in
-  topological order. **Cycle detection** rejects a `derive` graph that would
-  loop (fail closed, surface the cycle in the popup).
-- **Push-in-doc / stale-cross-doc.** A change pushes an eager recompute to
-  derived objects in the **same document**; cross-document dependents are marked
-  **stale** and recompute lazily on next render/open (bounded blast radius — a
-  vault-wide eager cascade is the failure mode we avoid).
-- **Cached-inline derived.** A derived chip renders its last-computed value
-  inline (cached), with a freshness marker; recompute updates the cache + chip.
-- This is a **pure, in-component** engine (a state transition over the object
-  store) — no egress, no I/O — so it stays wasm-clean and lock-discipline-safe.
+- **The `derive` descriptor on the model.** `SmartObject` gained
+  `derive: Option<DeriveSpec>` + `derive_error: Option<String>` (both
+  `#[autosurgeon(missing)]`, deterministic defaults — agents/runs + SO1 plain
+  objects are unaffected). `DeriveSpec { kind, deps, params }` names a typed
+  derive `kind` + the dependency object ids + optional kind params; the actual
+  computation is a pure Rust `fn(deps) -> data` in the derive registry
+  (`reactive::compute_derived`), since `derive` is pure.
+- **Topological recompute, in the component.** `reactive::recompute`
+  (`apps/tangram/src/reactive.rs`) builds the dependency DAG from the derived
+  objects' `deps`, topologically sorts it (Kahn's algorithm), and recomputes each
+  derived object's `data` in dependency order — so a chain A → B → C settles in
+  one pass. It runs in the SAME `Ctx::mutate` as every object mutation
+  (`create/update/delete_object` + `reconcile_objects`/the agent-tick prune), so
+  the cached results commit atomically with the change.
+- **Cycle detection (never loops).** A node Kahn can't drain is in (or downstream
+  of) a cycle; the engine marks each such derived object with a `derive_error`
+  (cached in the doc) and SKIPS its recompute — it terminates, and the cycle
+  surfaces as an error chip + a red banner in the popup (§2). An unrelated cycle
+  is isolated: healthy derived objects still recompute.
+- **Cached-inline derived.** The computed `data` is written back into the
+  object's `data` (in the doc), so a derived chip renders its last-computed value
+  inline WITHOUT the runtime (portable/readable). The chip shows the value + a
+  "derived / auto" `↻` badge; it updates live when a dependency changes (the
+  state frame pushes object updates, and a `refreshObjectChips` editor effect
+  rebuilds the chips even when the local doc body is unchanged — e.g. a recompute
+  driven by another replica).
+- **A real derived type.** `rollup` (registered in `KNOWN_OBJECT_TYPES`)
+  aggregates over its dependency objects — `count`, `sum` over a numeric `field`,
+  or `concat` over a field. The deterministic `Default` (genesis) seeds a working
+  demo: a `smart-objects-demo.md` note with two source `tag` chips
+  (`demo-apples` qty 3, `demo-oranges` qty 5) and a derived `rollup` chip
+  (`demo-total`) summing them to 8 — edit a source's `qty` and the total
+  recomputes live in the doc.
+- **Pure + deterministic.** No egress, no I/O, no clock — wasm-clean,
+  lock-discipline-safe, and byte-identical across replicas (the engine runs at
+  genesis too, so the seeded cache is part of the shared commit).
 
-The recipe→grocery-list reactive demo (§6) is the SO2 acceptance vehicle.
+### The single-doc simplification (Tangram-adapted)
+
+The Handoff-2 handoff split reactivity into a **push within an open document** /
+**stale-then-refresh across documents** tier. That split assumes Obsidian's
+many-files model. In Tangram **all notes + objects live in ONE replicated
+Automerge doc** (the vault), so there is a **single reactive graph**: SO2
+recomputes the affected derived subgraph deterministically on each mutation, in
+the component, and commits the cached results — every replica converges (CRDT).
+**There is no separate cross-document staleness tier**; that tier collapses into
+one in-doc eager recompute. (The UI's `refreshObjectChips` nudge is the only
+"refresh" left, and it is a render-side concern — the data is already fresh in
+the doc.)
+
+The recipe → grocery-list reactive demo (§6) remains the SO3/SO4 acceptance
+vehicle; SO2's `rollup` demo proves the engine end to end now.
 
 ---
 
@@ -229,7 +269,7 @@ The Handoff-2 flagship demo, staged:
 | # | Checkpoint | Deliverables | Status |
 |---|---|---|---|
 | **SO1** | **Primitive foundation + reconciled doc** | this doc; the `objects` store + `SmartObject`/`ObjLink` model; `create/update/delete/list/reconcile_objects` + the type registry (seed `note-ref`/`tag`); the `@` type-picker (in the single autocompletion override); the generalized atomic `obj://` chip; the basic object popup; typed links + orphan reconcile. Objects are **inert**. | **THIS CHECKPOINT** |
-| **SO2** | **Reactivity engine** | topological recompute, push-in-doc/stale-cross-doc, cached-inline derived, cycle detection (§4). | PLANNED |
+| **SO2** | **Reactivity engine** | the `derive`/`derive_error` model + a topological recompute engine (`reactive.rs`), cached-inline derived, cycle detection, the single-doc simplification, a real derived type (`rollup`) + a seeded live demo, and the chip/popup derived rendering (§4). | **DONE** |
 | **SO3** | **Recipe types + ingestion** | `recipe`/`grocery-list`/`cart-preview` types; recipe ingestion via `tangram-automation` browser fetch + LLM schema.org/Recipe normalization; **ingredient canonicalization** (the core risk) (§6). | PLANNED |
 | **SO4** | **Meal-plan mockup** | the reactive `recipe → grocery-list → cart-preview` demo over the wired primitive (§6). | PLANNED |
 | — | **Agent/Run convergence + versioning** | re-home agents/runs onto the primitive behind the unchanged surface; versioning (§7). | LATER / PARALLEL |

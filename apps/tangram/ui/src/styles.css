@@ -1112,6 +1112,17 @@ body {
 }
 .object-popup-data:focus, .object-popup-links:focus { outline: none; border-color: var(--blue); }
 .object-popup-buttons { align-items: center; }
+/* SO2: the derived-object notice in the popup — a green "auto" banner, or red
+ * when the derived object is broken (a dependency cycle / unknown kind). */
+.object-popup-derived {
+  font-size: 12px; padding: 7px 10px; border-radius: 7px;
+  background: rgba(31, 210, 134, 0.1); color: #1f8f5f;
+  border: 1px solid rgba(31, 210, 134, 0.3);
+}
+.object-popup-derived-error {
+  background: rgba(197, 64, 47, 0.1); color: #c5402f;
+  border-color: rgba(197, 64, 47, 0.35);
+}
 
 /* Tab bar: the segmented-control pills as a tablist. */
 .run-editor-tabs { margin: 10px 0 4px; display: flex; gap: 4px; }

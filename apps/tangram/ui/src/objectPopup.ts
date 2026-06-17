@@ -10,12 +10,21 @@
 // (a single `.modal-overlay` appended to <body>, single-instance, Esc/backdrop
 // to dismiss).
 
-import type { ObjLink, ObjectType, SmartObject } from "./api";
+import type { DeriveSpec, ObjLink, ObjectType, SmartObject } from "./api";
 
 /** Side effects the object popup needs from the shell. */
 export interface ObjectPopupCallbacks {
-  /** Persist the edited type/data/links/render (`update_object`). */
-  onSave: (objType: string, data: string, links: ObjLink[], render: string) => void;
+  /** Persist the edited type/data/links/render/derive (`update_object`). The
+   *  popup forwards the object's existing `derive` unchanged (SO2 does not edit
+   *  the derive rule from this basic popup), so a save never drops the
+   *  derived-role wiring and the engine recomputes the cached data. */
+  onSave: (
+    objType: string,
+    data: string,
+    links: ObjLink[],
+    render: string,
+    derive: DeriveSpec | null,
+  ) => void;
   /** Delete the object (and let the caller strip the inline link). */
   onDelete: () => void;
   /** Close with no change (Esc / backdrop / Cancel). */
@@ -101,15 +110,38 @@ export function openObjectPopup(
   typeRow.appendChild(typeSelect);
   dialog.appendChild(typeRow);
 
+  // ── derived banner (SO2) ───────────────────────────────────────────────────
+  // A derived object's `data` is computed + cached by the reactivity engine, so
+  // it is shown READ-ONLY here with a clear "derived / auto" notice (and the
+  // cycle/error state when broken). Editing the rule itself is out of scope for
+  // this basic popup; the existing `derive` is forwarded unchanged on save.
+  const isDerived = !!obj.derive;
+  if (isDerived) {
+    const banner = document.createElement("div");
+    banner.className = obj.derive_error
+      ? "object-popup-derived object-popup-derived-error"
+      : "object-popup-derived";
+    if (obj.derive_error) {
+      banner.textContent = `⚠ Derive error: ${obj.derive_error}`;
+    } else {
+      const deps = obj.derive?.deps ?? [];
+      banner.textContent = `↻ Derived (${obj.derive?.kind}) — auto-computed from ${deps.length} dependency object${deps.length === 1 ? "" : "ies"}.`;
+    }
+    dialog.appendChild(banner);
+  }
+
   // ── data textarea ─────────────────────────────────────────────────────────
   const dataRow = document.createElement("label");
   dataRow.className = "object-popup-field";
-  dataRow.append("Data");
+  dataRow.append(isDerived ? "Computed data (read-only)" : "Data");
   const dataArea = document.createElement("textarea");
   dataArea.className = "object-popup-data";
   dataArea.rows = 5;
   dataArea.value = obj.data;
   dataArea.placeholder = "Opaque payload (JSON or plain text)";
+  // A derived object's data is engine-owned — never hand-edited (a save would be
+  // overwritten by the next recompute), so make it read-only.
+  if (isDerived) dataArea.readOnly = true;
   dataRow.appendChild(dataArea);
   dialog.appendChild(dataRow);
 
@@ -172,11 +204,14 @@ export function openObjectPopup(
   };
   const save = () => {
     const objType = typeSelect.value.trim() || obj.type;
-    const data = dataArea.value;
+    // A derived object's data is engine-owned: send the existing cached value so
+    // the round-trip is faithful (the component recomputes it anyway).
+    const data = isDerived ? obj.data : dataArea.value;
     const links = parseLinksText(linksArea.value);
     // Keep the existing render hint (SO1 has no render picker; the type default
-    // applies on the component side when blank).
-    callbacks.onSave(objType, data, links, obj.render);
+    // applies on the component side when blank) AND forward the existing derive
+    // wiring unchanged (SO2 — a save must not drop the derived role).
+    callbacks.onSave(objType, data, links, obj.render, obj.derive ?? null);
     dismiss();
   };
   const del = () => {

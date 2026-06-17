@@ -63,6 +63,7 @@ import {
   type ObjectResolver,
   objectChip,
   objectLinkClick,
+  refreshObjectChips as refreshObjectChipsEffect,
 } from "./objectLink";
 import {
   type ObjectMintHandler,
@@ -221,6 +222,25 @@ const theme = EditorView.theme(
     ".cm-object-link-note-ref": {
       color: "#0d8f86",
       backgroundColor: "rgba(13,143,134,0.14)",
+    },
+    // A DERIVED smart object (Smart Objects SO2): its value is auto-computed +
+    // cached by the reactivity engine. A green tint marks it as live/derived; the
+    // trailing `↻` badge is the auto-synced affordance. Overrides the per-type
+    // tint so a derived chip reads as derived regardless of its type.
+    ".cm-object-link-derived": {
+      color: "#1f8f5f",
+      backgroundColor: "rgba(31,210,134,0.14)",
+    },
+    ".cm-object-link-badge": {
+      marginLeft: "0.15em",
+      fontWeight: "700",
+      opacity: "0.75",
+    },
+    // A BROKEN derived object (a dependency cycle / unknown derive kind, SO2 §2):
+    // red, so the error is unmissable. The `⚠` glyph + hover title carry detail.
+    ".cm-object-link-derived-error": {
+      color: "#c5402f",
+      backgroundColor: "rgba(197,64,47,0.16)",
     },
     // The bidirectional-backlink flash (R3): a brief highlight on the line a
     // chip/callout backlink jumps to (the `↓`/`↑` targets).
@@ -467,6 +487,17 @@ export class MdEditor {
   /** Refocus the editor (e.g. after the agent popup is dismissed). */
   focus(): void {
     this.view.focus();
+  }
+
+  /**
+   * Force the smart-object chips to rebuild from the live store WITHOUT a doc
+   * change (Smart Objects SO2). The shell calls this on each vault state frame so
+   * a DERIVED chip's cached value refreshes the instant the reactivity engine
+   * recomputes a dependency — including a recompute driven by another replica
+   * (where this editor's doc body is unchanged, so no `docChanged` fires).
+   */
+  refreshObjectChips(): void {
+    this.view.dispatch({ effects: refreshObjectChipsEffect.of(null) });
   }
 
   /** Scroll the given document offset into view (best-effort; clamped to the

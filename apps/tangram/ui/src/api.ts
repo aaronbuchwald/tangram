@@ -71,18 +71,36 @@ export interface ObjLink {
   url?: string | null;
 }
 
-/** One smart object from the replicated object store (Smart Objects SO1). The
- *  inline `[<label>](obj://<id>)` chip in a note is just the handle (`{id}`);
- *  this record owns `type`/`data`/`links`/`render`. Mirrors `SmartObject` in
- *  `apps/tangram/src/lib.rs`; carried on the vault state frame. SO1 objects are
- *  inert (no reactivity/derive, no act). The Rust field is `obj_type`, serialized
- *  as `type` on the wire. */
+/** The derived-role descriptor on a SmartObject (Smart Objects SO2). Mirrors
+ *  `DeriveSpec` in `apps/tangram/src/lib.rs`. When present, the object's `data`
+ *  is COMPUTED by the reactivity engine from its `deps` (dependency object ids),
+ *  not written; `kind` selects the per-type computation (e.g. `rollup`). */
+export interface DeriveSpec {
+  kind: string;
+  deps: string[];
+  /** Optional opaque params for the kind (e.g. rollup's
+   *  `{"op":"sum","field":"qty"}`). */
+  params?: string | null;
+}
+
+/** One smart object from the replicated object store. The inline
+ *  `[<label>](obj://<id>)` chip in a note is just the handle (`{id}`); this
+ *  record owns `type`/`data`/`links`/`render`. Mirrors `SmartObject` in
+ *  `apps/tangram/src/lib.rs`; carried on the vault state frame. SO2 adds the
+ *  optional `derive` (the derived-role wiring) + `derive_error` (the cached
+ *  cycle/error state); a plain object carries neither. The Rust field is
+ *  `obj_type`, serialized as `type` on the wire. */
 export interface SmartObject {
   id: string;
   type: string;
   data: string;
   links: ObjLink[];
   render: string;
+  /** SO2: the derived-role wiring. Absent/null ⇒ a plain object (inert data). */
+  derive?: DeriveSpec | null;
+  /** SO2: a cached error (dependency cycle / unknown kind) the engine set on a
+   *  broken derived object; absent/null ⇒ no error. */
+  derive_error?: string | null;
 }
 
 /** One entry in the smart-object type registry (Smart Objects SO1) — a type the
@@ -204,14 +222,32 @@ export const vault = {
     data: string,
     links: ObjLink[] = [],
     render = "",
-  ) => postAction("create_object", { id, obj_type, data, links, render }) as Promise<null>,
+    derive: DeriveSpec | null = null,
+  ) =>
+    postAction("create_object", {
+      id,
+      obj_type,
+      data,
+      links,
+      render,
+      derive,
+    }) as Promise<null>,
   updateObject: (
     id: string,
     obj_type: string,
     data: string,
     links: ObjLink[] = [],
     render = "",
-  ) => postAction("update_object", { id, obj_type, data, links, render }) as Promise<null>,
+    derive: DeriveSpec | null = null,
+  ) =>
+    postAction("update_object", {
+      id,
+      obj_type,
+      data,
+      links,
+      render,
+      derive,
+    }) as Promise<null>,
   deleteObject: (id: string) => postAction("delete_object", { id }) as Promise<null>,
   listObjects: () => postAction("list_objects", {}) as Promise<SmartObject[]>,
   objectTypes: () => postAction("object_types", {}) as Promise<ObjectType[]>,

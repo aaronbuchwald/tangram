@@ -84,8 +84,53 @@ describe("object popup (DOM)", () => {
       "{}",
       [{ rel: "references", target: "o9" }],
       "chip",
+      null, // a plain object carries no derive
     );
     expect(isObjectPopupOpen()).toBe(false);
+  });
+
+  // ── SO2: derived objects in the popup ──────────────────────────────────────
+
+  it("shows a read-only derived banner + forwards the derive on save", () => {
+    const onSave = vi.fn();
+    openObjectPopup(
+      obj({
+        type: "rollup",
+        data: '{"sum":8}',
+        derive: { kind: "rollup", deps: ["a", "b"] },
+      }),
+      { onSave, onDelete: () => {}, onClose: () => {}, objectTypes: () => TYPES },
+    );
+    const dialog = document.querySelector(".object-popup")!;
+    const banner = dialog.querySelector(".object-popup-derived");
+    expect(banner?.textContent).toContain("Derived");
+    expect(banner?.textContent).toContain("rollup");
+    // The data area is read-only (engine-owned).
+    const data = dialog.querySelector<HTMLTextAreaElement>(".object-popup-data")!;
+    expect(data.readOnly).toBe(true);
+    // Save forwards the existing derive + cached data unchanged.
+    dialog.querySelector<HTMLButtonElement>(".object-popup-save")!.click();
+    expect(onSave).toHaveBeenCalledWith(
+      "rollup",
+      '{"sum":8}',
+      [{ rel: "references", target: "o2" }],
+      "chip",
+      { kind: "rollup", deps: ["a", "b"] },
+    );
+  });
+
+  it("shows the cycle/error state on a broken derived object", () => {
+    openObjectPopup(
+      obj({
+        type: "rollup",
+        derive: { kind: "rollup", deps: ["self"] },
+        derive_error: "dependency cycle: depends on itself",
+      }),
+      { onSave: () => {}, onDelete: () => {}, onClose: () => {}, objectTypes: () => TYPES },
+    );
+    const banner = document.querySelector(".object-popup-derived-error");
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain("cycle");
   });
 
   it("Delete calls onDelete and closes", () => {

@@ -19,7 +19,7 @@
 // `parse_object_links` in `apps/tangram/src/agents.rs` so both sides agree on the
 // handle format.
 
-import { RangeSetBuilder } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -133,33 +133,102 @@ function typeSlug(objType: string): string {
   return objType.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-") || "unknown";
 }
 
+/** The "derived / auto" affordance glyph shown on a healthy derived chip — a
+ *  small recompute marker (mirrors the design's auto-synced badge). */
+export const DERIVED_BADGE = "↻";
+
+/** The error glyph shown on a broken derived chip (a dependency cycle / unknown
+ *  derive kind — Smart Objects SO2 §2). */
+export const DERIVED_ERROR_GLYPH = "⚠";
+
+/** Format a derived object's cached `data` (the engine's computed JSON) as a
+ *  compact inline value for the chip — e.g. a rollup `{"op":"sum","sum":8,...}`
+ *  renders as `8`, a `count` as `8`. Falls back to a trimmed raw string for an
+ *  opaque payload. Best-effort + never throws (a chip must always render). */
+export function derivedValueLabel(data: string): string {
+  const raw = (data ?? "").trim();
+  if (!raw) return "…";
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object") {
+      // Prefer the headline aggregate field for the known rollup ops.
+      if (typeof v.sum === "number") return String(v.sum);
+      if (Array.isArray(v.values)) return v.values.join(", ") || "(empty)";
+      if (typeof v.count === "number") return String(v.count);
+    }
+    if (typeof v === "number" || typeof v === "string") return String(v);
+  } catch {
+    // not JSON — fall through to the raw payload
+  }
+  return raw.length > 40 ? `${raw.slice(0, 40)}…` : raw;
+}
+
 /** The CM6 widget that renders one smart-object chip. Recreated when the chip
- *  text/type changes (so the decoration set rebuilds on a state change). */
+ *  text/type/derived-state changes (so the decoration set rebuilds and the
+ *  derived value updates live when a dependency changes). */
 class ObjectChipWidget extends WidgetType {
   constructor(
     readonly id: string,
     readonly label: string,
     readonly objType: string,
+    /** SO2: true when the object carries a `derive` (a derived object). */
+    readonly derived: boolean,
+    /** SO2: the cached derived value (when `derived`, healthy) to show inline. */
+    readonly value: string,
+    /** SO2: the cached derive error (cycle / unknown kind), or "" when healthy. */
+    readonly error: string,
   ) {
     super();
   }
 
-  // Two widgets are equal (CM6 reuses the DOM) only when id + label + type match.
+  // Two widgets are equal (CM6 reuses the DOM) only when EVERY rendered input
+  // matches — so a recomputed derived value / a new error forces a re-render.
   eq(other: ObjectChipWidget): boolean {
     return (
       other.id === this.id &&
       other.label === this.label &&
-      other.objType === this.objType
+      other.objType === this.objType &&
+      other.derived === this.derived &&
+      other.value === this.value &&
+      other.error === this.error
     );
   }
 
   toDOM(): HTMLElement {
     const span = document.createElement("span");
-    span.className = `cm-object-link cm-object-link-${typeSlug(this.objType)}`;
+    const classes = ["cm-object-link", `cm-object-link-${typeSlug(this.objType)}`];
+    if (this.derived) classes.push("cm-object-link-derived");
+    if (this.error) classes.push("cm-object-link-derived-error");
+    span.className = classes.join(" ");
     span.dataset.objectId = this.id;
     span.dataset.objectType = this.objType;
-    span.setAttribute("aria-label", `Smart object: ${this.label} (${this.objType})`);
-    span.append(`${OBJECT_GLYPH} ${this.label}`);
+
+    if (this.derived && this.error) {
+      // A broken derived object: an unmissable error chip (SO2 §2).
+      span.dataset.derived = "error";
+      span.setAttribute(
+        "aria-label",
+        `Smart object: ${this.label} (${this.objType}) — derive error: ${this.error}`,
+      );
+      span.title = this.error;
+      span.append(`${OBJECT_GLYPH} ${this.label} ${DERIVED_ERROR_GLYPH}`);
+    } else if (this.derived) {
+      // A healthy derived object: show the computed value + the auto badge.
+      span.dataset.derived = "auto";
+      span.setAttribute(
+        "aria-label",
+        `Smart object: ${this.label} (${this.objType}) — derived, auto-computed value ${this.value}`,
+      );
+      span.title = "Derived — recomputed automatically from its dependencies";
+      span.append(`${OBJECT_GLYPH} ${this.label}: ${this.value} `);
+      const badge = document.createElement("span");
+      badge.className = "cm-object-link-badge";
+      badge.textContent = DERIVED_BADGE;
+      span.append(badge);
+    } else {
+      span.setAttribute("aria-label", `Smart object: ${this.label} (${this.objType})`);
+      span.append(`${OBJECT_GLYPH} ${this.label}`);
+    }
     return span;
   }
 
@@ -185,10 +254,18 @@ function buildChipDecorations(
       const inner = /^\[([^\]\n]*)\]/.exec(raw)?.[1] ?? "";
       const label = nameFromLabel(inner) || "object";
       const objType = obj?.type ?? "unknown";
+      // SO2: a derived object renders its cached value + an auto badge (or an
+      // error chip on a cycle). The value comes from the live store, so the chip
+      // updates the moment the engine recomputes a dependency.
+      const derived = !!obj?.derive;
+      const error = obj?.derive_error ?? "";
+      const value = derived ? derivedValueLabel(obj?.data ?? "") : "";
       builder.add(
         start,
         end,
-        Decoration.replace({ widget: new ObjectChipWidget(link.id, label, objType) }),
+        Decoration.replace({
+          widget: new ObjectChipWidget(link.id, label, objType, derived, value, error),
+        }),
       );
     }
   }
@@ -196,10 +273,21 @@ function buildChipDecorations(
 }
 
 /**
+ * A no-payload effect that forces the object-chip plugin to rebuild its
+ * decorations from the live store WITHOUT a doc change (Smart Objects SO2). The
+ * shell dispatches it on every vault state frame so a derived chip's cached value
+ * refreshes the moment the reactivity engine recomputes a dependency — including
+ * a recompute driven by ANOTHER replica (where the local doc body is unchanged).
+ */
+export const refreshObjectChips = StateEffect.define<null>();
+
+/**
  * The object-chip ViewPlugin: replaces each `obj://` link with an atomic widget
- * (the cursor steps over it) carrying the object's per-type glyph/style.
- * Rebuilds on every doc/viewport change. `resolve` reads the live replicated
- * store so the chip restyles as the object's type changes without re-mounting.
+ * (the cursor steps over it) carrying the object's per-type glyph/style and, for
+ * a derived object, its cached value + auto badge (or an error chip on a cycle).
+ * Rebuilds on every doc/viewport change AND on a `refreshObjectChips` effect (the
+ * live derived-value update path). `resolve` reads the live replicated store so a
+ * chip reflects the object's current type/value without re-mounting.
  */
 export function objectChip(resolve: ObjectResolver) {
   return ViewPlugin.fromClass(
@@ -209,7 +297,10 @@ export function objectChip(resolve: ObjectResolver) {
         this.decorations = buildChipDecorations(view, resolve);
       }
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) {
+        const refreshed = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(refreshObjectChips)),
+        );
+        if (update.docChanged || update.viewportChanged || refreshed) {
           this.decorations = buildChipDecorations(update.view, resolve);
         }
       }

@@ -26,6 +26,7 @@ use tangram::prelude::*;
 
 mod agents;
 mod mcp_client;
+mod reactive;
 
 #[model]
 pub struct Vault {
@@ -108,6 +109,50 @@ pub struct SmartObject {
     /// The presentation hint (`chip` | `panel` | `table` | …). Defaults to the
     /// type's default (`chip` for the SO1 seed types) when created blank.
     render: String,
+    /// The **derived-role** wiring (Smart Objects SO2): when present, this
+    /// object's `data` is *computed* by the reactivity engine from its
+    /// dependency objects (`derive.deps`) rather than written by the user. A
+    /// plain (definition/reference) object carries `None` and is unaffected — its
+    /// `data` is whatever was written (the SO1 inert model). The actual
+    /// computation lives per-`kind` in the Rust derive registry
+    /// ([`reactive::compute_derived`]); this struct only names the kind + the
+    /// dependency ids (the graph edges the engine recomputes over). `None` on
+    /// documents written by older binaries (the `missing` attribute hydrates the
+    /// absent key — an object with no `derive` is a plain object).
+    #[autosurgeon(missing = "Option::default")]
+    derive: Option<DeriveSpec>,
+    /// The cached **derived error state** (Smart Objects SO2): set by the engine
+    /// when this derived object is part of a dependency CYCLE (its recompute is
+    /// skipped and the error is surfaced inline rather than looping), or its
+    /// derive kind is unknown. `None` ⇒ no error (a plain object, or a healthy
+    /// derived one). Cached in the doc so the broken state is visible without the
+    /// runtime, and cleared by the engine when the cycle is resolved. `None` on
+    /// documents written by older binaries.
+    #[autosurgeon(missing = "Option::default")]
+    derive_error: Option<String>,
+}
+
+/// The **derived-role descriptor** (Smart Objects SO2): names a derive `kind`
+/// (resolved per-type in the Rust derive registry, [`reactive::compute_derived`])
+/// and the dependency object ids the computation aggregates over. A derived
+/// object's `data` is the engine's last computed output (cached inline in the
+/// doc); its `deps` are the graph edges the reactivity engine recomputes over on
+/// any dependency mutation, in topological order. `derive` is a pure
+/// `fn(deps) -> data` — no I/O, no clock — so every replica converges.
+#[model]
+pub struct DeriveSpec {
+    /// The derive kind (the computation selector), e.g. `rollup`. Resolved in
+    /// [`reactive::compute_derived`]; an unknown kind surfaces as a derive error.
+    kind: String,
+    /// The dependency object ids this derived object computes from (the inbound
+    /// graph edges the engine recomputes over). A deterministic `Vec`.
+    deps: Vec<String>,
+    /// An optional opaque parameter payload for the kind (JSON or plain text),
+    /// e.g. which field a `rollup` sums. The kind owns its shape; SO2's `rollup`
+    /// reads an optional `{"field": "...", "op": "sum|count|concat"}`. `None` on
+    /// documents written by older binaries.
+    #[autosurgeon(missing = "Option::default")]
+    params: Option<String>,
 }
 
 /// One typed graph edge on a [`SmartObject`] (Smart Objects SO1). `target` is an
@@ -146,6 +191,11 @@ pub struct ObjectType {
 const KNOWN_OBJECT_TYPES: &[(&str, &str, &str)] = &[
     ("note-ref", "Note reference", "chip"),
     ("tag", "Tag", "chip"),
+    // Smart Objects SO2 — the first genuinely-DERIVED type. A `rollup` aggregates
+    // (sum / count / concat) over its dependency objects; its `data` is computed
+    // by the reactivity engine and cached inline, recomputing live when a
+    // dependency changes. Created with a `derive { kind: "rollup", deps, params }`.
+    ("rollup", "Rollup (derived)", "chip"),
 ];
 
 /// The default `render` hint for a smart object of `obj_type`: the registered
@@ -324,23 +374,86 @@ pub struct McpStatus {
 
 /// `Default` is the shared genesis commit, so it must be DETERMINISTIC and
 /// byte-identical across native and wasm builds (no random ids, no clock).
-/// We seed exactly one welcome note with a fixed id and zero timestamps —
-/// proving the live-preview editor end to end on a fresh vault.
+/// We seed a welcome note + a Smart Objects SO2 **reactive demo note** with two
+/// source objects and a derived `rollup` over them (fixed ids, zero timestamps).
+/// The rollup's cached data is computed by the reactivity engine right here, so a
+/// fresh vault opens with a working derived object: edit a source's `qty` and the
+/// rollup's cached sum recomputes live. Proves the live-preview editor + the SO2
+/// engine end to end on a fresh vault.
 impl Default for Vault {
     fn default() -> Self {
+        // SO2 reactive demo: two `tag` sources carrying a numeric `qty`, plus a
+        // `rollup` derived object summing `qty` across them. The engine computes
+        // the rollup's cached `data` deterministically (pure), so genesis is
+        // byte-identical across replicas.
+        let mut objects = vec![
+            SmartObject {
+                id: "demo-apples".to_string(),
+                obj_type: "tag".to_string(),
+                data: "{\"qty\":3}".to_string(),
+                links: Vec::new(),
+                render: "chip".to_string(),
+                derive: None,
+                derive_error: None,
+            },
+            SmartObject {
+                id: "demo-oranges".to_string(),
+                obj_type: "tag".to_string(),
+                data: "{\"qty\":5}".to_string(),
+                links: Vec::new(),
+                render: "chip".to_string(),
+                derive: None,
+                derive_error: None,
+            },
+            SmartObject {
+                id: "demo-total".to_string(),
+                obj_type: "rollup".to_string(),
+                data: String::new(), // computed below by the engine
+                links: vec![
+                    ObjLink {
+                        rel: "depends-on".to_string(),
+                        target: "demo-apples".to_string(),
+                        url: None,
+                    },
+                    ObjLink {
+                        rel: "depends-on".to_string(),
+                        target: "demo-oranges".to_string(),
+                        url: None,
+                    },
+                ],
+                render: "chip".to_string(),
+                derive: Some(DeriveSpec {
+                    kind: "rollup".to_string(),
+                    deps: vec!["demo-apples".to_string(), "demo-oranges".to_string()],
+                    params: Some("{\"op\":\"sum\",\"field\":\"qty\"}".to_string()),
+                }),
+                derive_error: None,
+            },
+        ];
+        reactive::recompute(&mut objects);
+
         Self {
-            files: vec![MdFile {
-                id: "welcome".to_string(),
-                path: "welcome.md".to_string(),
-                body: welcome_body(),
-                created_at_ms: 0,
-                updated_at_ms: None,
-            }],
+            files: vec![
+                MdFile {
+                    id: "welcome".to_string(),
+                    path: "welcome.md".to_string(),
+                    body: welcome_body(),
+                    created_at_ms: 0,
+                    updated_at_ms: None,
+                },
+                MdFile {
+                    id: "smart-objects-demo".to_string(),
+                    path: "smart-objects-demo.md".to_string(),
+                    body: reactive_demo_body(),
+                    created_at_ms: 0,
+                    updated_at_ms: None,
+                },
+            ],
             agent_runs: Some(Vec::new()),
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
             executions: Some(Vec::new()),
-            objects: Some(Vec::new()),
+            objects: Some(objects),
         }
     }
 }
@@ -654,7 +767,9 @@ impl Vault {
         // (prune entries whose `obj://<id>` link was deleted), so objects are
         // self-cleaning like the invocations index. A no-op when none are orphaned.
         ctx.mutate("tick_agents", |m| {
-            m.prune_orphan_objects();
+            if m.prune_orphan_objects() > 0 {
+                m.recompute_reactive_graph();
+            }
         })
         .map_err(|e| e.to_string())?;
 
@@ -795,9 +910,14 @@ impl Vault {
 
     /// Create (or replace) a smart object in the store, keyed by `id` (the UUID
     /// the UI embedded in the note's `obj://<id>` link). Idempotent on `id` (a
-    /// re-create overwrites type/data/links/render). A blank `render` defaults to
-    /// the type's registered default. The link insertion into the note is the
-    /// UI's job; this records the source of truth. Mirrors `create_invocation`.
+    /// re-create overwrites type/data/links/render/derive). A blank `render`
+    /// defaults to the type's registered default. `derive` (Smart Objects SO2)
+    /// is the optional derived-role wiring; when present this object's `data`
+    /// becomes engine-computed (the passed `data` is the seed/last value, then
+    /// the reactivity recompute below overwrites it). The link insertion into the
+    /// note is the UI's job; this records the source of truth. After the upsert
+    /// the **reactivity engine** recomputes the affected derived subgraph in
+    /// topological order, in this same commit (SO2). Mirrors `create_invocation`.
     pub fn create_object(
         &mut self,
         id: String,
@@ -805,6 +925,7 @@ impl Vault {
         data: String,
         links: Vec<ObjLink>,
         render: String,
+        derive: Option<DeriveSpec>,
     ) -> Result<(), String> {
         let id = id.trim().to_string();
         if id.is_empty() {
@@ -825,6 +946,8 @@ impl Vault {
             existing.data = data;
             existing.links = links;
             existing.render = render;
+            existing.derive = derive;
+            existing.derive_error = None;
         } else {
             objs.push(SmartObject {
                 id,
@@ -832,14 +955,23 @@ impl Vault {
                 data,
                 links,
                 render,
+                derive,
+                derive_error: None,
             });
         }
+        // SO2: any mutation recomputes the affected derived subgraph in topo
+        // order (cached inline, cycle-safe) — in this same commit.
+        self.recompute_reactive_graph();
         Ok(())
     }
 
-    /// Edit a smart object's type/data/links/render in place (the object popup's
-    /// Save). A blank `render` defaults to the type's registered default. Errors
-    /// if no object has the given id. Mirrors `update_invocation`.
+    /// Edit a smart object's type/data/links/render/derive in place (the object
+    /// popup's Save). A blank `render` defaults to the type's registered default.
+    /// `derive` (Smart Objects SO2) is the optional derived-role wiring; passing
+    /// `None` makes the object plain again. Errors if no object has the given id.
+    /// After the edit the **reactivity engine** recomputes the affected derived
+    /// subgraph in topological order, in this same commit (SO2). Mirrors
+    /// `update_invocation`.
     pub fn update_object(
         &mut self,
         id: String,
@@ -847,6 +979,7 @@ impl Vault {
         data: String,
         links: Vec<ObjLink>,
         render: String,
+        derive: Option<DeriveSpec>,
     ) -> Result<(), String> {
         let obj_type = obj_type.trim().to_string();
         if obj_type.is_empty() {
@@ -867,12 +1000,19 @@ impl Vault {
         obj.data = data;
         obj.links = links;
         obj.render = render;
+        obj.derive = derive;
+        obj.derive_error = None;
+        // SO2: recompute the affected derived subgraph (cached inline, cycle-safe).
+        self.recompute_reactive_graph();
         Ok(())
     }
 
     /// Delete a smart object from the store by id (the popup's explicit delete;
     /// removing the inline link also prunes it on the next reconcile). Errors if
-    /// no object has the given id. Mirrors `delete_invocation`.
+    /// no object has the given id. After the delete the **reactivity engine**
+    /// recomputes the affected derived subgraph in topological order (a derived
+    /// object that depended on the removed one recomputes over its remaining
+    /// deps), in this same commit (SO2). Mirrors `delete_invocation`.
     pub fn delete_object(&mut self, id: String) -> Result<(), String> {
         let objs = self.objects.get_or_insert_with(Vec::new);
         let before = objs.len();
@@ -880,6 +1020,8 @@ impl Vault {
         if objs.len() == before {
             return Err(format!("no object with id {id}"));
         }
+        // SO2: a removed dependency recomputes its derived dependents.
+        self.recompute_reactive_graph();
         Ok(())
     }
 
@@ -895,9 +1037,14 @@ impl Vault {
     /// Prune store entries whose backing `obj://<id>` link no longer exists in
     /// any note body (stray-ref reconcile — no orphans, like the invocations
     /// index). Returns the number pruned. Also runs implicitly on every agent
-    /// tick. Mirrors `reconcile_invocations`.
+    /// tick. When anything was pruned the **reactivity engine** recomputes the
+    /// affected derived subgraph (SO2 — a pruned dependency recomputes its
+    /// derived dependents). Mirrors `reconcile_invocations`.
     pub fn reconcile_objects(&mut self) -> i64 {
         let pruned = self.prune_orphan_objects();
+        if pruned > 0 {
+            self.recompute_reactive_graph();
+        }
         i64::try_from(pruned).unwrap_or(i64::MAX)
     }
 
@@ -1181,6 +1328,19 @@ impl Vault {
         let before = objs.len();
         objs.retain(|o| live.contains(&o.id));
         before - objs.len()
+    }
+
+    /// The Smart Objects SO2 **reactivity engine** entry point: recompute every
+    /// DERIVED object's cached `data` from its dependency objects, in topological
+    /// order, detecting cycles (a cycle marks the involved derived objects with a
+    /// `derive_error` and skips their recompute — never loops). Pure +
+    /// deterministic (no I/O, no clock) so every replica converges on the same
+    /// cached results. Plain (non-derived) objects are untouched. Called in the
+    /// SAME `Ctx::mutate` as every object mutation (create/update/delete/prune).
+    /// The actual graph walk + per-kind computation lives in [`reactive`].
+    fn recompute_reactive_graph(&mut self) {
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        reactive::recompute(objs);
     }
 
     /// Backfill the stored `next_fire_ms` for any index entry that still has it
@@ -1745,6 +1905,24 @@ folders from the sidebar.\n"
         .to_string()
 }
 
+/// The seeded Smart Objects SO2 **reactive demo note**: two source `tag` chips
+/// (`demo-apples`, `demo-oranges`) carrying a numeric `qty`, and a derived
+/// `rollup` chip (`demo-total`) summing them. The chips are the same portable
+/// `[<label>](obj://<id>)` handles the `@` picker mints; the store entries
+/// (seeded in `Default`) own the type/data/derive. Editing a source's `qty`
+/// (click its chip → the object popup) recomputes the rollup's cached sum live.
+fn reactive_demo_body() -> String {
+    "# Smart objects — the reactive demo\n\nThis note shows a **derived** smart \
+object (Smart Objects SO2). Two source objects carry a quantity, and a derived \
+*rollup* sums them — its value is **computed and cached automatically**, and \
+recomputes whenever a source changes.\n\n- Apples: [◆ apples](obj://demo-apples)\n\
+- Oranges: [◆ oranges](obj://demo-oranges)\n- **Total (derived):** \
+[◆ total](obj://demo-total)\n\nClick a source chip to edit its `qty` (e.g. \
+`{\"qty\": 10}`) and watch the total chip's cached value update — the rollup is \
+recomputed in the document, on every replica.\n"
+        .to_string()
+}
+
 /// MCP / app instructions, shared between the native builder and the WASM
 /// component's `describe()` export.
 const INSTRUCTIONS: &str = "The tangram shell: a markdown vault (folders and .md files) that \
@@ -1811,8 +1989,50 @@ mod tests {
     #[test]
     fn default_seeds_welcome_note() {
         let v = Vault::default();
-        assert_eq!(v.list_files().len(), 1);
-        assert_eq!(v.list_files()[0].path, "welcome.md");
+        let paths: Vec<String> = v.list_files().into_iter().map(|f| f.path).collect();
+        assert!(paths.contains(&"welcome.md".to_string()));
+    }
+
+    #[test]
+    fn default_seeds_a_working_reactive_demo() {
+        // SO2: a fresh vault opens with a derived `rollup` whose cached data is
+        // already computed by the engine at genesis (3 + 5 = 8).
+        let v = Vault::default();
+        let total = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "demo-total")
+            .expect("the seeded derived rollup");
+        let cached: serde_json::Value = serde_json::from_str(&total.data).unwrap();
+        assert_eq!(cached["sum"], 8);
+        assert_eq!(cached["count"], 2);
+        assert!(total.derive.is_some());
+        assert!(total.derive_error.is_none());
+        // The demo note carries all three obj:// chips (the inline handles).
+        let demo = v
+            .list_files()
+            .into_iter()
+            .find(|f| f.path == "smart-objects-demo.md")
+            .expect("the demo note");
+        for id in ["demo-apples", "demo-oranges", "demo-total"] {
+            assert!(
+                demo.body.contains(&format!("obj://{id}")),
+                "chip {id} present"
+            );
+        }
+    }
+
+    #[test]
+    fn default_is_deterministic() {
+        // Genesis must be byte-identical (the shared commit): the engine-computed
+        // derived cache + every object field matches across two Defaults.
+        let proj = |v: &Vault| -> Vec<(String, String, String, Option<String>)> {
+            v.list_objects()
+                .into_iter()
+                .map(|o| (o.id, o.obj_type, o.data, o.derive_error))
+                .collect()
+        };
+        assert_eq!(proj(&Vault::default()), proj(&Vault::default()));
     }
 
     #[test]
@@ -2431,6 +2651,7 @@ mod tests {
             "{\"label\":\"urgent\"}".into(),
             vec![obj_link("references", "o2")],
             String::new(), // blank → default render for the type
+            None,          // plain object (no derive)
         )
         .unwrap();
         let listed = v.list_objects();
@@ -2449,6 +2670,7 @@ mod tests {
             "{\"ref\":\"o9\"}".into(),
             vec![obj_link("references", "o9")],
             "panel".into(),
+            None,
         )
         .unwrap();
         let updated = v.list_objects();
@@ -2466,11 +2688,25 @@ mod tests {
     #[test]
     fn create_object_is_idempotent_on_id_and_rejects_empties() {
         let mut v = empty();
-        v.create_object("o1".into(), "tag".into(), "a".into(), vec![], "chip".into())
-            .unwrap();
+        v.create_object(
+            "o1".into(),
+            "tag".into(),
+            "a".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
         // Re-create with the same id overwrites rather than appending.
-        v.create_object("o1".into(), "tag".into(), "b".into(), vec![], "chip".into())
-            .unwrap();
+        v.create_object(
+            "o1".into(),
+            "tag".into(),
+            "b".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
         let listed = v.list_objects();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].data, "b");
@@ -2481,7 +2717,8 @@ mod tests {
                 "tag".into(),
                 String::new(),
                 vec![],
-                String::new()
+                String::new(),
+                None
             )
             .is_err()
         );
@@ -2491,7 +2728,8 @@ mod tests {
                 " ".into(),
                 String::new(),
                 vec![],
-                String::new()
+                String::new(),
+                None
             )
             .is_err()
         );
@@ -2507,6 +2745,7 @@ mod tests {
                 String::new(),
                 vec![],
                 "chip".into(),
+                None,
             )
             .unwrap();
         }
@@ -2517,8 +2756,15 @@ mod tests {
     #[test]
     fn reconcile_prunes_orphaned_objects() {
         let mut v = vault_with_object_link("o1");
-        v.create_object("o1".into(), "tag".into(), "x".into(), vec![], "chip".into())
-            .unwrap();
+        v.create_object(
+            "o1".into(),
+            "tag".into(),
+            "x".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
         // A live link → nothing pruned.
         assert_eq!(v.reconcile_objects(), 0);
         assert_eq!(v.list_objects().len(), 1);
@@ -2557,6 +2803,269 @@ mod tests {
         let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"note-ref"));
         assert!(names.contains(&"tag"));
+    }
+
+    // ── Smart objects SO2: the reactivity engine through the action API ────────
+
+    /// A `rollup` derive over `deps` that sums the `qty` field (the demo shape).
+    fn sum_qty_derive(deps: &[&str]) -> Option<DeriveSpec> {
+        Some(DeriveSpec {
+            kind: "rollup".into(),
+            deps: deps.iter().map(|s| (*s).to_string()).collect(),
+            params: Some("{\"op\":\"sum\",\"field\":\"qty\"}".into()),
+        })
+    }
+
+    /// The cached `sum` an `obj_id` rollup currently holds (parsed from its `data`).
+    fn cached_sum(v: &Vault, obj_id: &str) -> f64 {
+        let data = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == obj_id)
+            .unwrap()
+            .data;
+        serde_json::from_str::<serde_json::Value>(&data).unwrap()["sum"]
+            .as_f64()
+            .unwrap()
+    }
+
+    #[test]
+    fn derived_recomputes_on_dependency_create_update_delete() {
+        // SO2 end-to-end through the ACTIONS (the path the UI drives): a derived
+        // rollup's cached data is recomputed live in the doc on every source
+        // mutation, in the same commit as the action.
+        let mut v = empty();
+        // Two source objects + a derived rollup summing their `qty`.
+        v.create_object(
+            "a".into(),
+            "tag".into(),
+            "{\"qty\":2}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "b".into(),
+            "tag".into(),
+            "{\"qty\":3}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "roll".into(),
+            "rollup".into(),
+            String::new(), // seed; the engine overwrites with the cached value
+            vec![obj_link("depends-on", "a"), obj_link("depends-on", "b")],
+            "chip".into(),
+            sum_qty_derive(&["a", "b"]),
+        )
+        .unwrap();
+        // Cached the moment the derived object was created.
+        assert_eq!(cached_sum(&v, "roll"), 5.0);
+
+        // Updating a SOURCE recomputes the derived cache (live in the doc).
+        v.update_object(
+            "a".into(),
+            "tag".into(),
+            "{\"qty\":10}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(cached_sum(&v, "roll"), 13.0);
+
+        // Adding a new source + linking it recomputes again.
+        v.create_object(
+            "c".into(),
+            "tag".into(),
+            "{\"qty\":1}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.update_object(
+            "roll".into(),
+            "rollup".into(),
+            String::new(),
+            vec![
+                obj_link("depends-on", "a"),
+                obj_link("depends-on", "b"),
+                obj_link("depends-on", "c"),
+            ],
+            "chip".into(),
+            sum_qty_derive(&["a", "b", "c"]),
+        )
+        .unwrap();
+        assert_eq!(cached_sum(&v, "roll"), 14.0);
+
+        // Deleting a source recomputes over the survivors.
+        v.delete_object("b".into()).unwrap();
+        assert_eq!(cached_sum(&v, "roll"), 11.0);
+    }
+
+    #[test]
+    fn cycle_detection_flags_error_via_actions_and_does_not_loop() {
+        // SO2 cycle detection through the action API: two derived objects that
+        // depend on each other must each carry a derive_error and the action must
+        // return (not loop).
+        let mut v = empty();
+        v.create_object(
+            "x".into(),
+            "rollup".into(),
+            String::new(),
+            vec![obj_link("depends-on", "y")],
+            "chip".into(),
+            Some(DeriveSpec {
+                kind: "rollup".into(),
+                deps: vec!["y".into()],
+                params: None,
+            }),
+        )
+        .unwrap();
+        // Creating the second half closes the cycle — must terminate + flag both.
+        v.create_object(
+            "y".into(),
+            "rollup".into(),
+            String::new(),
+            vec![obj_link("depends-on", "x")],
+            "chip".into(),
+            Some(DeriveSpec {
+                kind: "rollup".into(),
+                deps: vec!["x".into()],
+                params: None,
+            }),
+        )
+        .unwrap();
+        let by = |id: &str| v.list_objects().into_iter().find(|o| o.id == id).unwrap();
+        assert!(by("x").derive_error.is_some());
+        assert!(by("y").derive_error.is_some());
+        assert!(by("x").derive_error.unwrap().contains("cycle"));
+    }
+
+    #[test]
+    fn derived_cache_persists_in_the_doc_without_the_engine() {
+        // The whole point of caching inline: a derived object's value is a plain
+        // field in the replicated store (no runtime needed to read it). After a
+        // recompute the cached `data` is queryable verbatim via the read action.
+        let mut v = empty();
+        v.create_object(
+            "a".into(),
+            "tag".into(),
+            "{\"qty\":7}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "roll".into(),
+            "rollup".into(),
+            String::new(),
+            vec![obj_link("depends-on", "a")],
+            "chip".into(),
+            sum_qty_derive(&["a"]),
+        )
+        .unwrap();
+        let cached = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "roll")
+            .unwrap()
+            .data;
+        // A genuine JSON payload sitting in the doc — not empty, not the seed.
+        assert!(cached.contains("\"sum\":7"));
+        assert!(cached.contains("\"op\":\"sum\""));
+    }
+
+    #[test]
+    fn non_derived_objects_are_unaffected_by_recompute() {
+        // A plain object's data must never be touched by the engine, even when a
+        // derived object exists in the same store.
+        let mut v = empty();
+        v.create_object(
+            "plain".into(),
+            "tag".into(),
+            "hello world".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "a".into(),
+            "tag".into(),
+            "{\"qty\":1}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "roll".into(),
+            "rollup".into(),
+            String::new(),
+            vec![obj_link("depends-on", "a")],
+            "chip".into(),
+            sum_qty_derive(&["a"]),
+        )
+        .unwrap();
+        let plain = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "plain")
+            .unwrap();
+        assert_eq!(plain.data, "hello world");
+        assert!(plain.derive.is_none());
+        assert!(plain.derive_error.is_none());
+    }
+
+    #[test]
+    fn reconcile_recomputes_after_pruning_a_derived_dependency() {
+        // Pruning an orphaned SOURCE (its inline link removed) must recompute the
+        // derived object that depended on it (SO2 reconcile recompute).
+        let mut v = empty();
+        // Two source chips in a note + a derived rollup (the rollup chip too).
+        let body = "src [◆ a](obj://a) [◆ b](obj://b) roll [◆ r](obj://roll)";
+        let note = v.create_file("n.md".into(), body.into()).unwrap();
+        v.create_object(
+            "a".into(),
+            "tag".into(),
+            "{\"qty\":2}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "b".into(),
+            "tag".into(),
+            "{\"qty\":3}".into(),
+            vec![],
+            "chip".into(),
+            None,
+        )
+        .unwrap();
+        v.create_object(
+            "roll".into(),
+            "rollup".into(),
+            String::new(),
+            vec![obj_link("depends-on", "a"), obj_link("depends-on", "b")],
+            "chip".into(),
+            sum_qty_derive(&["a", "b"]),
+        )
+        .unwrap();
+        assert_eq!(cached_sum(&v, "roll"), 5.0);
+        // Remove `b`'s inline link from the note → its store entry orphans.
+        v.write_file(note, "src [◆ a](obj://a) roll [◆ r](obj://roll)".into())
+            .unwrap();
+        assert_eq!(v.reconcile_objects(), 1);
+        // The derived rollup recomputed over the survivor only.
+        assert_eq!(cached_sum(&v, "roll"), 2.0);
     }
 
     // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────
