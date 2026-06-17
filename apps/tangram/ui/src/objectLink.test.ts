@@ -16,7 +16,9 @@ import {
   OBJECT_GLYPH,
   buildObjectLink,
   derivedValueLabel,
+  glyphForType,
   parseObjectLinks,
+  stripObjectLinkFromBody,
 } from "./objectLink";
 import { MdEditor } from "./editor";
 import type { SmartObject } from "./api";
@@ -48,6 +50,45 @@ describe("object link parse + build (the @ chip handle)", () => {
   it("ignores empty ids and `agent://` links (distinct schemes)", () => {
     expect(parseObjectLinks("[x](obj://)").length).toBe(0);
     expect(parseObjectLinks("[⚡ a](agent://r1)").length).toBe(0);
+  });
+});
+
+describe("glyphForType (#109 fix 2 — per-type chip glyph)", () => {
+  it("returns a distinct glyph per resolved type", () => {
+    expect(glyphForType("recipe")).toBe("🍳");
+    expect(glyphForType("grocery-list")).toBe("🛒");
+    expect(glyphForType("cart-preview")).toBe("🧺");
+    expect(glyphForType("note-ref")).toBe("🔗");
+    expect(glyphForType("tag")).toBe("🏷");
+    expect(glyphForType("rollup")).toBe("∑");
+  });
+  it("falls back to the default `◆` for an unregistered/unknown type", () => {
+    expect(glyphForType("unknown")).toBe(OBJECT_GLYPH);
+    expect(glyphForType("whatever")).toBe(OBJECT_GLYPH);
+  });
+  it("matches case-insensitively", () => {
+    expect(glyphForType("Recipe")).toBe("🍳");
+  });
+});
+
+describe("stripObjectLinkFromBody (#109 fix 1 — strip the WHOLE span)", () => {
+  it("removes the entire `[label](obj://id)` span, not just the target", () => {
+    const body = "before [◆ urgent](obj://o1) after";
+    // The whole `[◆ urgent](obj://o1)` span goes (and one surrounding space),
+    // leaving no orphaned `◆ urgent` text.
+    expect(stripObjectLinkFromBody(body, "o1")).toBe("before after");
+  });
+  it("leaves other links intact and only strips the matching id", () => {
+    const body = "[◆ a](obj://o1) and [◆ b](obj://o2)";
+    expect(stripObjectLinkFromBody(body, "o2")).toBe("[◆ a](obj://o1) and");
+  });
+  it("strips a span inside a list item without orphaning the glyph", () => {
+    const body = "- [◆ Tomato Pasta](obj://recipe-pasta)\n- next";
+    // The span (and one surrounding space) goes — no orphaned `◆ Tomato Pasta`.
+    expect(stripObjectLinkFromBody(body, "recipe-pasta")).toBe("-\n- next");
+  });
+  it("returns null when the id has no inline link", () => {
+    expect(stripObjectLinkFromBody("nothing here", "o1")).toBeNull();
   });
 });
 
@@ -95,7 +136,19 @@ describe("object chip atomicity + render (DOM)", () => {
     expect(chip?.classList.contains("cm-object-link-tag")).toBe(true);
     expect(chip?.dataset.objectId).toBe("o1");
     expect(chip?.dataset.objectType).toBe("tag");
-    expect(chip?.textContent).toContain(OBJECT_GLYPH);
+    // #109 fix 2: the chip leads with its RESOLVED type's glyph (tag → 🏷).
+    expect(chip?.textContent).toContain(glyphForType("tag"));
+    editor.destroy();
+  });
+
+  it("renders a per-type glyph + class for the resolved type (#109 fix 2)", () => {
+    const editor = mountWithObjectChip(obj({ type: "recipe" }));
+    const chip = editor.view.dom.querySelector<HTMLElement>(".cm-object-link");
+    expect(chip?.dataset.objectType).toBe("recipe");
+    expect(chip?.classList.contains("cm-object-link-recipe")).toBe(true);
+    // The recipe glyph (🍳), NOT the generic `◆`.
+    expect(chip?.textContent).toContain(glyphForType("recipe"));
+    expect(chip?.textContent).not.toContain(OBJECT_GLYPH);
     editor.destroy();
   });
 
@@ -139,6 +192,14 @@ describe("derivedValueLabel (the cached value shown inline)", () => {
   });
   it("joins concat values", () => {
     expect(derivedValueLabel('{"op":"concat","values":["a","b"]}')).toBe("a, b");
+  });
+  it("summarizes a grocery-list as N items (SO3)", () => {
+    expect(derivedValueLabel('{"rows":[{"name":"onion"},{"name":"tomato"}]}')).toBe("2 items");
+    expect(derivedValueLabel('{"rows":[{"name":"onion"}]}')).toBe("1 item");
+  });
+  it("summarizes a cart-preview as N aisles (SO3)", () => {
+    expect(derivedValueLabel('{"aisles":[{"category":"Produce"}]}')).toBe("1 aisle");
+    expect(derivedValueLabel('{"aisles":[{"category":"A"},{"category":"B"}]}')).toBe("2 aisles");
   });
   it("falls back to raw payload for non-JSON and `…` for empty", () => {
     expect(derivedValueLabel("plain text")).toBe("plain text");

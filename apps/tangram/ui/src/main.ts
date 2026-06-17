@@ -43,6 +43,7 @@ import {
   buildObjectIndex,
   buildObjectLink,
   type ObjectIndex,
+  parseObjectLinks,
 } from "./objectLink";
 import { isObjectPopupOpen, openObjectPopup } from "./objectPopup";
 import { calloutBlockId } from "./callout";
@@ -1126,25 +1127,41 @@ function openObjectLinkPopup(id: string): void {
     },
     onClose: () => activeEditor?.editor.focus(),
     objectTypes: () => objectTypes,
+    // SO3: the recipe card's Include-in-plan toggle needs the live object store
+    // (to find the grocery-list(s)) and the toggle action (the reactive edit).
+    allObjects: () => objectIndex.all,
+    onToggleRecipe: (groceryListId, include) => {
+      void vault
+        .toggleRecipeInPlan(groceryListId, id, include)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+    },
   });
 }
 
 // Strip the inline `[…](obj://<id>)` link from the active note editor (used by
-// the object popup's Delete). Replaces the token with its label text (so the
-// sentence reads naturally); the debounced onChange persists it and the
-// component reconcile prunes the orphan. Mirrors `stripAgentLink`.
+// the object popup's Delete). #109 fix 1: remove the ENTIRE `[label](obj://id)`
+// span — not just the `](obj://id)` target, which used to orphan the leading
+// `◆ label` text in the note. Uses the same `parseObjectLinks` scanner the chip
+// uses (so the exact span boundaries always agree), and collapses a now-doubled
+// space / strips a leading list-marker-trailing space so the sentence stays
+// clean. The debounced onChange persists it and the component reconcile prunes
+// the now-orphaned store entry.
 function stripObjectLink(id: string): void {
   const editor = activeEditor?.editor;
   if (!editor) return;
   const doc = editor.doc;
-  const token = `](obj://${id})`;
-  const close = doc.indexOf(token);
-  if (close === -1) return;
-  const open = doc.lastIndexOf("[", close);
-  if (open === -1) return;
-  const label = doc.slice(open + 1, close);
-  const to = close + token.length;
-  editor.replaceRange(open, to, label);
+  const link = parseObjectLinks(doc).find((l) => l.id === id);
+  if (!link) return;
+  let { from, to } = link;
+  // Collapse surrounding whitespace so removing the span doesn't leave a double
+  // space (or a trailing space after a "- " bullet). Prefer to eat one trailing
+  // space; otherwise eat one leading space.
+  if (doc[to] === " ") {
+    to += 1;
+  } else if (from > 0 && doc[from - 1] === " ") {
+    from -= 1;
+  }
+  editor.replaceRange(from, to, "");
 }
 
 // The Done chip's `↓` (chip→callout backlink, R3): jump to the Run's output

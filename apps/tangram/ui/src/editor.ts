@@ -223,6 +223,20 @@ const theme = EditorView.theme(
       color: "#0d8f86",
       backgroundColor: "rgba(13,143,134,0.14)",
     },
+    // Smart Objects SO3 — the recipe golden-path chips. The §8 smart-object
+    // PURPLE accent family (fill #EEEDFE, border #AFA9EC, text #3C3489): the
+    // `recipe` definition chip carries the purple accent; the derived
+    // grocery-list/cart-preview chips keep the green "derived" tint (applied by
+    // `.cm-object-link-derived`) so they read as auto-synced, with a subtle
+    // border to tie them to the purple family.
+    ".cm-object-link-recipe": {
+      color: "#3c3489",
+      backgroundColor: "#eeedfe",
+      border: "1px solid #afa9ec",
+    },
+    ".cm-object-link-grocery-list, .cm-object-link-cart-preview": {
+      border: "1px solid #afa9ec",
+    },
     // A DERIVED smart object (Smart Objects SO2): its value is auto-computed +
     // cached by the reactivity engine. A green tint marks it as live/derived; the
     // trailing `↻` badge is the auto-synced affordance. Overrides the per-type

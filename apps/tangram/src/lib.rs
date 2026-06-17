@@ -196,6 +196,14 @@ const KNOWN_OBJECT_TYPES: &[(&str, &str, &str)] = &[
     // by the reactivity engine and cached inline, recomputing live when a
     // dependency changes. Created with a `derive { kind: "rollup", deps, params }`.
     ("rollup", "Rollup (derived)", "chip"),
+    // Smart Objects SO3 — the recipe golden-path types (`docs/design/smart-objects.md`
+    // §6). A `recipe` is a DEFINITION (manual JSON entry for SO3; URL ingestion is
+    // SO4). A `grocery-list` is DERIVED over its included recipes (group + sum +
+    // unit-reconcile ingredients); a `cart-preview` is DERIVED over a grocery-list
+    // (group by aisle). The derive kinds live in `reactive::grocery`.
+    ("recipe", "Recipe", "card"),
+    ("grocery-list", "Grocery list (derived)", "table"),
+    ("cart-preview", "Cart preview (derived)", "table"),
 ];
 
 /// The default `render` hint for a smart object of `obj_type`: the registered
@@ -430,6 +438,11 @@ impl Default for Vault {
                 derive_error: None,
             },
         ];
+        // Smart Objects SO3: the reactive recipe→grocery-list→cart-preview chain
+        // (the meal-plan demo). Seeded with fixed ids + zero timestamps so genesis
+        // stays byte-identical; the grocery-list + cart-preview caches are computed
+        // by the engine right here, so a fresh vault opens with a working chain.
+        objects.extend(meal_plan_objects());
         reactive::recompute(&mut objects);
 
         Self {
@@ -445,6 +458,13 @@ impl Default for Vault {
                     id: "smart-objects-demo".to_string(),
                     path: "smart-objects-demo.md".to_string(),
                     body: reactive_demo_body(),
+                    created_at_ms: 0,
+                    updated_at_ms: None,
+                },
+                MdFile {
+                    id: "meal-plan-demo".to_string(),
+                    path: "meal-plan-demo.md".to_string(),
+                    body: meal_plan_demo_body(),
                     created_at_ms: 0,
                     updated_at_ms: None,
                 },
@@ -1046,6 +1066,55 @@ impl Vault {
             self.recompute_reactive_graph();
         }
         i64::try_from(pruned).unwrap_or(i64::MAX)
+    }
+
+    /// Toggle a `recipe`'s inclusion in a derived `grocery-list` (Smart Objects
+    /// SO3 — the meal-plan "include-in-plan" toggle). The grocery-list's
+    /// `derive.deps` ARE its included recipes; adding/removing a recipe id from
+    /// that set is the reactive edit, and the **reactivity engine** then
+    /// recomputes the grocery-list AND its downstream cart-preview in this same
+    /// commit (the chain recalculates itself live). `include = true` adds the
+    /// recipe (idempotent); `false` removes it (idempotent). Also keeps the
+    /// grocery-list's `links` in sync so the graph edges mirror the deps. Errors
+    /// if the grocery-list object is absent or is not a derived grocery-list.
+    pub fn toggle_recipe_in_plan(
+        &mut self,
+        grocery_list_id: String,
+        recipe_id: String,
+        include: bool,
+    ) -> Result<(), String> {
+        let recipe_id = recipe_id.trim().to_string();
+        if recipe_id.is_empty() {
+            return Err("recipe id must not be empty".to_string());
+        }
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        let gl = objs
+            .iter_mut()
+            .find(|o| o.id == grocery_list_id)
+            .ok_or_else(|| format!("no object with id {grocery_list_id}"))?;
+        let derive = gl
+            .derive
+            .as_mut()
+            .filter(|d| d.kind == "grocery-list")
+            .ok_or_else(|| format!("object {grocery_list_id} is not a derived grocery-list"))?;
+
+        let present = derive.deps.iter().any(|d| d == &recipe_id);
+        if include && !present {
+            derive.deps.push(recipe_id.clone());
+            gl.links.push(ObjLink {
+                rel: "includes".to_string(),
+                target: recipe_id,
+                url: None,
+            });
+        } else if !include && present {
+            derive.deps.retain(|d| d != &recipe_id);
+            gl.links
+                .retain(|l| !(l.rel == "includes" && l.target == recipe_id));
+        }
+        // SO3: the toggle recomputes the grocery-list + the downstream cart-preview
+        // in topological order, in this same commit (the chain recalculates live).
+        self.recompute_reactive_graph();
+        Ok(())
     }
 
     // ── Tools/MCP T1: per-agent MCP access requests + user approval ───────────
@@ -1920,6 +1989,125 @@ recomputes whenever a source changes.\n\n- Apples: [◆ apples](obj://demo-apple
 [◆ total](obj://demo-total)\n\nClick a source chip to edit its `qty` (e.g. \
 `{\"qty\": 10}`) and watch the total chip's cached value update — the rollup is \
 recomputed in the document, on every replica.\n"
+        .to_string()
+}
+
+/// The seeded Smart Objects SO3 **meal-plan objects**: three `recipe`
+/// definitions whose ingredients deliberately OVERLAP (olive oil 2tbsp + 2tbsp =
+/// 4tbsp across two recipes; onion in two; tomato in two), a derived
+/// `grocery-list` over all three (group + sum + unit-reconcile), and a derived
+/// `cart-preview` over that grocery-list (group by aisle). Fixed ids + a stable
+/// shape so the engine computes byte-identical caches at genesis. The chips in
+/// `meal_plan_demo_body` are the inline handles; toggling a recipe (via
+/// `toggle_recipe_in_plan`) recomputes the whole chain live.
+fn meal_plan_objects() -> Vec<SmartObject> {
+    // A recipe definition object carrying the SO3 manual-entry JSON shape.
+    fn recipe(id: &str, name: &str, ingredients: &str) -> SmartObject {
+        SmartObject {
+            id: id.to_string(),
+            obj_type: "recipe".to_string(),
+            data: format!("{{\"name\":{name:?},\"servings\":2,\"ingredients\":{ingredients}}}"),
+            links: Vec::new(),
+            render: "card".to_string(),
+            derive: None,
+            derive_error: None,
+        }
+    }
+
+    let recipes = vec![
+        recipe(
+            "recipe-pasta",
+            "Tomato Pasta",
+            "[{\"canonicalName\":\"olive oil\",\"quantity\":2,\"unit\":\"tbsp\",\"category\":\"Oils & Vinegars\"},\
+              {\"canonicalName\":\"onion\",\"quantity\":1,\"unit\":\"ct\",\"category\":\"Produce\"},\
+              {\"canonicalName\":\"tomato\",\"quantity\":3,\"unit\":\"ct\",\"category\":\"Produce\"},\
+              {\"canonicalName\":\"pasta\",\"quantity\":200,\"unit\":\"g\",\"category\":\"Pantry\"}]",
+        ),
+        recipe(
+            "recipe-soup",
+            "Tomato Soup",
+            "[{\"canonicalName\":\"olive oil\",\"quantity\":2,\"unit\":\"tbsp\",\"category\":\"Oils & Vinegars\"},\
+              {\"canonicalName\":\"onion\",\"quantity\":2,\"unit\":\"ct\",\"category\":\"Produce\"},\
+              {\"canonicalName\":\"tomato\",\"quantity\":4,\"unit\":\"ct\",\"category\":\"Produce\"},\
+              {\"canonicalName\":\"vegetable stock\",\"quantity\":1,\"unit\":\"cup\",\"category\":\"Pantry\"}]",
+        ),
+        recipe(
+            "recipe-salad",
+            "Garden Salad",
+            "[{\"canonicalName\":\"olive oil\",\"quantity\":1,\"unit\":\"tbsp\",\"category\":\"Oils & Vinegars\"},\
+              {\"canonicalName\":\"lettuce\",\"quantity\":1,\"unit\":\"ct\",\"category\":\"Produce\"},\
+              {\"canonicalName\":\"cucumber\",\"quantity\":1,\"unit\":\"ct\",\"category\":\"Produce\"}]",
+        ),
+    ];
+
+    let grocery = SmartObject {
+        id: "meal-plan-grocery".to_string(),
+        obj_type: "grocery-list".to_string(),
+        data: String::new(), // computed by the engine
+        links: recipes
+            .iter()
+            .map(|r| ObjLink {
+                rel: "includes".to_string(),
+                target: r.id.clone(),
+                url: None,
+            })
+            .collect(),
+        render: "table".to_string(),
+        derive: Some(DeriveSpec {
+            kind: "grocery-list".to_string(),
+            deps: recipes.iter().map(|r| r.id.clone()).collect(),
+            params: None,
+        }),
+        derive_error: None,
+    };
+
+    let cart = SmartObject {
+        id: "meal-plan-cart".to_string(),
+        obj_type: "cart-preview".to_string(),
+        data: String::new(), // computed by the engine
+        links: vec![ObjLink {
+            rel: "from".to_string(),
+            target: "meal-plan-grocery".to_string(),
+            url: None,
+        }],
+        render: "table".to_string(),
+        derive: Some(DeriveSpec {
+            kind: "cart-preview".to_string(),
+            deps: vec!["meal-plan-grocery".to_string()],
+            params: None,
+        }),
+        derive_error: None,
+    };
+
+    let mut out = recipes;
+    out.push(grocery);
+    out.push(cart);
+    out
+}
+
+/// The seeded Smart Objects SO3 **reactive meal-plan note**: three `recipe`
+/// chips (each with an include-in-plan toggle in its popup), a derived
+/// `grocery-list` chip amalgamating their ingredients, and a derived
+/// `cart-preview` chip grouping by aisle. Toggling a recipe (via its chip's
+/// popup) recomputes the grocery-list + cart-preview LIVE in the doc.
+fn meal_plan_demo_body() -> String {
+    "# Meal plan — the reactive recipe → grocery → cart chain\n\n\
+This note is the **Build-1 \"document recalculates itself\" moment** (Smart \
+Objects SO3). Three recipes feed a **derived** grocery list, which feeds a \
+**derived** cart preview. Toggle a recipe in (or out of) the plan — click its \
+chip → *Include in plan* — and watch the grocery list and the cart preview \
+recompute **live**, right here in the document.\n\n\
+## Recipes\n\n\
+- [◆ Tomato Pasta](obj://recipe-pasta)\n\
+- [◆ Tomato Soup](obj://recipe-soup)\n\
+- [◆ Garden Salad](obj://recipe-salad)\n\n\
+## Grocery list (auto-synced)\n\n\
+[◆ Grocery list](obj://meal-plan-grocery)\n\n\
+The olive oil from all three recipes amalgamates (2 + 2 + 1 = 5 tbsp); onion \
+and tomato each merge across two recipes. Compatible units reconcile; \
+incompatible units stay on separate rows.\n\n\
+## Cart preview (auto-synced, grouped by aisle)\n\n\
+[◆ Cart preview](obj://meal-plan-cart)\n"
         .to_string()
 }
 
@@ -3066,6 +3254,150 @@ mod tests {
         assert_eq!(v.reconcile_objects(), 1);
         // The derived rollup recomputed over the survivor only.
         assert_eq!(cached_sum(&v, "roll"), 2.0);
+    }
+
+    // ── Smart objects SO3: the recipe → grocery-list → cart-preview chain ──────
+
+    /// The cached grocery-list rows of object `id` (parsed from its `data`).
+    fn grocery_rows(v: &Vault, id: &str) -> Vec<serde_json::Value> {
+        let o = v.list_objects().into_iter().find(|o| o.id == id).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&o.data).unwrap();
+        parsed["rows"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The summed quantity for `(name, unit)` in a grocery-list object's rows.
+    fn grocery_qty(v: &Vault, id: &str, name: &str, unit: &str) -> Option<f64> {
+        grocery_rows(v, id)
+            .into_iter()
+            .find(|r| r["name"] == name && r["unit"] == unit)
+            .and_then(|r| r["quantity"].as_f64())
+    }
+
+    #[test]
+    fn object_types_includes_the_so3_recipe_types() {
+        let names: Vec<String> = empty().object_types().into_iter().map(|t| t.name).collect();
+        for n in ["recipe", "grocery-list", "cart-preview"] {
+            assert!(names.contains(&n.to_string()), "registry missing {n}");
+        }
+    }
+
+    #[test]
+    fn seeded_meal_plan_amalgamates_and_is_deterministic() {
+        // Two fresh vaults must seed byte-identical meal-plan caches (genesis).
+        let a = Vault::default();
+        let b = Vault::default();
+        let ga = a
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "meal-plan-grocery")
+            .unwrap();
+        let gb = b
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "meal-plan-grocery")
+            .unwrap();
+        assert_eq!(
+            ga.data, gb.data,
+            "seeded grocery cache must be deterministic"
+        );
+
+        // Olive oil amalgamates across all three recipes: 2 + 2 + 1 = 5 tbsp.
+        assert_eq!(
+            grocery_qty(&a, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(5.0)
+        );
+        // Onion merges across two recipes (1 + 2 = 3), tomato too (3 + 4 = 7).
+        assert_eq!(
+            grocery_qty(&a, "meal-plan-grocery", "onion", "ct"),
+            Some(3.0)
+        );
+        assert_eq!(
+            grocery_qty(&a, "meal-plan-grocery", "tomato", "ct"),
+            Some(7.0)
+        );
+
+        // The cart-preview groups the rows by aisle (Produce holds the merged
+        // onion/tomato/lettuce/cucumber).
+        let cart = a
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "meal-plan-cart")
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&cart.data).unwrap();
+        let aisles = parsed["aisles"].as_array().unwrap();
+        assert!(aisles.iter().any(|al| al["category"] == "Produce"));
+        assert!(aisles.iter().any(|al| al["category"] == "Oils & Vinegars"));
+        // The meal-plan note carries all five chips.
+        let demo = a
+            .list_files()
+            .into_iter()
+            .find(|f| f.path == "meal-plan-demo.md")
+            .unwrap();
+        for id in [
+            "recipe-pasta",
+            "recipe-soup",
+            "recipe-salad",
+            "meal-plan-grocery",
+            "meal-plan-cart",
+        ] {
+            assert!(
+                demo.body.contains(&format!("obj://{id}")),
+                "note missing chip {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn toggling_a_recipe_recomputes_the_whole_chain_live() {
+        let mut v = Vault::default();
+        // Baseline: olive oil = 5 tbsp over the three included recipes.
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(5.0)
+        );
+
+        // Toggle the salad OUT → olive oil drops by 1 (4 tbsp), cucumber/lettuce
+        // disappear from the grocery list AND the downstream cart-preview.
+        v.toggle_recipe_in_plan("meal-plan-grocery".into(), "recipe-salad".into(), false)
+            .unwrap();
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(4.0)
+        );
+        assert_eq!(grocery_qty(&v, "meal-plan-grocery", "cucumber", "ct"), None);
+        let cart = v
+            .list_objects()
+            .into_iter()
+            .find(|o| o.id == "meal-plan-cart")
+            .unwrap();
+        assert!(
+            !cart.data.contains("cucumber"),
+            "cart must recompute downstream"
+        );
+
+        // Toggle it back IN → the chain recomputes back to 5 tbsp.
+        v.toggle_recipe_in_plan("meal-plan-grocery".into(), "recipe-salad".into(), true)
+            .unwrap();
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(5.0)
+        );
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "cucumber", "ct"),
+            Some(1.0)
+        );
+
+        // Toggling is idempotent + guarded to a real grocery-list.
+        v.toggle_recipe_in_plan("meal-plan-grocery".into(), "recipe-salad".into(), true)
+            .unwrap();
+        assert_eq!(
+            grocery_qty(&v, "meal-plan-grocery", "olive oil", "tbsp"),
+            Some(5.0)
+        );
+        assert!(
+            v.toggle_recipe_in_plan("recipe-pasta".into(), "recipe-salad".into(), true)
+                .is_err()
+        );
     }
 
     // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────

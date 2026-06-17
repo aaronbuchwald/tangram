@@ -31,6 +31,14 @@ export interface ObjectPopupCallbacks {
   onClose: () => void;
   /** The known types for the type <select> (read live off the registry). */
   objectTypes: () => ObjectType[];
+  /** SO3: all smart objects in the live store (so the recipe card can find the
+   *  grocery-list(s) to toggle inclusion against, and a derived view can resolve
+   *  a dependency's display name). Optional — SO1/SO2 popups don't need it. */
+  allObjects?: () => SmartObject[];
+  /** SO3: toggle a `recipe` (this object) in/out of a derived `grocery-list`'s
+   *  included set (`toggle_recipe_in_plan`), driving the live recompute of the
+   *  grocery-list + cart-preview. Optional — only the recipe card uses it. */
+  onToggleRecipe?: (groceryListId: string, include: boolean) => void;
 }
 
 let current: { dismiss: () => void } | null = null;
@@ -129,6 +137,14 @@ export function openObjectPopup(
     }
     dialog.appendChild(banner);
   }
+
+  // ── SO3 rich per-type view (recipe card / grocery table / cart by aisle) ────
+  // A functional render toward the §8 mockup (the full two-column + chat-panel
+  // mockup is SO4): the recipe shows an expandable card + an Include-in-plan
+  // toggle; the grocery-list shows an Item | Qty | From table; the cart-preview
+  // groups by aisle. The raw `data` textarea stays below for power-editing.
+  const richView = renderRichView(obj, callbacks);
+  if (richView) dialog.appendChild(richView);
 
   // ── data textarea ─────────────────────────────────────────────────────────
   const dataRow = document.createElement("label");
@@ -234,4 +250,226 @@ export function openObjectPopup(
   deleteBtn.addEventListener("click", del);
 
   current = { dismiss };
+}
+
+// ── SO3 rich per-type rendering (docs/design/smart-objects.md §8) ─────────────
+
+/** One ingredient line on a recipe's `data` (the SO3 manual-entry shape). */
+interface RecipeIngredient {
+  canonicalName?: string;
+  name?: string;
+  quantity?: number;
+  unit?: string;
+  category?: string;
+}
+interface RecipeData {
+  name?: string;
+  servings?: number;
+  ingredients?: RecipeIngredient[];
+  source?: string;
+}
+/** One aggregated grocery row (a grocery-list's computed `data.rows`). */
+interface GroceryRow {
+  name?: string;
+  quantity?: number;
+  unit?: string;
+  sources?: string[];
+  category?: string;
+}
+/** One aisle group (a cart-preview's computed `data.aisles`). */
+interface CartAisle {
+  category?: string;
+  items?: { name?: string; quantity?: number; unit?: string }[];
+}
+
+/** Best-effort parse of an object's JSON `data` (never throws — a malformed
+ *  payload yields null and the rich view is skipped). */
+function parseData<T>(data: string): T | null {
+  try {
+    const v = JSON.parse(data || "null");
+    return v && typeof v === "object" ? (v as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Format a quantity + unit compactly (`4 tbsp`, `3 ct`, `5`); a unitless count
+ *  drops the unit. */
+function qtyLabel(quantity: number | undefined, unit: string | undefined): string {
+  const q = typeof quantity === "number" ? String(quantity) : "?";
+  const u = (unit ?? "").trim();
+  return u ? `${q} ${u}` : q;
+}
+
+/** Build the SO3 rich view for a recipe / grocery-list / cart-preview object,
+ *  or null for a type with no dedicated view (the raw data textarea suffices). */
+function renderRichView(
+  obj: SmartObject,
+  callbacks: ObjectPopupCallbacks,
+): HTMLElement | null {
+  switch (obj.type) {
+    case "recipe":
+      return renderRecipeCard(obj, callbacks);
+    case "grocery-list":
+      return renderGroceryTable(obj);
+    case "cart-preview":
+      return renderCartPreview(obj);
+    default:
+      return null;
+  }
+}
+
+/** A recipe as an expandable card: name + servings, the ingredient list, and an
+ *  Include-in-plan toggle per derived grocery-list that could include it (SO3). */
+function renderRecipeCard(
+  obj: SmartObject,
+  callbacks: ObjectPopupCallbacks,
+): HTMLElement {
+  const recipe = parseData<RecipeData>(obj.data);
+  const card = document.createElement("div");
+  card.className = "object-rich object-recipe-card";
+
+  const details = document.createElement("details");
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.className = "object-recipe-summary";
+  const servings = recipe?.servings ? ` · serves ${recipe.servings}` : "";
+  summary.textContent = `${recipe?.name?.trim() || "Recipe"}${servings}`;
+  details.appendChild(summary);
+
+  const list = document.createElement("ul");
+  list.className = "object-recipe-ingredients";
+  const ingredients = recipe?.ingredients ?? [];
+  if (ingredients.length === 0) {
+    const li = document.createElement("li");
+    li.className = "object-rich-empty";
+    li.textContent = "No ingredients yet — edit the data below.";
+    list.appendChild(li);
+  } else {
+    for (const ing of ingredients) {
+      const li = document.createElement("li");
+      const name = (ing.canonicalName ?? ing.name ?? "").trim() || "ingredient";
+      li.append(`${name} — ${qtyLabel(ing.quantity, ing.unit)}`);
+      if (ing.category) {
+        const tag = document.createElement("span");
+        tag.className = "object-recipe-aisle";
+        tag.textContent = ing.category;
+        li.append(" ", tag);
+      }
+      list.appendChild(li);
+    }
+  }
+  details.appendChild(list);
+  card.appendChild(details);
+
+  // Include-in-plan toggles: one per grocery-list in the store (SO3 — the
+  // reactive meal-plan affordance). Toggling drives `toggle_recipe_in_plan`,
+  // which recomputes the grocery-list + cart-preview live.
+  const lists = (callbacks.allObjects?.() ?? []).filter(
+    (o) => o.type === "grocery-list" && !!o.derive,
+  );
+  if (lists.length > 0 && callbacks.onToggleRecipe) {
+    const planRow = document.createElement("div");
+    planRow.className = "object-recipe-plan";
+    for (const gl of lists) {
+      const label = document.createElement("label");
+      label.className = "object-recipe-plan-toggle";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "object-recipe-include";
+      cb.checked = (gl.derive?.deps ?? []).includes(obj.id);
+      cb.addEventListener("change", () => {
+        callbacks.onToggleRecipe?.(gl.id, cb.checked);
+      });
+      label.append(cb, ` Include in plan`);
+      planRow.appendChild(label);
+    }
+    card.appendChild(planRow);
+  }
+  return card;
+}
+
+/** A grocery-list as a table: Item | Qty | From "N recipes" (SO3). Shows the
+ *  auto-synced affordance — it's a derived object. */
+function renderGroceryTable(obj: SmartObject): HTMLElement {
+  const data = parseData<{ rows?: GroceryRow[] }>(obj.data);
+  const rows = data?.rows ?? [];
+  const wrap = document.createElement("div");
+  wrap.className = "object-rich object-grocery";
+
+  const synced = document.createElement("div");
+  synced.className = "object-rich-synced";
+  synced.textContent = "↻ Auto-synced from the included recipes";
+  wrap.appendChild(synced);
+
+  if (rows.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "object-rich-empty";
+    empty.textContent = "No items — include a recipe in the plan.";
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  const table = document.createElement("table");
+  table.className = "object-grocery-table";
+  const thead = document.createElement("thead");
+  thead.innerHTML = "<tr><th>Item</th><th>Qty</th><th>From</th></tr>";
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    const item = document.createElement("td");
+    item.textContent = (r.name ?? "").trim() || "item";
+    const qty = document.createElement("td");
+    qty.textContent = qtyLabel(r.quantity, r.unit);
+    const from = document.createElement("td");
+    const n = r.sources?.length ?? 0;
+    from.textContent = `${n} recipe${n === 1 ? "" : "s"}`;
+    from.title = (r.sources ?? []).join(", ");
+    tr.append(item, qty, from);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/** A cart-preview grouped by aisle (SO3): each aisle a heading + its items. */
+function renderCartPreview(obj: SmartObject): HTMLElement {
+  const data = parseData<{ aisles?: CartAisle[] }>(obj.data);
+  const aisles = data?.aisles ?? [];
+  const wrap = document.createElement("div");
+  wrap.className = "object-rich object-cart";
+
+  const synced = document.createElement("div");
+  synced.className = "object-rich-synced";
+  synced.textContent = "↻ Auto-synced from the grocery list";
+  wrap.appendChild(synced);
+
+  if (aisles.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "object-rich-empty";
+    empty.textContent = "Empty cart — add items to the grocery list.";
+    wrap.appendChild(empty);
+    return wrap;
+  }
+
+  for (const aisle of aisles) {
+    const group = document.createElement("div");
+    group.className = "object-cart-aisle";
+    const heading = document.createElement("div");
+    heading.className = "object-cart-aisle-name";
+    heading.textContent = (aisle.category ?? "").trim() || "Other";
+    group.appendChild(heading);
+    const list = document.createElement("ul");
+    list.className = "object-cart-items";
+    for (const it of aisle.items ?? []) {
+      const li = document.createElement("li");
+      li.textContent = `${(it.name ?? "").trim() || "item"} — ${qtyLabel(it.quantity, it.unit)}`;
+      list.appendChild(li);
+    }
+    group.appendChild(list);
+    wrap.appendChild(group);
+  }
+  return wrap;
 }

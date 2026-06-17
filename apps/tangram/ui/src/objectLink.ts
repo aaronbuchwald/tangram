@@ -31,8 +31,29 @@ import {
 import { clickWithinRange, posOnToken } from "./wikiLink";
 import type { SmartObject } from "./api";
 
-/** The glyph the smart-object chip leads with — distinct from the agent `⚡`. */
+/** The default glyph a smart-object chip leads with — distinct from the agent
+ *  `⚡`. Used for an unregistered type or one without a dedicated glyph. */
 export const OBJECT_GLYPH = "◆";
+
+/** Per-type chip glyphs (#109 fix 2): the chip reflects its RESOLVED type with a
+ *  distinct glyph, not a generic `◆`/`unknown`. Resolved from the object store
+ *  (the chip resolver), falling back to {@link OBJECT_GLYPH} for an unregistered
+ *  type or a not-yet-resolved chip. Keep in sync with the SO type registry in
+ *  `apps/tangram/src/lib.rs` (`KNOWN_OBJECT_TYPES`). */
+const TYPE_GLYPHS: Record<string, string> = {
+  recipe: "🍳",
+  "grocery-list": "🛒",
+  "cart-preview": "🧺",
+  "note-ref": "🔗",
+  tag: "🏷",
+  rollup: "∑",
+};
+
+/** The glyph for a resolved smart-object `type` — its per-type glyph, or the
+ *  default `◆` for an unregistered/unknown type. */
+export function glyphForType(objType: string): string {
+  return TYPE_GLYPHS[objType.trim().toLowerCase()] ?? OBJECT_GLYPH;
+}
 
 /** Opens the object popup for the object with the given id (a chip click). */
 export type ObjectLinkOpener = (id: string) => void;
@@ -97,6 +118,26 @@ export function buildObjectLink(label: string, id: string): string {
   return `[${OBJECT_GLYPH} ${label}](obj://${id})`;
 }
 
+/**
+ * #109 fix 1 — strip the ENTIRE `[label](obj://<id>)` span from `body`, not just
+ * the `](obj://id)` target (which used to orphan the leading `◆ label` text).
+ * Returns the new body, or null when the id has no inline link (nothing to do).
+ * Collapses one surrounding space so removing the span doesn't leave a double
+ * space (prefers eating a trailing space; else a leading one). Pure — the editor
+ * caller applies the result.
+ */
+export function stripObjectLinkFromBody(body: string, id: string): string | null {
+  const link = parseObjectLinks(body).find((l) => l.id === id);
+  if (!link) return null;
+  let { from, to } = link;
+  if (body[to] === " ") {
+    to += 1;
+  } else if (from > 0 && body[from - 1] === " ") {
+    from -= 1;
+  }
+  return body.slice(0, from) + body.slice(to);
+}
+
 /** A read-only index of the vault's smart objects (the replicated store carried
  *  on the vault state frame). */
 export interface ObjectIndex {
@@ -151,6 +192,16 @@ export function derivedValueLabel(data: string): string {
   try {
     const v = JSON.parse(raw);
     if (v && typeof v === "object") {
+      // SO3 grocery-list: `{ rows: [...] }` → "N items".
+      if (Array.isArray(v.rows)) {
+        const n = v.rows.length;
+        return `${n} item${n === 1 ? "" : "s"}`;
+      }
+      // SO3 cart-preview: `{ aisles: [...] }` → "N aisles".
+      if (Array.isArray(v.aisles)) {
+        const n = v.aisles.length;
+        return `${n} aisle${n === 1 ? "" : "s"}`;
+      }
       // Prefer the headline aggregate field for the known rollup ops.
       if (typeof v.sum === "number") return String(v.sum);
       if (Array.isArray(v.values)) return v.values.join(", ") || "(empty)";
@@ -203,6 +254,10 @@ class ObjectChipWidget extends WidgetType {
     span.dataset.objectId = this.id;
     span.dataset.objectType = this.objType;
 
+    // #109 fix 2: the chip leads with its RESOLVED type's glyph (not a generic
+    // `◆`); an unregistered/unresolved type falls back to `◆`.
+    const glyph = glyphForType(this.objType);
+
     if (this.derived && this.error) {
       // A broken derived object: an unmissable error chip (SO2 §2).
       span.dataset.derived = "error";
@@ -211,7 +266,7 @@ class ObjectChipWidget extends WidgetType {
         `Smart object: ${this.label} (${this.objType}) — derive error: ${this.error}`,
       );
       span.title = this.error;
-      span.append(`${OBJECT_GLYPH} ${this.label} ${DERIVED_ERROR_GLYPH}`);
+      span.append(`${glyph} ${this.label} ${DERIVED_ERROR_GLYPH}`);
     } else if (this.derived) {
       // A healthy derived object: show the computed value + the auto badge.
       span.dataset.derived = "auto";
@@ -220,14 +275,14 @@ class ObjectChipWidget extends WidgetType {
         `Smart object: ${this.label} (${this.objType}) — derived, auto-computed value ${this.value}`,
       );
       span.title = "Derived — recomputed automatically from its dependencies";
-      span.append(`${OBJECT_GLYPH} ${this.label}: ${this.value} `);
+      span.append(`${glyph} ${this.label}: ${this.value} `);
       const badge = document.createElement("span");
       badge.className = "cm-object-link-badge";
       badge.textContent = DERIVED_BADGE;
       span.append(badge);
     } else {
       span.setAttribute("aria-label", `Smart object: ${this.label} (${this.objType})`);
-      span.append(`${OBJECT_GLYPH} ${this.label}`);
+      span.append(`${glyph} ${this.label}`);
     }
     return span;
   }

@@ -31,6 +31,8 @@ use std::collections::BTreeMap;
 
 use crate::{DeriveSpec, SmartObject};
 
+mod grocery;
+
 /// Recompute every DERIVED object's cached `data` from its dependency objects, in
 /// topological order, detecting cycles. The single entry point the [`crate::Vault`]
 /// calls after every object mutation (create / update / delete / prune).
@@ -206,8 +208,15 @@ pub struct DepSnapshot {
 /// only the kind + deps + params. An unknown kind is a derive error (surfaced on
 /// the object, like a cycle). Add a new derived type by registering its kind here.
 ///
-/// SO2 ships exactly one genuinely-derived kind, `rollup`, which aggregates a
-/// numeric field (or a count, or a text concat) over its dependency objects.
+/// SO2 ships `rollup` (aggregate a numeric field / count / concat). Smart
+/// Objects SO3 adds the recipe golden-path's two derive kinds:
+///
+/// - `grocery-list` — over its **recipe** dependency objects, group ingredients
+///   by `canonicalName + unit`, sum quantity, reconcile compatible units
+///   (tsp→tbsp→cup within a dimension; incompatible units stay separate rows),
+///   and collect the source recipe names. The reactive heart of Build-1.
+/// - `cart-preview` — over its **grocery-list** dependency, group the rows by
+///   `category` (aisle). The terminus of the recipe→grocery→cart chain.
 pub fn compute_derived(
     kind: &str,
     deps: &[DepSnapshot],
@@ -215,6 +224,8 @@ pub fn compute_derived(
 ) -> Result<String, String> {
     match kind {
         "rollup" => rollup(deps, params),
+        "grocery-list" => grocery::grocery_list(deps),
+        "cart-preview" => grocery::cart_preview(deps),
         other => Err(format!("unknown derive kind {other:?}")),
     }
 }

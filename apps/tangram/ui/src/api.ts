@@ -251,6 +251,14 @@ export const vault = {
   deleteObject: (id: string) => postAction("delete_object", { id }) as Promise<null>,
   listObjects: () => postAction("list_objects", {}) as Promise<SmartObject[]>,
   objectTypes: () => postAction("object_types", {}) as Promise<ObjectType[]>,
+  // SO3: toggle a recipe in/out of a derived grocery-list's included set (drives
+  // the live recompute of the grocery-list + downstream cart-preview).
+  toggleRecipeInPlan: (grocery_list_id: string, recipe_id: string, include: boolean) =>
+    postAction("toggle_recipe_in_plan", {
+      grocery_list_id,
+      recipe_id,
+      include,
+    }) as Promise<null>,
   // Tools/MCP T1: the user-approval actions on a `kind: agent`'s `mcp_servers`
   // request. `approve_mcp` binds to the hash the user saw (a stale hash is
   // refused by the component).

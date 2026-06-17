@@ -228,23 +228,52 @@ SO3 types existing.
 
 ---
 
-## 6. The recipe golden-path (PLANNED — SO3 + SO4)
+## 6. The recipe golden-path (SO3 AS BUILT — SO4 PLANNED)
 
 The Handoff-2 flagship demo, staged:
 
-- **SO3 — recipe types + ingestion.** Register rich types: `recipe`,
-  `grocery-list`, `cart-preview`. **Ingestion**: a `recipe` is created from a URL
-  via a `tangram-automation` **browser fetch** + an **LLM normalization** to
+- **SO3 — recipe types + the reactive chain (AS BUILT).** Registered the three
+  rich types (`recipe`, `grocery-list`, `cart-preview` in `KNOWN_OBJECT_TYPES`)
+  and the two new **derive kinds** in `reactive::grocery` (pure, deterministic,
+  wasm-clean `fn(deps) -> data`, driven by SO2's topological engine):
+  - **`recipe`** is a DEFINITION type (manual JSON entry for SO3; URL ingestion
+    is SO4). `data = { name, servings, ingredients: [{canonicalName, quantity,
+    unit, category}], source? }`.
+  - **`grocery-list`** is DERIVED over its **included** `recipe` deps: it groups
+    ingredient lines by `canonicalName + reconciled-unit`, **sums quantity**, and
+    collects the source recipe names. **Unit reconciliation** (the core risk):
+    units of the same dimension convert to a canonical unit and merge (volume
+    tsp→tbsp→cup, mass mg→g→kg, count → ct); incompatible/unknown units for the
+    same ingredient stay as **separate rows** (no guessing). Output
+    `{ rows: [{ name, quantity, unit, category, sources }] }`.
+  - **`cart-preview`** is DERIVED over its `grocery-list` dep: it groups the rows
+    by `category` (aisle) → `{ aisles: [{ category, items }] }`. The terminus of
+    Build-1.
+
+  The reactive demo ships as the seeded **`meal-plan-demo.md`** note (genesis,
+  deterministic): three recipes whose ingredients deliberately overlap (olive oil
+  2tbsp + 2tbsp + 1tbsp = 5tbsp; onion across two; tomato across two), a derived
+  grocery-list over all three, and a cart-preview over the grocery-list. A
+  recipe's chip popup carries an **Include-in-plan toggle** (`toggle_recipe_in_plan`
+  adds/removes the recipe from the grocery-list's `derive.deps`); toggling
+  recomputes the grocery-list AND the cart-preview **live in the doc** (the
+  "document recalculates itself" moment). Functional §8-styled rendering: the
+  recipe popup is an expandable card (ingredient list + the include toggle), the
+  grocery-list an Item | Qty | From "N recipes" table, the cart-preview grouped
+  by aisle — all in the §8 smart-object purple accent family (fill `#EEEDFE`,
+  border `#AFA9EC`, text `#3C3489`, dot `#534AB7`), the derived views flagged
+  "auto-synced". Per-type chip glyphs (🍳 / 🛒 / 🧺 / 🔗 / 🏷 / ∑) resolve from
+  the store (#109 fix 2); deleting a chip strips its whole inline span (#109
+  fix 1).
+- **SO4 — ingestion + the full §8 mockup + the cart-fill action (PLANNED).**
+  Recipe **URL ingestion**: create a `recipe` from a URL via a
+  `tangram-automation` **browser fetch** + an **LLM normalization** to
   schema.org/Recipe (the AI-enabled-component pattern — fetch → prompt → write
-  the normalized object to the store, not an egress of user data). **Ingredient
-  canonicalization is the core risk** — mapping free-text ingredient lines to a
-  canonical pantry vocabulary so a derived grocery-list can de-dupe/aggregate;
-  this is where the design effort concentrates.
-- **SO4 — the meal-plan mockup.** The reactive demo: a `recipe` →
-  (derived, SO2) `grocery-list` → (action, §5) `cart-preview`, where editing the
-  recipe's servings/ingredients **reactively** updates the grocery-list, and
-  "add to cart" runs the action pipeline to a cart-preview run object. A UI
-  mockup over the wired primitive.
+  the normalized object to the store, not an egress of user data); free-text
+  ingredient-line canonicalization to the pantry vocabulary the SO3 derives
+  already aggregate over. The pixel-exact **§8 two-column + chat-panel** mockup
+  over the wired primitive, and the "add to cart" **action**-role object/stub
+  (§5) that runs the pipeline to a cart-preview run object.
 
 ---
 
@@ -270,8 +299,8 @@ The Handoff-2 flagship demo, staged:
 |---|---|---|---|
 | **SO1** | **Primitive foundation + reconciled doc** | this doc; the `objects` store + `SmartObject`/`ObjLink` model; `create/update/delete/list/reconcile_objects` + the type registry (seed `note-ref`/`tag`); the `@` type-picker (in the single autocompletion override); the generalized atomic `obj://` chip; the basic object popup; typed links + orphan reconcile. Objects are **inert**. | **THIS CHECKPOINT** |
 | **SO2** | **Reactivity engine** | the `derive`/`derive_error` model + a topological recompute engine (`reactive.rs`), cached-inline derived, cycle detection, the single-doc simplification, a real derived type (`rollup`) + a seeded live demo, and the chip/popup derived rendering (§4). | **DONE** |
-| **SO3** | **Recipe types + ingestion** | `recipe`/`grocery-list`/`cart-preview` types; recipe ingestion via `tangram-automation` browser fetch + LLM schema.org/Recipe normalization; **ingredient canonicalization** (the core risk) (§6). | PLANNED |
-| **SO4** | **Meal-plan mockup** | the reactive `recipe → grocery-list → cart-preview` demo over the wired primitive (§6). | PLANNED |
+| **SO3** | **Recipe types + the reactive chain** | the `recipe`/`grocery-list`/`cart-preview` types + the two derive kinds (`reactive::grocery`, with unit reconciliation); the seeded reactive `meal-plan-demo.md` (3 overlapping recipes → derived grocery-list → derived cart-preview); the Include-in-plan toggle (`toggle_recipe_in_plan`) driving the live recompute; functional §8-styled rendering (recipe card / grocery table / cart-by-aisle, purple accent); the two #109 fix-forwards (whole-span delete-strip + per-type chip glyph) (§6). | **DONE** |
+| **SO4** | **Ingestion + the §8 mockup + cart-fill** | recipe URL ingestion (`tangram-automation` browser fetch + LLM schema.org/Recipe normalization + free-text ingredient canonicalization); the pixel-exact §8 two-column + chat-panel mockup; the "add to cart" action-role object/stub (§5) (§6). | PLANNED |
 | — | **Agent/Run convergence + versioning** | re-home agents/runs onto the primitive behind the unchanged surface; versioning (§7). | LATER / PARALLEL |
 
 The **action pipeline** (§5) lands with the action role — Build-3/SOx — alongside

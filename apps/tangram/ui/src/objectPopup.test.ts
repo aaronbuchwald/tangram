@@ -149,7 +149,7 @@ describe("object popup (DOM)", () => {
   });
 
   it("surfaces an unregistered type as a selectable `(custom)` option", () => {
-    openObjectPopup(obj({ type: "recipe" }), {
+    openObjectPopup(obj({ type: "recipe", data: "" }), {
       onSave: () => {},
       onDelete: () => {},
       onClose: () => {},
@@ -158,5 +158,110 @@ describe("object popup (DOM)", () => {
     const type = document.querySelector<HTMLSelectElement>(".object-popup-type")!;
     expect(type.value).toBe("recipe");
     expect([...type.options].some((o) => o.textContent?.includes("custom"))).toBe(true);
+  });
+
+  // ── SO3: rich per-type rendering (recipe card / grocery table / cart aisles) ─
+
+  it("renders a recipe as an expandable card with its ingredient list", () => {
+    openObjectPopup(
+      obj({
+        type: "recipe",
+        data: JSON.stringify({
+          name: "Tomato Pasta",
+          servings: 2,
+          ingredients: [
+            { canonicalName: "olive oil", quantity: 2, unit: "tbsp", category: "Oils" },
+            { canonicalName: "onion", quantity: 1, unit: "ct", category: "Produce" },
+          ],
+        }),
+      }),
+      { onSave: () => {}, onDelete: () => {}, onClose: () => {}, objectTypes: () => TYPES },
+    );
+    const card = document.querySelector(".object-recipe-card")!;
+    expect(card).not.toBeNull();
+    expect(card.querySelector(".object-recipe-summary")?.textContent).toContain("Tomato Pasta");
+    const items = card.querySelectorAll(".object-recipe-ingredients li");
+    expect(items.length).toBe(2);
+    expect(items[0].textContent).toContain("olive oil");
+    expect(items[0].textContent).toContain("2 tbsp");
+  });
+
+  it("the recipe card's Include-in-plan toggle drives onToggleRecipe", () => {
+    const onToggleRecipe = vi.fn();
+    const groceryList: SmartObject = {
+      id: "gl",
+      type: "grocery-list",
+      data: '{"rows":[]}',
+      links: [],
+      render: "table",
+      derive: { kind: "grocery-list", deps: ["o1"] },
+    };
+    openObjectPopup(obj({ id: "o1", type: "recipe", data: '{"name":"R","ingredients":[]}' }), {
+      onSave: () => {},
+      onDelete: () => {},
+      onClose: () => {},
+      objectTypes: () => TYPES,
+      allObjects: () => [groceryList],
+      onToggleRecipe,
+    });
+    const cb = document.querySelector<HTMLInputElement>(".object-recipe-include")!;
+    // o1 is already in gl.deps → checked; unchecking toggles it OUT.
+    expect(cb.checked).toBe(true);
+    cb.checked = false;
+    cb.dispatchEvent(new Event("change"));
+    expect(onToggleRecipe).toHaveBeenCalledWith("gl", false);
+  });
+
+  it("renders a grocery-list as an Item | Qty | From table", () => {
+    openObjectPopup(
+      obj({
+        type: "grocery-list",
+        data: JSON.stringify({
+          rows: [
+            { name: "olive oil", quantity: 4, unit: "tbsp", sources: ["Pasta", "Soup"] },
+            { name: "onion", quantity: 3, unit: "ct", sources: ["Pasta"] },
+          ],
+        }),
+        derive: { kind: "grocery-list", deps: ["a", "b"] },
+      }),
+      { onSave: () => {}, onDelete: () => {}, onClose: () => {}, objectTypes: () => TYPES },
+    );
+    const table = document.querySelector(".object-grocery-table")!;
+    expect(table).not.toBeNull();
+    const rows = table.querySelectorAll("tbody tr");
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("olive oil");
+    expect(rows[0].textContent).toContain("4 tbsp");
+    expect(rows[0].textContent).toContain("2 recipes");
+    // The auto-synced affordance (it's derived).
+    expect(document.querySelector(".object-rich-synced")?.textContent).toContain("Auto-synced");
+  });
+
+  it("renders a cart-preview grouped by aisle", () => {
+    openObjectPopup(
+      obj({
+        type: "cart-preview",
+        data: JSON.stringify({
+          aisles: [
+            { category: "Oils", items: [{ name: "olive oil", quantity: 4, unit: "tbsp" }] },
+            {
+              category: "Produce",
+              items: [
+                { name: "onion", quantity: 3, unit: "ct" },
+                { name: "tomato", quantity: 7, unit: "ct" },
+              ],
+            },
+          ],
+        }),
+        derive: { kind: "cart-preview", deps: ["gl"] },
+      }),
+      { onSave: () => {}, onDelete: () => {}, onClose: () => {}, objectTypes: () => TYPES },
+    );
+    const aisles = document.querySelectorAll(".object-cart-aisle");
+    expect(aisles.length).toBe(2);
+    expect(aisles[0].querySelector(".object-cart-aisle-name")?.textContent).toContain("Oils");
+    const produceItems = aisles[1].querySelectorAll(".object-cart-items li");
+    expect(produceItems.length).toBe(2);
+    expect(produceItems[1].textContent).toContain("tomato");
   });
 });

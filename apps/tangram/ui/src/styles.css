@@ -1124,6 +1124,59 @@ body {
   border-color: rgba(197, 64, 47, 0.35);
 }
 
+/* SO3: the recipe golden-path rich views (recipe card / grocery table / cart by
+ * aisle). The §8 smart-object PURPLE accent family — fill #EEEDFE, border
+ * #AFA9EC, text #3C3489, dot #534AB7. Functional (not pixel-exact; the full §8
+ * two-column + chat-panel mockup is SO4). */
+.object-rich {
+  border: 1px solid #afa9ec; border-radius: 8px; background: #eeedfe;
+  color: #3c3489; padding: 10px 12px; font-size: 13px;
+}
+/* The "auto-synced" affordance on a derived view (it's computed, not edited). */
+.object-rich-synced {
+  font-size: 11px; font-weight: 600; color: #534ab7; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 4px;
+}
+.object-rich-empty { color: #534ab7; opacity: 0.8; font-style: italic; }
+
+/* Recipe card: an expandable summary + ingredient list + plan toggle. */
+.object-recipe-summary {
+  font-weight: 600; cursor: pointer; color: #3c3489; list-style: none;
+}
+.object-recipe-summary::-webkit-details-marker { display: none; }
+.object-recipe-summary::before { content: "🍳 "; }
+.object-recipe-ingredients { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 3px; }
+.object-recipe-aisle {
+  font-size: 10px; padding: 1px 6px; border-radius: 999px;
+  background: #fff; border: 1px solid #afa9ec; color: #534ab7;
+}
+.object-recipe-plan {
+  margin-top: 10px; padding-top: 8px; border-top: 1px solid #afa9ec;
+  display: grid; gap: 4px;
+}
+.object-recipe-plan-toggle {
+  display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer;
+}
+
+/* Grocery list: an Item | Qty | From table. */
+.object-grocery-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.object-grocery-table th {
+  text-align: left; font-weight: 600; color: #534ab7;
+  border-bottom: 1px solid #afa9ec; padding: 4px 6px;
+}
+.object-grocery-table td { padding: 4px 6px; border-bottom: 1px solid rgba(175, 169, 236, 0.4); }
+.object-grocery-table tr:last-child td { border-bottom: none; }
+
+/* Cart preview: aisle headings + their items. */
+.object-cart-aisle { margin-top: 8px; }
+.object-cart-aisle:first-of-type { margin-top: 0; }
+.object-cart-aisle-name {
+  font-weight: 700; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: #534ab7;
+}
+.object-cart-aisle-name::before { content: "🧺 "; }
+.object-cart-items { margin: 3px 0 0; padding-left: 18px; display: grid; gap: 2px; }
+
 /* Tab bar: the segmented-control pills as a tablist. */
 .run-editor-tabs { margin: 10px 0 4px; display: flex; gap: 4px; }
 .run-editor-tab { flex: 1; }
