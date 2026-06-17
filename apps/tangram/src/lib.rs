@@ -67,6 +67,96 @@ pub struct Vault {
     /// attribute hydrates the empty default).
     #[autosurgeon(missing = "Option::default")]
     executions: Option<Vec<Execution>>,
+    /// The replicated **smart-object store** (Smart Objects SO1): the typed-graph
+    /// node store, the source of truth for every inline `[<label>](obj://<id>)`
+    /// chip. Generalizes the `invocations` index into one primitive
+    /// (`docs/design/smart-objects.md`) — built ALONGSIDE agents/runs, which
+    /// converge onto it in a later checkpoint. The markdown carries only `{id}`;
+    /// the `type`/`data`/`links`/`render` live here, keyed by the stable `id`. A
+    /// deterministic `Vec` (not a `HashMap`; the model `Default` must stay
+    /// deterministic). Absent on documents written by older binaries (the
+    /// `missing` attribute hydrates the empty default).
+    #[autosurgeon(missing = "Option::default")]
+    objects: Option<Vec<SmartObject>>,
+}
+
+/// One **smart object** (Smart Objects SO1) — a typed node in the replicated
+/// graph. Surfaced inline via an `@` type-picker as an atomic `obj://<id>` chip;
+/// the document holds only a reference (the link), this record is the source of
+/// truth. SO1 objects are **inert** (their `data` is whatever was written — no
+/// reactivity/`derive`, no `act`; those are SO2 / SOx). Keyed by the stable
+/// `id`. A deterministic `Vec` (not a `HashMap`).
+#[model]
+pub struct SmartObject {
+    /// The stable, global UUID embedded in the note's `obj://<id>` link (the
+    /// graph key). The UI mints it when it inserts the chip.
+    id: String,
+    /// The registered type name (the type registry, [`KNOWN_OBJECT_TYPES`]),
+    /// e.g. `note-ref` or `tag`. Free-form/forward-compatible — the registry is
+    /// advisory in SO1 (an unknown type is stored as-is). Serialized as `type`
+    /// on the wire (the field is `obj_type` because `type` is a Rust keyword).
+    #[serde(rename = "type")]
+    obj_type: String,
+    /// An opaque payload whose shape the TYPE owns (JSON or plain text). SO1 does
+    /// not parse it — it round-trips verbatim. Rich typed shapes (recipe,
+    /// grocery-list, …) are SO3.
+    data: String,
+    /// First-class, typed graph edges. Independent of where the chip sits, so an
+    /// edge may cross documents (the `target` is an object id, not a doc offset).
+    /// A deterministic `Vec`.
+    links: Vec<ObjLink>,
+    /// The presentation hint (`chip` | `panel` | `table` | …). Defaults to the
+    /// type's default (`chip` for the SO1 seed types) when created blank.
+    render: String,
+}
+
+/// One typed graph edge on a [`SmartObject`] (Smart Objects SO1). `target` is an
+/// object id (the edge endpoint in the graph); `url` is an optional external
+/// href for an `obj://`-degraded link. The `rel` is the edge label (e.g.
+/// `references`, `produced-by`).
+#[model]
+pub struct ObjLink {
+    /// The edge label (the relation), e.g. `references` / `produced-by`.
+    rel: String,
+    /// The target object's id (the edge endpoint).
+    target: String,
+    /// An optional external href (for a link that points outside the object
+    /// graph). `None` on documents written by older binaries.
+    #[autosurgeon(missing = "Option::default")]
+    url: Option<String>,
+}
+
+/// One entry in the smart-object **type registry** (Smart Objects SO1): a known
+/// type the `@` picker offers. Advisory — an object may carry an unregistered
+/// type, but the picker only lists these. Surfaced by [`Vault::object_types`].
+#[model]
+pub struct ObjectType {
+    /// The type name (the `SmartObject.obj_type` value), e.g. `note-ref`.
+    name: String,
+    /// A short human label for the picker, e.g. `Note reference`.
+    label: String,
+    /// The default `render` hint for a freshly-created object of this type.
+    render: String,
+}
+
+/// The seed type registry (Smart Objects SO1): 1–2 trivial types so the
+/// end-to-end `@`→chip→popup loop is demonstrable. Rich types (recipe,
+/// grocery-list, cart-preview) are SO3. The tuples are `(name, label, default
+/// render)`.
+const KNOWN_OBJECT_TYPES: &[(&str, &str, &str)] = &[
+    ("note-ref", "Note reference", "chip"),
+    ("tag", "Tag", "chip"),
+];
+
+/// The default `render` hint for a smart object of `obj_type`: the registered
+/// type's default, falling back to `chip` for an unregistered type. Used when an
+/// object is created with a blank `render`.
+fn default_render_for(obj_type: &str) -> String {
+    KNOWN_OBJECT_TYPES
+        .iter()
+        .find(|(name, _, _)| *name == obj_type)
+        .map_or("chip", |(_, _, render)| *render)
+        .to_string()
 }
 
 /// One execution of a Run (embedded-runs R3) — the append-only executions log
@@ -250,6 +340,7 @@ impl Default for Vault {
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
             executions: Some(Vec::new()),
+            objects: Some(Vec::new()),
         }
     }
 }
@@ -559,6 +650,14 @@ impl Vault {
         ctx.mutate("tick_agents", Self::prune_orphan_invocations)
             .map_err(|e| e.to_string())?;
 
+        // Smart Objects SO1: reconcile the object store on the same host cadence
+        // (prune entries whose `obj://<id>` link was deleted), so objects are
+        // self-cleaning like the invocations index. A no-op when none are orphaned.
+        ctx.mutate("tick_agents", |m| {
+            m.prune_orphan_objects();
+        })
+        .map_err(|e| e.to_string())?;
+
         let now = now_ms();
         // Backfill the stored next-fire for any entry left `None` (older
         // documents / a just-migrated index), so the timestamp selection below is
@@ -666,6 +765,140 @@ impl Vault {
         let mut out = self.executions.clone().unwrap_or_default();
         out.sort_by_key(|e| std::cmp::Reverse(e.ts));
         out
+    }
+
+    // ── Smart objects SO1: the typed-graph object store ──────────────────────
+    //
+    // A smart object is surfaced inline as an `[<label>](obj://<id>)` chip (the
+    // handle) backed by an entry in the `objects` store (the source of truth:
+    // type/data/links/render). The UI mints the UUID, inserts the link via the
+    // `@` type-picker, and calls `create_object`. Editing goes through
+    // `update_object`; removing the link prunes the entry on the next reconcile.
+    // This GENERALIZES the `invocations` index — mirrored action-for-action — and
+    // is built ALONGSIDE agents/runs (`docs/design/smart-objects.md`). SO1 objects
+    // are INERT (no reactivity/`derive`, no `act`).
+
+    /// The smart-object **type registry** (Smart Objects SO1): the known types
+    /// the `@` picker offers. Advisory — an object may carry an unregistered type,
+    /// but the picker lists these. SO1 seeds two trivial types (`note-ref`,
+    /// `tag`); rich types (recipe, grocery-list, …) are SO3.
+    pub fn object_types(&self) -> Vec<ObjectType> {
+        KNOWN_OBJECT_TYPES
+            .iter()
+            .map(|(name, label, render)| ObjectType {
+                name: (*name).to_string(),
+                label: (*label).to_string(),
+                render: (*render).to_string(),
+            })
+            .collect()
+    }
+
+    /// Create (or replace) a smart object in the store, keyed by `id` (the UUID
+    /// the UI embedded in the note's `obj://<id>` link). Idempotent on `id` (a
+    /// re-create overwrites type/data/links/render). A blank `render` defaults to
+    /// the type's registered default. The link insertion into the note is the
+    /// UI's job; this records the source of truth. Mirrors `create_invocation`.
+    pub fn create_object(
+        &mut self,
+        id: String,
+        obj_type: String,
+        data: String,
+        links: Vec<ObjLink>,
+        render: String,
+    ) -> Result<(), String> {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            return Err("object id must not be empty".to_string());
+        }
+        let obj_type = obj_type.trim().to_string();
+        if obj_type.is_empty() {
+            return Err("object type must not be empty".to_string());
+        }
+        let render = if render.trim().is_empty() {
+            default_render_for(&obj_type)
+        } else {
+            render.trim().to_string()
+        };
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        if let Some(existing) = objs.iter_mut().find(|o| o.id == id) {
+            existing.obj_type = obj_type;
+            existing.data = data;
+            existing.links = links;
+            existing.render = render;
+        } else {
+            objs.push(SmartObject {
+                id,
+                obj_type,
+                data,
+                links,
+                render,
+            });
+        }
+        Ok(())
+    }
+
+    /// Edit a smart object's type/data/links/render in place (the object popup's
+    /// Save). A blank `render` defaults to the type's registered default. Errors
+    /// if no object has the given id. Mirrors `update_invocation`.
+    pub fn update_object(
+        &mut self,
+        id: String,
+        obj_type: String,
+        data: String,
+        links: Vec<ObjLink>,
+        render: String,
+    ) -> Result<(), String> {
+        let obj_type = obj_type.trim().to_string();
+        if obj_type.is_empty() {
+            return Err("object type must not be empty".to_string());
+        }
+        let render = if render.trim().is_empty() {
+            default_render_for(&obj_type)
+        } else {
+            render.trim().to_string()
+        };
+        let obj = self
+            .objects
+            .get_or_insert_with(Vec::new)
+            .iter_mut()
+            .find(|o| o.id == id)
+            .ok_or_else(|| format!("no object with id {id}"))?;
+        obj.obj_type = obj_type;
+        obj.data = data;
+        obj.links = links;
+        obj.render = render;
+        Ok(())
+    }
+
+    /// Delete a smart object from the store by id (the popup's explicit delete;
+    /// removing the inline link also prunes it on the next reconcile). Errors if
+    /// no object has the given id. Mirrors `delete_invocation`.
+    pub fn delete_object(&mut self, id: String) -> Result<(), String> {
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        let before = objs.len();
+        objs.retain(|o| o.id != id);
+        if objs.len() == before {
+            return Err(format!("no object with id {id}"));
+        }
+        Ok(())
+    }
+
+    /// List the smart objects in the store, sorted by id (deterministic). The UI
+    /// reads these off the vault state frame, but this is also a queryable action
+    /// for parity/tests. Mirrors `list_invocations`.
+    pub fn list_objects(&self) -> Vec<SmartObject> {
+        let mut out = self.objects.clone().unwrap_or_default();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    /// Prune store entries whose backing `obj://<id>` link no longer exists in
+    /// any note body (stray-ref reconcile — no orphans, like the invocations
+    /// index). Returns the number pruned. Also runs implicitly on every agent
+    /// tick. Mirrors `reconcile_invocations`.
+    pub fn reconcile_objects(&mut self) -> i64 {
+        let pruned = self.prune_orphan_objects();
+        i64::try_from(pruned).unwrap_or(i64::MAX)
     }
 
     // ── Tools/MCP T1: per-agent MCP access requests + user approval ───────────
@@ -922,6 +1155,32 @@ impl Vault {
         let before = invs.len();
         invs.retain(|i| live.contains(&i.id));
         before - invs.len()
+    }
+
+    /// The set of live `obj://<id>` link ids across every note body (Smart
+    /// Objects SO1). The reconcile pass keeps only store entries that still have
+    /// a backing link. Mirrors [`Vault::live_invocation_ids`].
+    fn live_object_ids(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+        for file in &self.files {
+            for link in agents::parse_object_links(&file.body) {
+                if !ids.contains(&link.id) {
+                    ids.push(link.id);
+                }
+            }
+        }
+        ids
+    }
+
+    /// Stray-ref reconcile: drop every object-store entry whose `obj://<id>` link
+    /// no longer appears in any note body (Smart Objects SO1). Returns the number
+    /// pruned. Mirrors [`Vault::prune_orphan_invocations`].
+    fn prune_orphan_objects(&mut self) -> usize {
+        let live = self.live_object_ids();
+        let objs = self.objects.get_or_insert_with(Vec::new);
+        let before = objs.len();
+        objs.retain(|o| live.contains(&o.id));
+        before - objs.len()
     }
 
     /// Backfill the stored `next_fire_ms` for any index entry that still has it
@@ -1545,6 +1804,7 @@ mod tests {
             invocations: Some(Vec::new()),
             mcp_grants: Some(Vec::new()),
             executions: Some(Vec::new()),
+            objects: Some(Vec::new()),
         }
     }
 
@@ -2142,6 +2402,161 @@ mod tests {
         let mut v = vault_with_invocation("standup", "uuid-1", "1m");
         assert_eq!(v.reconcile_invocations(), 0);
         assert_eq!(v.list_invocations().len(), 1);
+    }
+
+    // ── Smart objects SO1: the typed-graph object store ──────────────────────
+
+    /// Build a vault holding one note whose body carries an `obj://<id>` chip.
+    fn vault_with_object_link(id: &str) -> Vault {
+        let mut v = empty();
+        let body = format!("# Note\n\nsee [◆ thing](obj://{id}) here.\n");
+        v.create_file("note.md".into(), body).unwrap();
+        v
+    }
+
+    fn obj_link(rel: &str, target: &str) -> ObjLink {
+        ObjLink {
+            rel: rel.into(),
+            target: target.into(),
+            url: None,
+        }
+    }
+
+    #[test]
+    fn object_create_update_delete_list_roundtrip() {
+        let mut v = empty();
+        v.create_object(
+            "o1".into(),
+            "tag".into(),
+            "{\"label\":\"urgent\"}".into(),
+            vec![obj_link("references", "o2")],
+            String::new(), // blank → default render for the type
+        )
+        .unwrap();
+        let listed = v.list_objects();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "o1");
+        assert_eq!(listed[0].obj_type, "tag");
+        assert_eq!(listed[0].render, "chip"); // defaulted from the registry
+        assert_eq!(listed[0].links.len(), 1);
+        assert_eq!(listed[0].links[0].rel, "references");
+        assert_eq!(listed[0].links[0].target, "o2");
+
+        // Update overwrites type/data/links/render in place.
+        v.update_object(
+            "o1".into(),
+            "note-ref".into(),
+            "{\"ref\":\"o9\"}".into(),
+            vec![obj_link("references", "o9")],
+            "panel".into(),
+        )
+        .unwrap();
+        let updated = v.list_objects();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].obj_type, "note-ref");
+        assert_eq!(updated[0].render, "panel");
+        assert_eq!(updated[0].links[0].target, "o9");
+
+        // Delete removes by id.
+        v.delete_object("o1".into()).unwrap();
+        assert!(v.list_objects().is_empty());
+        assert!(v.delete_object("o1".into()).is_err());
+    }
+
+    #[test]
+    fn create_object_is_idempotent_on_id_and_rejects_empties() {
+        let mut v = empty();
+        v.create_object("o1".into(), "tag".into(), "a".into(), vec![], "chip".into())
+            .unwrap();
+        // Re-create with the same id overwrites rather than appending.
+        v.create_object("o1".into(), "tag".into(), "b".into(), vec![], "chip".into())
+            .unwrap();
+        let listed = v.list_objects();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].data, "b");
+        // Empty id / type are rejected.
+        assert!(
+            v.create_object(
+                "  ".into(),
+                "tag".into(),
+                String::new(),
+                vec![],
+                String::new()
+            )
+            .is_err()
+        );
+        assert!(
+            v.create_object(
+                "o2".into(),
+                " ".into(),
+                String::new(),
+                vec![],
+                String::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn list_objects_is_sorted_by_id_deterministically() {
+        let mut v = empty();
+        for id in ["b", "a", "c"] {
+            v.create_object(
+                id.into(),
+                "tag".into(),
+                String::new(),
+                vec![],
+                "chip".into(),
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = v.list_objects().into_iter().map(|o| o.id).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn reconcile_prunes_orphaned_objects() {
+        let mut v = vault_with_object_link("o1");
+        v.create_object("o1".into(), "tag".into(), "x".into(), vec![], "chip".into())
+            .unwrap();
+        // A live link → nothing pruned.
+        assert_eq!(v.reconcile_objects(), 0);
+        assert_eq!(v.list_objects().len(), 1);
+        // Remove the inline link from the note → the store entry is an orphan.
+        let note = v
+            .files
+            .iter()
+            .find(|f| f.path == "note.md")
+            .unwrap()
+            .clone();
+        v.write_file(note.id, "# Note\n\nno link anymore.\n".into())
+            .unwrap();
+        assert_eq!(v.reconcile_objects(), 1);
+        assert!(v.list_objects().is_empty());
+        // A second reconcile prunes nothing.
+        assert_eq!(v.reconcile_objects(), 0);
+    }
+
+    #[test]
+    fn object_link_id_scheme_parses_like_the_chip() {
+        // The `@`-chip handle is `[<label>](obj://<id>)`; the component parses
+        // the SAME scheme the UI inserts (mirrors `parse_object_links`).
+        let body = "before [◆ tag](obj://abc-123) after [x](obj://def) end";
+        let links = agents::parse_object_links(body);
+        let ids: Vec<&str> = links.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["abc-123", "def"]);
+        // An `agent://` link is NOT an object link (the two schemes are distinct).
+        assert!(agents::parse_object_links("[⚡ a](agent://r1)").is_empty());
+        assert!(agents::parse_agent_links("[◆ t](obj://o1)").is_empty());
+    }
+
+    #[test]
+    fn object_types_seeds_the_known_registry() {
+        let v = empty();
+        let types = v.object_types();
+        let names: Vec<&str> = types.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"note-ref"));
+        assert!(names.contains(&"tag"));
     }
 
     // ── Tools/MCP T1: the grant model lifecycle ──────────────────────────────

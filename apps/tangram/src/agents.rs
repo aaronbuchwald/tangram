@@ -594,25 +594,42 @@ pub struct AgentLink {
 /// agree on the handle format.
 #[must_use]
 pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
+    // The link must open with a `[` somewhere before the `]`; a bare
+    // `](agent://…)` without an opening bracket is not a markdown link. The
+    // shared scanner enforces that and finds the id up to the closing `)`.
+    parse_scheme_links(body, b"](agent://")
+}
+
+/// Parse every inline `[<label>](obj://<id>)` link in `body`, in document order
+/// (Smart Objects SO1). Identical scheme to [`parse_agent_links`] but for the
+/// `obj://` smart-object handle; mirrors the UI's `parseObjectLinks` so both
+/// sides agree on the handle format. The label may contain anything but `]`; the
+/// id is the non-`)` run after the `obj://` scheme.
+#[must_use]
+pub fn parse_object_links(body: &str) -> Vec<AgentLink> {
+    parse_scheme_links(body, b"](obj://")
+}
+
+/// The shared inline-link scanner behind [`parse_agent_links`] and
+/// [`parse_object_links`]: find every `[…]<needle><id>)` markdown link where
+/// `needle` is `](agent://` or `](obj://`, returning the trimmed id + the byte
+/// offset just past the closing `)`. A bare `<needle><id>)` with no opening `[`
+/// before the `]` is skipped (not a markdown link).
+fn parse_scheme_links(body: &str, needle: &[u8]) -> Vec<AgentLink> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();
-    let needle = b"](agent://";
     let mut i = 0usize;
     while i + needle.len() <= bytes.len() {
         if &bytes[i..i + needle.len()] != needle {
             i += 1;
             continue;
         }
-        // The link must open with a `[` somewhere before the `]` on this run; a
-        // bare `](agent://…)` without an opening bracket is not a markdown link.
-        // Find the matching `[` by scanning back to the nearest unbalanced `[`.
         let label_close = i; // index of `]`
         let Some(open) = body[..label_close].rfind('[') else {
             i += needle.len();
             continue;
         };
         let _ = open; // presence of `[` is all we require for the handle
-        // The id runs from just after `agent://` to the closing `)`.
         let id_start = i + needle.len();
         let Some(rel_close) = body[id_start..].find(')') else {
             break; // no closing paren — malformed; stop scanning
@@ -622,7 +639,7 @@ pub fn parse_agent_links(body: &str) -> Vec<AgentLink> {
         if !id.is_empty() {
             out.push(AgentLink {
                 id,
-                link_end: id_end + 1, // just past the `)`
+                link_end: id_end + 1,
             });
         }
         i = id_end + 1;

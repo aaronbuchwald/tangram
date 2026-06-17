@@ -206,5 +206,8 @@ redesign of the shell's inline agent surface. The terminology, the
 Tangram-adapted platform mapping, and the R1–R4 staging are approved; **the
 redesign is complete — R1–R4 all shipped.** The remaining future work is
 **versioning** (§4) and the **Handoff-2 smart-objects generalization** (a Run's
-mounted set + output as a reusable, composable object). The execution model and
-host runtime remain owned by [agents.md](agents.md).*
+mounted set + output as a reusable, composable object) — now specced as the
+typed-graph primitive in [smart-objects.md](smart-objects.md), built ALONGSIDE
+this system (agents/runs converge onto the primitive in a later checkpoint,
+smart-objects §7). The execution model and host runtime remain owned by
+[agents.md](agents.md).*

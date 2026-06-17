@@ -1,9 +1,10 @@
 // Editor-mount smoke test (regression guard).
 //
-// This mounts `MdEditor` the way `main.ts` mounts it — with BOTH the slash
-// `/<partial>` and the `[[<partial>` wikilink autocomplete wired through
-// non-empty candidate providers so both completion sources are active — and
-// asserts that constructing it does NOT throw and that the document renders.
+// This mounts `MdEditor` the way `main.ts` mounts it — with the slash
+// `/<partial>`, the `[[<partial>` wikilink, AND the `@<partial>` smart-object
+// (Smart Objects SO1) autocomplete all wired through non-empty providers so all
+// THREE completion sources are active — and asserts that constructing it does
+// NOT throw and that the document renders.
 //
 // It exists to catch the "editor never mounts" class of regression. The
 // specific bug that motivated it: the editor configured the CodeMirror 6
@@ -20,6 +21,7 @@ import { describe, expect, it } from "vitest";
 import { MdEditor } from "./editor";
 import type { SlashCandidate } from "./slashComplete";
 import type { WikiCandidate } from "./wikiComplete";
+import type { ObjectType } from "./api";
 import { CREATE_WORD } from "./slashTrigger";
 
 const noop = () => {};
@@ -34,9 +36,14 @@ const wikiCandidates = (): WikiCandidate[] => [
   { id: "n1", path: "Daily/Today", basename: "Today" },
   { id: "n2", path: "Ideas", basename: "Ideas" },
 ];
+// Smart objects SO1: a non-empty type registry so the `@` source is active too.
+const objectTypes = (): ObjectType[] => [
+  { name: "note-ref", label: "Note reference", render: "chip" },
+  { name: "tag", label: "Tag", render: "chip" },
+];
 
 describe("MdEditor mount (regression smoke test)", () => {
-  it("constructs and mounts without throwing, with both autocomplete sources wired", () => {
+  it("constructs and mounts without throwing, with all three autocomplete sources wired", () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
 
@@ -67,6 +74,14 @@ describe("MdEditor mount (regression smoke test)", () => {
         wikiCandidates,
         // current note path
         () => "Daily/Today",
+        // onOpenAgentLink / resolveRunStatus / onScrollToOutput / onCalloutBacklink
+        noop,
+        () => null,
+        noop,
+        noop,
+        // Smart objects SO1 — the `@` type-picker source (non-empty → active).
+        objectTypes,
+        noop, // onMintObject
       );
     }).not.toThrow();
 

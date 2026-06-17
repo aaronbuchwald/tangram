@@ -58,6 +58,17 @@ import {
   type WikiCandidateProvider,
   wikiCompletionSource,
 } from "./wikiComplete";
+import {
+  type ObjectLinkOpener,
+  type ObjectResolver,
+  objectChip,
+  objectLinkClick,
+} from "./objectLink";
+import {
+  type ObjectMintHandler,
+  type ObjectTypeProvider,
+  objectCompletionSource,
+} from "./objectComplete";
 import { livePreview } from "./livePreview";
 import { type CalloutBacklink, runCalloutCard } from "./callout";
 
@@ -187,6 +198,30 @@ const theme = EditorView.theme(
     },
     // The Done chip's `↓` jump-to-output affordance — a slightly louder hit area.
     ".cm-agent-link-jump": { cursor: "pointer", fontWeight: "700" },
+    // Inline `[<label>](obj://<id>)` smart-object chips (Smart Objects SO1). An
+    // ATOMIC widget (the cursor steps over it) with a `◆` glyph, GENERALIZING the
+    // agent `⚡` chip. A distinct PURPLE accent so a smart object reads apart from
+    // the agent (dark-blue) chip and `[[ ]]` wikilinks (accent blue); a click
+    // opens the object popup. Per-type tints (the seed types) below.
+    ".cm-object-link": {
+      color: "#8a5cf6",
+      backgroundColor: "rgba(138,92,246,0.14)",
+      borderRadius: "4px",
+      padding: "0.05em 0.3em",
+      fontWeight: "600",
+      textDecoration: "none",
+      cursor: "pointer",
+      whiteSpace: "nowrap",
+    },
+    // `tag`: a warm amber tint; `note-ref`: a teal tint — quick per-type read.
+    ".cm-object-link-tag": {
+      color: "#b06a00",
+      backgroundColor: "rgba(214,158,46,0.16)",
+    },
+    ".cm-object-link-note-ref": {
+      color: "#0d8f86",
+      backgroundColor: "rgba(13,143,134,0.14)",
+    },
     // The bidirectional-backlink flash (R3): a brief highlight on the line a
     // chip/callout backlink jumps to (the `↓`/`↑` targets).
     ".cm-backlink-flash": {
@@ -305,6 +340,21 @@ export class MdEditor {
     // whose host block id matches (the callout→chip direction, R3). Defaults to
     // a no-op so non-vault editors are unchanged.
     onCalloutBacklink: CalloutBacklink = () => {},
+    // Smart objects SO1 — the `@` type-picker (docs/design/smart-objects.md).
+    // `objectTypes` supplies the registered types listed in the `@<partial>`
+    // completion popup; `onMintObject` mints a UUID, inserts the atomic
+    // `[<label>](obj://<id>)` chip in place of the `@` token, and persists via
+    // `create_object`. Defaults make the picker a harmless no-op (empty list)
+    // when not wired, so non-vault editors are unchanged.
+    objectTypes: ObjectTypeProvider = () => [],
+    onMintObject: ObjectMintHandler = () => {},
+    // Click an inline `[<label>](obj://<id>)` smart-object chip → open the object
+    // popup for that id. Defaults to a no-op.
+    onOpenObjectLink: ObjectLinkOpener = () => {},
+    // Resolves a chip's id to its live SmartObject so the chip renders its
+    // per-type glyph/style. Reads through the live replicated store. Defaults to
+    // "no record" → the chip reads as an `unknown`-type chip, a harmless no-op.
+    resolveObject: ObjectResolver = () => null,
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -354,6 +404,13 @@ export class MdEditor {
         // callout block with a styled card; its `↑` backlinks to the chip. The
         // raw source reveals on the active line (editable), like livePreview.
         runCalloutCard(onCalloutBacklink),
+        // Inline `[<label>](obj://<id>)` smart-object chip (Smart Objects SO1):
+        // an ATOMIC widget (the cursor steps over it) with a per-type glyph,
+        // GENERALIZING the agent chip above (built alongside it). A click opens
+        // the object popup. Always on; with the default resolver every chip reads
+        // as an `unknown`-type chip and the click is a no-op.
+        objectChip(resolveObject),
+        objectLinkClick(onOpenObjectLink),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
         // mounts (notes stop rendering). So the slash `/<partial>` popup and the
@@ -367,6 +424,11 @@ export class MdEditor {
           override: [
             slashCompletionSource(slashCandidates),
             wikiCompletionSource(wikiCandidates, currentNotePath),
+            // Smart objects SO1 — the `@` type-picker. Added to this SAME single
+            // override array (NEVER a second `autocompletion()` — a duplicate
+            // throws "Config merge conflict"). Self-gates on the `@` trigger and
+            // is a harmless no-op when its type provider is empty.
+            objectCompletionSource(objectTypes, onMintObject),
           ],
           activateOnTyping: true,
           icons: false,

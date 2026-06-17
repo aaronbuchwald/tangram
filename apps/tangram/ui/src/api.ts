@@ -62,6 +62,37 @@ export interface Execution {
   config_hash: string;
 }
 
+/** One typed graph edge on a SmartObject (Smart Objects SO1). Mirrors `ObjLink`
+ *  in `apps/tangram/src/lib.rs`. `target` is an object id; `url` is an optional
+ *  external href. */
+export interface ObjLink {
+  rel: string;
+  target: string;
+  url?: string | null;
+}
+
+/** One smart object from the replicated object store (Smart Objects SO1). The
+ *  inline `[<label>](obj://<id>)` chip in a note is just the handle (`{id}`);
+ *  this record owns `type`/`data`/`links`/`render`. Mirrors `SmartObject` in
+ *  `apps/tangram/src/lib.rs`; carried on the vault state frame. SO1 objects are
+ *  inert (no reactivity/derive, no act). The Rust field is `obj_type`, serialized
+ *  as `type` on the wire. */
+export interface SmartObject {
+  id: string;
+  type: string;
+  data: string;
+  links: ObjLink[];
+  render: string;
+}
+
+/** One entry in the smart-object type registry (Smart Objects SO1) — a type the
+ *  `@` picker offers. Mirrors `ObjectType` in `apps/tangram/src/lib.rs`. */
+export interface ObjectType {
+  name: string;
+  label: string;
+  render: string;
+}
+
 export interface VaultState {
   files: MdFile[];
   /** Present on documents written by this binary or newer; absent (treat as
@@ -73,6 +104,9 @@ export interface VaultState {
   /** The replicated append-only executions log (embedded-runs R3). Absent on
    *  older docs (treat as []). */
   executions?: Execution[] | null;
+  /** The replicated smart-object store (Smart Objects SO1). Absent on older docs
+   *  (treat as []). */
+  objects?: SmartObject[] | null;
 }
 
 // The shell's own app name on the host. The shell is the outer container and
@@ -159,6 +193,28 @@ export const vault = {
   // appending its output; returns the produced text. Not bound to the Run's
   // schedule — a manual one-off using the Agent's instructions.
   runAgent: (name: string) => postAction("run_agent", { name }) as Promise<string>,
+  // Smart objects SO1: the replicated object store keyed by the UUID embedded
+  // in the note's inline `obj://<id>` chip. The UI mints the id, inserts the
+  // chip via the `@` type-picker, and creates the entry; the object popup
+  // edits/deletes it. Mirrors the invocation API. The action arg key is
+  // `obj_type` (the Rust parameter name); the wire model field is `type`.
+  createObject: (
+    id: string,
+    obj_type: string,
+    data: string,
+    links: ObjLink[] = [],
+    render = "",
+  ) => postAction("create_object", { id, obj_type, data, links, render }) as Promise<null>,
+  updateObject: (
+    id: string,
+    obj_type: string,
+    data: string,
+    links: ObjLink[] = [],
+    render = "",
+  ) => postAction("update_object", { id, obj_type, data, links, render }) as Promise<null>,
+  deleteObject: (id: string) => postAction("delete_object", { id }) as Promise<null>,
+  listObjects: () => postAction("list_objects", {}) as Promise<SmartObject[]>,
+  objectTypes: () => postAction("object_types", {}) as Promise<ObjectType[]>,
   // Tools/MCP T1: the user-approval actions on a `kind: agent`'s `mcp_servers`
   // request. `approve_mcp` binds to the hash the user saw (a stale hash is
   // refused by the component).

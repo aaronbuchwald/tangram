@@ -112,7 +112,10 @@ symlink to `.agents/skills`.
   driven host-side by `src/scheduler.rs` (`docs/design/agents.md`). The inline
   surface's staged redesign — the two-layer **Agent / Run / Execution** model
   (user-facing Trigger→Run), atomic CM6 chip + live status, R1–R4 roadmap —
-  is `docs/design/embedded-runs.md`. A
+  is `docs/design/embedded-runs.md`. **Smart objects** generalize that chip
+  system into one typed-graph primitive (`objects` store + `@` type-picker +
+  atomic `obj://` chip + typed links; built alongside agents/runs) —
+  `docs/design/smart-objects.md` (SO1 foundation; SO2–SO4 roadmap). A
   right-sidebar **app chat** wires DeepSeek to the active app's MCP tools via
   a browser MCP client + tool-calling loop (`ui/src/{chatPanel,mcpClient,llmChat}.ts`)
 - Two execution paths to serve all apps on one port (README "Run them all in

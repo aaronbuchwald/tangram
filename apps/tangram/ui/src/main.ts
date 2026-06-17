@@ -13,6 +13,7 @@ import {
   type FleetApp,
   type McpGrant,
   type MdFile,
+  type ObjectType,
   type VaultState,
 } from "./api";
 import { isAgentPopupOpen, openAgentPopup } from "./agentPopup";
@@ -38,6 +39,12 @@ import {
   type InvocationIndex,
 } from "./invocations";
 import { wikiCandidatesFromFiles } from "./wikiComplete";
+import {
+  buildObjectIndex,
+  buildObjectLink,
+  type ObjectIndex,
+} from "./objectLink";
+import { isObjectPopupOpen, openObjectPopup } from "./objectPopup";
 import { calloutBlockId } from "./callout";
 import {
   type CreatedAgent,
@@ -122,6 +129,13 @@ let invocationIndex: InvocationIndex = buildInvocationIndex([]);
 // `executions` records, carried on the vault state frame. The Run editor's
 // History tab reads a Run's executions from here by run id.
 let executions: Execution[] = [];
+// Smart objects SO1: the app's REPLICATED `objects` store, carried on the vault
+// state frame and rebuilt here on every state alongside the other indexes. The
+// inline `obj://<id>` chip in a note is only the handle; type/data/links/render
+// live in this store. The editor's chip resolver + the object popup read from
+// here by id. The type registry is fetched once on boot (it is static in SO1).
+let objectIndex: ObjectIndex = buildObjectIndex([]);
+let objectTypes: ObjectType[] = [];
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
 
@@ -1084,6 +1098,55 @@ function stripAgentLink(id: string): void {
   editor.replaceRange(open, to, label);
 }
 
+// Smart objects SO1: open the basic object popup for an inline `obj://<id>`
+// chip click. Reads the object from the live (replicated) store by id; the
+// editor stays on the file. Save edits type/data/links (`update_object`);
+// Delete removes the store entry AND strips the inline link (so the handle and
+// the record go together). Mirrors `openAgentLinkTrigger`.
+function openObjectLinkPopup(id: string): void {
+  const obj = objectIndex.byId(id);
+  if (!obj) {
+    // The link has no backing record (e.g. just deleted on another device).
+    // Nothing to edit — strip the dangling handle so the doc stays clean.
+    stripObjectLink(id);
+    return;
+  }
+  openObjectPopup(obj, {
+    onSave: (objType, data, links, render) => {
+      void vault
+        .updateObject(id, objType, data, links, render)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+      activeEditor?.editor.focus();
+    },
+    onDelete: () => {
+      stripObjectLink(id);
+      void vault
+        .deleteObject(id)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+    },
+    onClose: () => activeEditor?.editor.focus(),
+    objectTypes: () => objectTypes,
+  });
+}
+
+// Strip the inline `[…](obj://<id>)` link from the active note editor (used by
+// the object popup's Delete). Replaces the token with its label text (so the
+// sentence reads naturally); the debounced onChange persists it and the
+// component reconcile prunes the orphan. Mirrors `stripAgentLink`.
+function stripObjectLink(id: string): void {
+  const editor = activeEditor?.editor;
+  if (!editor) return;
+  const doc = editor.doc;
+  const token = `](obj://${id})`;
+  const close = doc.indexOf(token);
+  if (close === -1) return;
+  const open = doc.lastIndexOf("[", close);
+  if (open === -1) return;
+  const label = doc.slice(open + 1, close);
+  const to = close + token.length;
+  editor.replaceRange(open, to, label);
+}
+
 // The Done chip's `↓` (chip→callout backlink, R3): jump to the Run's output
 // callout via its `^runout-<id>` block id and flash it. Falls back to scrolling
 // to the chip's link when no callout exists yet (a Run that hasn't produced
@@ -1204,7 +1267,11 @@ function renderNoteTab(fileId: string) {
     (word) => agentIndex.findAgent(word) !== null,
     // Auto-open guard (Fix 1): don't re-pop the create popup while either agent
     // popup (create or run) is already up.
-    () => isCreateAgentPopupOpen() || isAgentPopupOpen() || isTriggerPopupOpen(),
+    () =>
+      isCreateAgentPopupOpen() ||
+      isAgentPopupOpen() ||
+      isTriggerPopupOpen() ||
+      isObjectPopupOpen(),
     // Live candidates for the `/<partial>` autocomplete popup: every indexed
     // agent/skill (kind from its def) plus the reserved `agent` create command.
     // Reads through the live index (rebuilt each vault state) so new defs show
@@ -1243,6 +1310,32 @@ function renderNoteTab(fileId: string) {
     // The callout header's `↑` backlink: scroll to + highlight the chip's host
     // paragraph via its `^run-<id>` block id (callout→chip backlink, R3).
     (hostBlockId) => scrollToChip(hostBlockId),
+    // Smart objects SO1 — the `@` type-picker's candidate types (read live off
+    // the fetched registry so the list reflects any newly-registered type).
+    () => objectTypes,
+    // Mint a smart object on type-pick: generate a UUID, swap the `@<partial>`
+    // token for the atomic `[<glyph> <label>](obj://<id>)` chip, and persist via
+    // `create_object` (the end-to-end `@`→chip→store loop). The chip label is the
+    // type's human label; `data`/`links` start empty (edited via the popup).
+    (view, objType, from, to) => {
+      const id = crypto.randomUUID();
+      const link = buildObjectLink(objType.label, id);
+      view.dispatch({
+        changes: { from, to, insert: link },
+        selection: { anchor: from + link.length },
+      });
+      view.focus();
+      void vault
+        .createObject(id, objType.name, "", [], objType.render)
+        .catch((e) => showError(String(e instanceof Error ? e.message : e)));
+    },
+    // Click an inline `[<label>](obj://<id>)` smart-object chip → open the basic
+    // object popup for that id (read from the live store by id).
+    (id) => openObjectLinkPopup(id),
+    // Live object resolver: read the SmartObject by id from the live replicated
+    // store so the chip renders its per-type glyph/style and restyles as the
+    // object changes.
+    (id) => objectIndex.byId(id),
   );
   state.editor = editor;
 
@@ -1564,6 +1657,12 @@ function onVaultState(state: VaultState) {
   // The executions log (embedded-runs R3) — the Run editor's History tab reads
   // a Run's executions from here by run id.
   executions = state.executions ?? [];
+  // Smart objects SO1: rebuild the object store index from the REPLICATED
+  // records on the state frame (the source of truth — not the markdown). The
+  // editor's chip resolver closes over `objectIndex`, so chips restyle as
+  // objects change without an editor re-mount; the component prunes orphans
+  // server-side.
+  objectIndex = buildObjectIndex(state.objects ?? []);
   tabs.pruneNotes(new Set(files.map((f) => f.id)));
   renderTree();
   renderAgentsBadge();
@@ -1666,6 +1765,15 @@ function startShell() {
   subscribeVault(onVaultState);
   void refreshFleet();
   window.setInterval(() => void refreshFleet(), 5000);
+  // Smart objects SO1: fetch the (static) type registry once so the `@`
+  // type-picker has its candidate list. Best-effort — the picker degrades to an
+  // empty list (a harmless no-op) if this fails.
+  void vault
+    .objectTypes()
+    .then((types) => {
+      objectTypes = types;
+    })
+    .catch((e) => console.error("object types fetch failed", e));
 }
 
 // Auth gate (auth.md §9 C5). In self-hosted mode there is no auth chrome and the
