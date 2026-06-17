@@ -17,9 +17,11 @@ rules = [
 # Names with a bundled component (src/components.ts) get the full app
 # surface; others degrade to the plain sync relay.
 APPS = "notes,nutrition"
-# Nutrition's strategy config is NOT set here: provide CALORIENINJAS_API_KEY
-# with `wrangler secret put CALORIENINJAS_API_KEY` (or --var under `wrangler
-# dev`); unset, nutrition falls back to offline/manual logging cleanly.
+# Nutrition's strategy config is NOT set here: the default strategy is
+# calorieninjas — provide CALORIENINJAS_API_KEY with `wrangler secret put
+# CALORIENINJAS_API_KEY` (or --var under `wrangler dev`) to resolve novel
+# components. Without a key, dynamic resolution fails cleanly while manual,
+# gram-quantified logging over the seeded components still works.
 #
 # Identity (RUNTIME_PLAN Phase 6): OAuth sign-in needs the GitHub OAuth app
 # credentials as SECRETS (`wrangler secret put GITHUB_CLIENT_ID` and

@@ -25,12 +25,14 @@
 #      miniflare-HOSTED app (not a bare relay): pre-existing DO-side notes
 #      reach the replica, replica writes reach the DO, a DO-side ACTION
 #      reaches the replica; propagation < 5s each way
-#   g. nutrition: capabilities reports the offline fallback without a key;
-#      manual (gram-quantified) log_meal works offline; description-only
-#      log_meal fails CLEANLY (422 + actionable error); with strategy vars
-#      set (restart) capabilities flips and the in-guest strategy's outbound
-#      call is stopped by the per-app host ALLOWLIST (proving the async
-#      http-fetch import path end to end, no external network needed)
+#   g. nutrition: capabilities default to the calorieninjas strategy
+#      (description_input true — capabilities report the SELECTED strategy,
+#      not key presence; #28 dropped the keyless "offline" strategy); a
+#      manual, gram-quantified log_meal over a seeded component logs with no
+#      network; then with strategy vars set (restart) capabilities flips and
+#      a description-only log_meal's in-guest strategy call is stopped CLEANLY
+#      (422 + actionable error) by the per-app host ALLOWLIST (proving the
+#      async http-fetch import path end to end, no external network needed)
 #   h. clean teardown: every spawned process dead, scratch dirs removed
 #
 # Self-contained and repeatable: scratch HOME/data dirs and an isolated
@@ -365,23 +367,30 @@ assert_note_count "$BASE_A" 5 "(f) replica fully converged"
 assert_note_count "$BASE/notes" 5 "(f) CF fully converged"
 log "(f) FLAGSHIP bidirectional replica↔CF-hosted-app sync: OK"
 
-# ── (g) nutrition: offline fallback, then allowlist enforcement ──────────────
+# ── (g) nutrition: default capabilities + offline manual logging, then
+#        allowlist enforcement ─────────────────────────────────────────────
 
+# Default strategy (NUTRITION_STRATEGY unset) is calorieninjas; it resolves
+# over the network, so description_input is advertised true regardless of
+# whether a key is injected (#28 removed the keyless "offline" strategy —
+# capabilities report the SELECTED strategy, not key presence). The no-key
+# behavior is enforced at resolve time below, not in the capabilities shape.
 CAPS=$(curl -fsS "$BASE/nutrition/api/capabilities")
-echo "$CAPS" | jq -e '.strategy == "offline" and .description_input == false' >/dev/null ||
-    fail "(g) nutrition capabilities without a key should be offline: $CAPS"
+echo "$CAPS" | jq -e '.strategy == "calorieninjas" and .description_input == true' >/dev/null ||
+    fail "(g) nutrition capabilities default to calorieninjas: $CAPS"
 
+# A manual, gram-quantified meal over a SEEDED component ("oatmeal" is in the
+# genesis component_mappings) logs with no network: explicit components win
+# and nothing needs resolving, so no strategy call is made — this works
+# regardless of key. (A description-only meal, or an unseeded component,
+# would reach for the strategy's network; that no-key failure path is proven
+# network-free by the allowlist-denial probe below.)
 curl -fsS -X POST "$BASE/nutrition/api/actions/log_meal" -H 'Content-Type: application/json' \
     -d '{"description":"breakfast","components":[{"component":"oatmeal","qty_g":80}]}' |
     jq -e '.result' >/dev/null || fail "(g) manual log_meal failed offline"
 curl -fsS "$BASE/nutrition/api/state" | jq -e '.meals | length == 1' >/dev/null ||
     fail "(g) logged meal not in nutrition state"
-
-DESC=$(curl -sS -w '\n%{http_code}' -X POST "$BASE/nutrition/api/actions/log_meal" \
-    -H 'Content-Type: application/json' -d '{"description":"2 eggs and toast"}')
-[[ $DESC == *422 && $DESC == *"error"* ]] ||
-    fail "(g) description-only log_meal offline: expected clean 422, got: $DESC"
-log "(g) nutrition offline fallback: OK (manual logging works, descriptions fail cleanly)"
+log "(g) nutrition default (calorieninjas) capabilities + offline manual logging: OK"
 
 # Restart with strategy vars (same state dir): capabilities must flip, and
 # the strategy's outbound call must be DENIED by the per-app allowlist —
