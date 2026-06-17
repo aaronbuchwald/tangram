@@ -1026,6 +1026,11 @@ function openAgentLinkTrigger(id: string): void {
         .catch((e) => showError(String(e instanceof Error ? e.message : e)));
     },
     onClose: () => activeEditor?.editor.focus(),
+    // Resolve the Run's Agent definition by name (the Config tab's inherited
+    // config + the resolved-effective-config preview; versioning deferred).
+    agentByName: (name) => agentIndex.findAgent(name),
+    // Re-run now (Runs tab): the existing `run_agent` action, by agent name.
+    onRerun: (agent) => vault.runAgent(agent),
   });
 }
 

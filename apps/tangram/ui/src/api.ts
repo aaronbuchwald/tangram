@@ -126,6 +126,11 @@ export const vault = {
     postAction("update_invocation", { id, trigger, prompt }) as Promise<null>,
   deleteInvocation: (id: string) =>
     postAction("delete_invocation", { id }) as Promise<null>,
+  // Re-run an agent now (embedded-runs R2 — the Run editor's Runs tab "Re-run
+  // now"). Component-side `run_agent` resolves the def by name + runs it once,
+  // appending its output; returns the produced text. Not bound to the Run's
+  // schedule — a manual one-off using the Agent's instructions.
+  runAgent: (name: string) => postAction("run_agent", { name }) as Promise<string>,
   // Tools/MCP T1: the user-approval actions on a `kind: agent`'s `mcp_servers`
   // request. `approve_mcp` binds to the hash the user saw (a stale hash is
   // refused by the component).
