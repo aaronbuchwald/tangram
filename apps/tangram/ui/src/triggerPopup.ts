@@ -4,9 +4,9 @@
 // the same popup-v2 Schedule form (pre-filled) plus its prompt. Buttons:
 //
 //   - Save           → `update_invocation(id, trigger, prompt)`
-//   - Open in Agents → deep-link into the Agents tab's Invocations table,
-//                      scrolling to + briefly highlighting this invocation's
-//                      row (I3; `onOpenAgents` → `tabs.openAgents(id)`)
+//   - Open in Agents → deep-link into the Agents view's Triggers sub-tab,
+//                      switching to it and scrolling to + briefly highlighting
+//                      this trigger's row (I3; `onOpenAgents` → `tabs.openAgents(id)`)
 //   - Exit           → close with no change
 //
 // It mirrors modal.ts / agentPopup.ts's overlay language (single-instance
@@ -21,8 +21,8 @@ import type { Invocation } from "./api";
 export interface TriggerPopupCallbacks {
   /** Persist the edited trigger + prompt (`update_invocation`). */
   onSave: (trigger: string, prompt: string) => void;
-  /** "Open in Agents" — deep-link into the Agents tab's Invocations table,
-   *  scrolling to + highlighting this invocation's row (I3). */
+  /** "Open in Agents" — deep-link into the Agents view's Triggers sub-tab,
+   *  switching to it and scrolling to + highlighting this trigger's row (I3). */
   onOpenAgents: () => void;
   /** Delete the invocation (and let the caller strip the inline link). */
   onDelete: () => void;

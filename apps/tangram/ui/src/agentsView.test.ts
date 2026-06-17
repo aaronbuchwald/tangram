@@ -3,13 +3,18 @@
 // null-last sort, and the substring filter. These are DOM-free so they run
 // fast and pin the table's data shape independent of rendering.
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
+  type AgentsViewCallbacks,
   buildInvocationRows,
   filterInvocationRows,
+  focusInvocationRow,
+  renderAgentsView,
+  setSubTab,
   sortInvocationRows,
   type InvocationRow,
 } from "./agentsView";
+import type { AgentDef, AgentIndex } from "./agents";
 import type { Invocation } from "./api";
 
 const inv = (over: Partial<Invocation>): Invocation => ({
@@ -107,5 +112,156 @@ describe("filterInvocationRows", () => {
     expect(filterInvocationRows(rows, "digest day").map((r) => r.id)).toEqual(["2"]);
     expect(filterInvocationRows(rows, "digest standup")).toHaveLength(0);
     expect(filterInvocationRows(rows, "   ")).toHaveLength(2);
+  });
+});
+
+// ── DOM: the Agents | Triggers sub-tabs + the Open-in-Agents deep-link ────────
+// These mount the real view under jsdom and assert the sub-tab structure (which
+// panel is visible), the user-facing "Triggers" relabel, and that the trigger
+// deep-link activates the Triggers tab + targets the matching row.
+
+const agentDef = (over: Partial<AgentDef> = {}): AgentDef => ({
+  kind: "agent",
+  name: "standup",
+  model: "deepseek",
+  labels: [],
+  meta: {},
+  version: null,
+  mcpServers: [],
+  instructions: "",
+  fileId: "agent-file",
+  path: "Agents/standup.md",
+  ...over,
+});
+
+const agentIndex = (defs: AgentDef[]): AgentIndex => {
+  const byName = new Map(defs.map((d) => [d.name.toLowerCase(), d]));
+  return {
+    all: defs,
+    findAgent: (name) => byName.get(name.trim().toLowerCase()) ?? null,
+    has: (name) => byName.has(name.trim().toLowerCase()),
+  };
+};
+
+const callbacks = (invocations: Invocation[]): AgentsViewCallbacks => ({
+  openNote: () => {},
+  fileById: () => undefined,
+  newAgent: () => {},
+  mcpGrants: () => [],
+  fleetApps: () => [],
+  invocations: () => ({
+    all: invocations,
+    byId: (id) => invocations.find((i) => i.id === id) ?? null,
+    forAgent: () => [],
+  }),
+  hostNoteTitle: (fileId) => (fileId === "missing" ? null : `Note ${fileId}`),
+  agentByName: () => null,
+});
+
+const sampleInvocations: Invocation[] = [
+  inv({ id: "inv-1", agent: "standup", host_file_id: "f1" }),
+  inv({ id: "inv-2", agent: "digest", host_file_id: "f2", trigger: "daily at 09:00 UTC" }),
+];
+
+function mount(invocations = sampleInvocations) {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  renderAgentsView(host, agentIndex([agentDef()]), callbacks(invocations));
+  return host;
+}
+
+const panels = (host: HTMLElement) => ({
+  agents: host.querySelector<HTMLElement>(".agents-panel-agents")!,
+  triggers: host.querySelector<HTMLElement>(".agents-panel-triggers")!,
+});
+
+const subBtn = (host: HTMLElement, tab: "agents" | "triggers") =>
+  host.querySelector<HTMLButtonElement>(`.agents-subtab-btn[data-subtab="${tab}"]`)!;
+
+describe("Agents view sub-tabs", () => {
+  beforeEach(() => {
+    // Reset module-local sub-tab state + clear any persisted choice so each test
+    // starts from the documented default (Agents).
+    localStorage.clear();
+    setSubTab("agents");
+    document.body.replaceChildren();
+  });
+
+  it("renders both sub-tabs and defaults to the Agents tab", () => {
+    const host = mount();
+    expect(subBtn(host, "agents").textContent).toBe("Agents");
+    expect(subBtn(host, "triggers").textContent).toBe("Triggers");
+    expect(subBtn(host, "agents").classList.contains("active")).toBe(true);
+    expect(subBtn(host, "triggers").classList.contains("active")).toBe(false);
+
+    const { agents, triggers } = panels(host);
+    expect(agents.hidden).toBe(false);
+    expect(triggers.hidden).toBe(true);
+  });
+
+  it("uses the 'Triggers' label (not 'Invocations') for the section + count", () => {
+    setSubTab("triggers");
+    const host = mount();
+    expect(host.querySelector(".invocations-title")?.textContent).toBe("Triggers");
+    expect(host.textContent).not.toContain("Invocations");
+    // Count noun is "triggers".
+    expect(host.querySelector(".invocations-view .agents-count")?.textContent).toContain(
+      "triggers",
+    );
+  });
+
+  it("shows the renamed empty state when there are no triggers", () => {
+    setSubTab("triggers");
+    const host = mount([]);
+    expect(host.querySelector(".invocations-view .agents-empty")?.textContent).toBe(
+      "No scheduled triggers yet",
+    );
+  });
+
+  it("switches panel visibility when a sub-tab is clicked", () => {
+    const host = mount();
+    subBtn(host, "triggers").click();
+    // The click re-renders the view in-place; re-query the fresh nodes.
+    const { agents, triggers } = panels(host);
+    expect(triggers.hidden).toBe(false);
+    expect(agents.hidden).toBe(true);
+    expect(subBtn(host, "triggers").classList.contains("active")).toBe(true);
+
+    subBtn(host, "agents").click();
+    const after = panels(host);
+    expect(after.agents.hidden).toBe(false);
+    expect(after.triggers.hidden).toBe(true);
+  });
+});
+
+describe("Open-in-Agents deep-link", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    setSubTab("agents");
+    document.body.replaceChildren();
+  });
+
+  it("activates the Triggers sub-tab and targets the matching row", () => {
+    // jsdom doesn't implement scrollIntoView nor CSS.escape; stub both so the
+    // deep-link focus path (scroll the targeted row into view, after a
+    // CSS.escape'd attribute query) runs without throwing.
+    Element.prototype.scrollIntoView = () => {};
+    (globalThis as { CSS?: { escape: (s: string) => string } }).CSS ??= {
+      escape: (s: string) => s.replace(/["\\]/g, "\\$&"),
+    };
+    // Simulate the Trigger popup's deep-link: focusInvocationRow flips the
+    // sub-tab; the subsequent render (what tabs.openAgents triggers) honours it.
+    focusInvocationRow("inv-2");
+    const host = mount();
+
+    const { agents, triggers } = panels(host);
+    expect(triggers.hidden).toBe(false);
+    expect(agents.hidden).toBe(true);
+    expect(subBtn(host, "triggers").classList.contains("active")).toBe(true);
+
+    const target = host.querySelector<HTMLElement>('[data-invocation-id="inv-2"]');
+    expect(target).not.toBeNull();
+    // The flash class is added on the targeted row (then removed after a timeout).
+    expect(target?.classList.contains("invocations-row-flash")).toBe(true);
   });
 });

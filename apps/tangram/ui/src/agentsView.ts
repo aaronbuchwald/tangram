@@ -1,6 +1,10 @@
-// The Agents view (P2): a GitHub-issues-style sortable, filterable table of
-// every agent/skill indexed across the vault (the P1 frontmatter index in
-// agents.ts). Shell-UI-only — rendered into the main content area as an
+// The Agents view (P2): two sub-tabs — "Agents" and "Triggers" — behind a
+// segmented control at the top of the view (default: Agents). The Agents tab is
+// a GitHub-issues-style sortable, filterable table of every agent/skill indexed
+// across the vault (the P1 frontmatter index in agents.ts); the Triggers tab is
+// the scheduled-invocation table (user-facing "Triggers" over the replicated
+// `invocations` index — the data model/identifiers are unchanged, this is a UI
+// relabel). Shell-UI-only — rendered into the main content area as an
 // "agents" tab. Reuses the P1 index (no new backend), the run popup
 // (agentPopup.ts), and the vault write API to edit a row's frontmatter.
 //
@@ -255,7 +259,7 @@ export interface AgentsViewCallbacks {
    *  gone (orphaned handle awaiting the component's next prune tick). */
   hostNoteTitle: (fileId: string) => string | null;
   /** I3: resolve an agent definition by name (case-insensitive) so the
-   *  Invocations table's Agent cell links to the def file. Null if unindexed. */
+   *  Triggers table's Agent cell links to the def file. Null if unindexed. */
   agentByName: (name: string) => AgentDef | null;
 }
 
@@ -416,10 +420,47 @@ let invQuery = "";
 // by the Trigger popup's "Open in Agents" deep-link, consumed once).
 let pendingFocusInvocationId: string | null = null;
 
-/** Request that the invocations table scroll to + highlight the row for `id` on
- *  its next render (the Trigger-popup → Agents-tab deep-link). Consumed once. */
+/** Request that the Triggers table scroll to + highlight the row for `id` on
+ *  its next render (the Trigger-popup → Agents-tab deep-link). Also switches the
+ *  view to the Triggers sub-tab, since the table now lives behind a tab.
+ *  Consumed once. */
 export function focusInvocationRow(id: string): void {
   pendingFocusInvocationId = id;
+  setSubTab("triggers");
+}
+
+// ── sub-tabs (Agents | Triggers) ──────────────────────────────────────────────
+
+/** Which sub-tab is shown inside the Agents view. The agents list/table and the
+ *  scheduled-triggers table each live behind one tab; only one is visible at a
+ *  time. Defaults to "agents". Module-local so it survives re-renders driven by
+ *  vault state frames. */
+type SubTab = "agents" | "triggers";
+
+const SUBTAB_STORAGE_KEY = "tangram.agentsView.subTab";
+
+function loadSubTab(): SubTab {
+  try {
+    const v = localStorage.getItem(SUBTAB_STORAGE_KEY);
+    if (v === "triggers" || v === "agents") return v;
+  } catch {
+    // localStorage unavailable (private mode / tests) — fall through to default.
+  }
+  return "agents";
+}
+
+let activeSubTab: SubTab = loadSubTab();
+
+/** Set the active sub-tab (persisted best-effort). Exposed so the deep-link can
+ *  activate the Triggers tab before focusing a row. Does NOT re-render — the
+ *  caller (or the next vault-state render) paints the new selection. */
+export function setSubTab(tab: SubTab): void {
+  activeSubTab = tab;
+  try {
+    localStorage.setItem(SUBTAB_STORAGE_KEY, tab);
+  } catch {
+    // best-effort persistence only
+  }
 }
 
 // ── render ───────────────────────────────────────────────────────────────────
@@ -440,6 +481,39 @@ export function renderAgentsView(
 ): void {
   host.replaceChildren();
   const wrap = el("div", "agents-view");
+
+  // Sub-tab bar (Agents | Triggers): a segmented control reusing the popup-v2
+  // pill language. The Agents tab shows the agents list/table; the Triggers tab
+  // shows the scheduled-triggers table. Only one panel is visible at a time;
+  // default is Agents. A pending deep-link focus (set by the Trigger popup's
+  // "Open in Agents") will already have flipped `activeSubTab` to "triggers".
+  const subtabs = el("div", "agents-subtabs");
+  const seg = el("div", "agent-seg agents-subtab-seg");
+  seg.setAttribute("role", "tablist");
+  seg.setAttribute("aria-label", "Agents view sections");
+  const subTabBtn = (tab: SubTab, label: string): HTMLButtonElement => {
+    const b = el("button", "agent-seg-btn agents-subtab-btn", label) as HTMLButtonElement;
+    b.type = "button";
+    b.dataset.subtab = tab;
+    b.setAttribute("role", "tab");
+    const active = activeSubTab === tab;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+    b.addEventListener("click", () => {
+      if (activeSubTab === tab) return;
+      setSubTab(tab);
+      renderAgentsView(host, index, cb);
+    });
+    return b;
+  };
+  seg.append(subTabBtn("agents", "Agents"), subTabBtn("triggers", "Triggers"));
+  subtabs.appendChild(seg);
+  wrap.appendChild(subtabs);
+
+  // The Agents panel (the agents list/table) — visible only on the Agents tab.
+  const agentsPanel = el("div", "agents-panel agents-panel-agents");
+  agentsPanel.setAttribute("role", "tabpanel");
+  if (activeSubTab !== "agents") agentsPanel.hidden = true;
 
   // Header: a title row (title + the "+ New agent" CTA, the discoverable
   // on-ramp #9) over the GitHub-issues-style query bar + a live count.
@@ -464,7 +538,7 @@ export function renderAgentsView(
   const count = el("div", "agents-count micro");
   bar.appendChild(count);
   head.appendChild(bar);
-  wrap.appendChild(head);
+  agentsPanel.appendChild(head);
 
   const tableWrap = el("div", "agents-table-wrap");
   const table = el("table", "agents-table");
@@ -495,12 +569,19 @@ export function renderAgentsView(
   const tbody = el("tbody");
   table.appendChild(tbody);
   tableWrap.appendChild(table);
-  wrap.appendChild(tableWrap);
+  agentsPanel.appendChild(tableWrap);
+  wrap.appendChild(agentsPanel);
 
-  // I3: the Invocations section (scheduled-invocation table) under the agents
-  // list. Rendered from the live replicated index; re-rendered on each vault
-  // state along with the rest of the view.
-  renderInvocationsSection(wrap, cb, host, index);
+  // The Triggers panel (the scheduled-invocation table, user-facing "Triggers")
+  // — visible only on the Triggers tab. Rendered from the live replicated index;
+  // re-rendered on each vault state along with the rest of the view. (The data
+  // model — the `invocations` index, `invocationId` internals — is unchanged;
+  // this is a UI relabel of "Invocations" → "Triggers".)
+  const triggersPanel = el("div", "agents-panel agents-panel-triggers");
+  triggersPanel.setAttribute("role", "tabpanel");
+  if (activeSubTab !== "triggers") triggersPanel.hidden = true;
+  renderInvocationsSection(triggersPanel, cb, host, index);
+  wrap.appendChild(triggersPanel);
 
   host.appendChild(wrap);
 
@@ -573,9 +654,11 @@ export function renderAgentsView(
   paint();
 }
 
-/** Render the I3 "Invocations" section (header + query bar + sortable table)
- *  into `wrap`. Mirrors the agents table's sort/filter UX. Row click opens the
- *  host note; the Agent cell links to the agent definition. */
+/** Render the Triggers section (header + query bar + sortable table) into
+ *  `wrap`. This is the user-facing "Triggers" view over the replicated
+ *  *invocation* index (the data model is unchanged — only the label changed).
+ *  Mirrors the agents table's sort/filter UX. Row click opens the host note;
+ *  the Agent cell links to the agent definition. */
 function renderInvocationsSection(
   wrap: HTMLElement,
   cb: AgentsViewCallbacks,
@@ -586,14 +669,14 @@ function renderInvocationsSection(
 
   const head = el("div", "agents-head invocations-head");
   const titleRow = el("div", "agents-title-row");
-  titleRow.appendChild(el("h2", "invocations-title", "Invocations"));
+  titleRow.appendChild(el("h2", "invocations-title", "Triggers"));
   head.appendChild(titleRow);
 
   const bar = el("div", "agents-bar");
   const input = document.createElement("input");
   input.type = "text";
   input.className = "agents-query";
-  input.placeholder = "Filter invocations… e.g. standup daily scheduled";
+  input.placeholder = "Filter triggers… e.g. standup daily scheduled";
   input.value = invQuery;
   input.spellcheck = false;
   bar.appendChild(input);
@@ -637,14 +720,14 @@ function renderInvocationsSection(
     const all = buildInvocationRows(cb.invocations().all, now, cb.hostNoteTitle);
     const filtered = filterInvocationRows(all, invQuery);
     const rows = sortInvocationRows(filtered, invSortKey, invSortAsc);
-    count.textContent = `${rows.length} ${rows.length === 1 ? "invocation" : "invocations"}`;
+    count.textContent = `${rows.length} ${rows.length === 1 ? "trigger" : "triggers"}`;
     tbody.replaceChildren();
     if (rows.length === 0) {
       const tr = el("tr");
       const td = el("td", "agents-empty") as HTMLTableCellElement;
       td.colSpan = INV_COLUMNS.length;
       td.textContent =
-        all.length === 0 ? "No scheduled invocations yet" : "No matches";
+        all.length === 0 ? "No scheduled triggers yet" : "No matches";
       tr.appendChild(td);
       tbody.appendChild(tr);
       return;

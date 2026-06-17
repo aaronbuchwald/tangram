@@ -98,8 +98,9 @@ export class TabStore {
   }
 
   /** Open (or focus, if already open) the Agents view tab. When `focusInvocationId`
-   *  is given (the Trigger-popup "Open in Agents" deep-link), the Invocations
-   *  table scrolls to + briefly highlights that row on its next render (I3). */
+   *  is given (the Trigger-popup "Open in Agents" deep-link), the view switches to
+   *  the Triggers sub-tab and scrolls to + briefly highlights that row on its next
+   *  render (I3 — `focusInvocationRow` flips the sub-tab). */
   openAgents(focusInvocationId?: string) {
     if (focusInvocationId !== undefined) focusInvocationRow(focusInvocationId);
     this.openOrFocus(

@@ -688,6 +688,16 @@ body {
   flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
   overflow: auto; padding: 18px 22px; gap: 14px;
 }
+/* ── Agents view sub-tabs (Agents | Triggers) ──
+   A segmented control at the top of the view; reuses the popup-v2 `.agent-seg`
+   pill language. Each tab reveals one panel (the agents list, or the scheduled
+   Triggers table); only the active panel is rendered (the other is [hidden]). */
+.agents-subtabs { display: flex; flex: 0 0 auto; }
+.agents-subtab-seg { gap: 4px; }
+.agents-subtab-btn { font-size: 13px; padding: 5px 16px; }
+.agents-panel { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.agents-panel[hidden] { display: none; }
+
 .agents-head { display: flex; flex-direction: column; gap: 10px; }
 .agents-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .agents-title { margin: 0; font-size: 1.3rem; font-weight: 400; }
