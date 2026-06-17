@@ -151,8 +151,17 @@ async fn fetch_recipe_html(url: &str) -> Result<String, String> {
 
     let client = reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
-        // A real browser UA — many recipe sites 403 a bare client. Read-only GET.
-        .user_agent("Mozilla/5.0 (compatible; TangramRecipeImport/1.0)")
+        // Present as a real Chrome browser: recipe sites 403 a non-browser
+        // client. This is the cheap "better headers" attempt — sites with
+        // Cloudflare-class bot-detection still need the headless browser driver
+        // (the deferred fetch path). `Accept-Encoding` is intentionally omitted:
+        // this reqwest build has no decompression feature, so we let the server
+        // send identity rather than risk un-gunzippable bytes.
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        )
+        .default_headers(browser_headers())
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -171,6 +180,42 @@ async fn fetch_recipe_html(url: &str) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A real-Chrome request header set (minus `Accept-Encoding`, see the caller) so
+/// recipe sites that 403 a non-browser client will serve the page. Best-effort:
+/// any header that fails to parse is skipped.
+fn browser_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    const PAIRS: &[(&str, &str)] = &[
+        (
+            "accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,\
+             image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        ),
+        ("accept-language", "en-US,en;q=0.9"),
+        (
+            "sec-ch-ua",
+            "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
+        ),
+        ("sec-ch-ua-mobile", "?0"),
+        ("sec-ch-ua-platform", "\"Windows\""),
+        ("sec-fetch-dest", "document"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-site", "none"),
+        ("sec-fetch-user", "?1"),
+        ("upgrade-insecure-requests", "1"),
+    ];
+    let mut h = HeaderMap::new();
+    for (k, v) in PAIRS {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            h.insert(name, val);
+        }
+    }
+    h
 }
 
 #[cfg(test)]
