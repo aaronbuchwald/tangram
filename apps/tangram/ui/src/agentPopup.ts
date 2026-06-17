@@ -228,10 +228,12 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
     const opts = document.createElement("div");
     opts.className = "agent-options";
 
-    // ── Top-level trigger (active): One-time · Schedule · Event ──
+    // ── Top-level trigger (active): One-time · Schedule · Event ── (user-facing
+    // "Run when" — the embedded-runs Trigger→Run relabel; this picks the Run's
+    // trigger, docs/design/embedded-runs.md R1.)
     let mode: TriggerMode = "one-time";
-    const trigRow = optionRow("Trigger");
-    const seg = segGroup("Trigger");
+    const trigRow = optionRow("Run when");
+    const seg = segGroup("Run when");
     const modeBtns: Record<Exclude<TriggerMode, "event">, HTMLButtonElement> = {
       "one-time": segButton("One-time"),
       schedule: segButton("Schedule"),
@@ -260,7 +262,7 @@ export function openAgentPopup(def: AgentDef, callbacks: AgentPopupCallbacks): v
       soonHead,
       disabledRow("MCP / Tools", "Connect MCP servers/tools the agent may call. Coming in the Tools phase."),
       disabledRow("Multi-step", "Multi-step / graph workflows (LangGraph-style). Future feature."),
-      disabledRow("Tags / Labels", "Tag this invocation/run for filtering. Coming soon."),
+      disabledRow("Tags / Labels", "Tag this run for filtering. Coming soon."),
     );
     opts.append(soon);
 

@@ -152,8 +152,13 @@ const STATUS_APPROVED: &str = "approved";
 const STATUS_DENIED: &str = "denied";
 
 /// Scheduled-invocation status values (string-typed for forward-compatibility):
-/// freshly created / never run, last run succeeded, last run errored.
+/// freshly created / never run, currently executing, last run succeeded, last
+/// run errored. `running` is written in a commit *before* the (lock-free) LLM
+/// call and cleared by the append commit, so the replicated chip can reflect an
+/// in-flight execution between the two commits (embedded-runs R1; the chip's
+/// "Running" state in `apps/tangram/ui/src/agentLink.ts`).
 const STATUS_SCHEDULED: &str = "scheduled";
+const STATUS_RUNNING: &str = "running";
 const STATUS_RAN: &str = "ran";
 const STATUS_ERROR: &str = "error";
 
@@ -536,6 +541,10 @@ impl Vault {
         for (inv, def) in due {
             // The per-agent approved MCP subset (T2), from the same snapshot.
             let servers = state.approved_servers_for(&def);
+            // Mark this Run "running" BEFORE the lock-free LLM call so the
+            // replicated chip can show an in-flight execution (embedded-runs R1).
+            // The append commit below clears it to `ran`/`error`.
+            let _ = ctx.mutate("tick_agents", |m| m.mark_invocation_running(&inv.id));
             // Resolve the model response OUTSIDE the lock, then commit.
             match run_definition(&def, &inv.prompt, &servers).await {
                 Ok(output) => {
@@ -842,6 +851,23 @@ impl Vault {
     /// invocation does not re-fire). Falls back to scanning all notes when the
     /// recorded `host_file_id` no longer matches (the link was moved to another
     /// note).
+    /// Mark a Run as currently executing (`STATUS_RUNNING`) by id, in its own
+    /// commit before the lock-free LLM call. A no-op if the id is gone (the link
+    /// was deleted between selection and now). Leaves `last_run_ms`/`next_fire_ms`
+    /// untouched — only the visible status flips, so the replicated chip shows an
+    /// in-flight execution; the append commit clears it to `ran`/`error`
+    /// (embedded-runs R1).
+    fn mark_invocation_running(&mut self, id: &str) {
+        if let Some(entry) = self
+            .invocations
+            .get_or_insert_with(Vec::new)
+            .iter_mut()
+            .find(|i| i.id == id)
+        {
+            entry.status = STATUS_RUNNING.to_string();
+        }
+    }
+
     fn append_invocation_output(
         &mut self,
         inv: &Invocation,
@@ -1658,6 +1684,32 @@ mod tests {
         // Run recorded by id + status updated.
         assert_eq!(v.last_run_ms("uuid-1"), Some(1_234));
         assert_eq!(v.list_invocations()[0].status, STATUS_RAN);
+    }
+
+    #[test]
+    fn mark_running_flips_status_then_append_clears_it() {
+        // The embedded-runs R1 running transition: `mark_invocation_running`
+        // flips the Run's visible status to `running` (so the replicated chip
+        // shows an in-flight execution) WITHOUT touching last-run/next-fire; the
+        // append commit then clears it to `ran`.
+        let mut v = vault_with_invocation("standup", "uuid-1", "1m");
+        let inv = v.list_invocations()[0].clone();
+        assert_eq!(inv.status, STATUS_SCHEDULED);
+
+        v.mark_invocation_running("uuid-1");
+        let running = v.list_invocations()[0].clone();
+        assert_eq!(running.status, STATUS_RUNNING);
+        // Only the status changed — last-run is still unset.
+        assert_eq!(running.last_run_ms, None);
+
+        v.append_invocation_output(&inv, &standup_def(), "done", 9_000, STATUS_RAN);
+        let done = v.list_invocations()[0].clone();
+        assert_eq!(done.status, STATUS_RAN);
+        assert_eq!(done.last_run_ms, Some(9_000));
+
+        // Marking a missing id is a harmless no-op (the link was deleted).
+        v.mark_invocation_running("does-not-exist");
+        assert_eq!(v.list_invocations().len(), 1);
     }
 
     #[test]

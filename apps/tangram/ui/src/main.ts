@@ -32,6 +32,7 @@ import { buildLinkIndex, type LinkIndex } from "./links";
 import {
   buildAgentLink,
   buildInvocationIndex,
+  parseAgentLinks,
   parseSchedule,
   type InvocationIndex,
 } from "./invocations";
@@ -113,7 +114,7 @@ let linkIndex: LinkIndex = buildLinkIndex([]);
 // `invocations` records, carried on the vault state frame and rebuilt here on
 // every state alongside the other indexes. The inline `agent://<id>` link in a
 // note is only the handle; the trigger/prompt/last-run live in this index. The
-// Trigger popup reads an invocation from here by id.
+// Run editor reads a Run from here by id.
 let invocationIndex: InvocationIndex = buildInvocationIndex([]);
 const collapsed = new Set<string>(); // collapsed folder paths
 const tabs = new TabStore();
@@ -997,11 +998,11 @@ function headingToBaseName(heading: string): string | null {
   return base.length ? base : null;
 }
 
-// Open the Trigger popup for an inline `agent://<id>` link click. Reads the
-// invocation from the live (replicated) index by id; the popup stays on the
-// file. Save edits the trigger/prompt (`update_invocation`); Delete removes the
-// index entry AND strips the inline link from the open note (so the handle and
-// the record go together); "Open in Agents" switches to the Agents tab.
+// Open the Run editor for an inline `agent://<id>` chip click. Reads the Run
+// from the live (replicated) index by id; the editor stays on the file. Save
+// edits the schedule/prompt (`update_invocation`); Delete removes the index
+// entry AND strips the inline link from the open note (so the handle and the
+// record go together); "Open in Agents" switches to the Agents tab.
 function openAgentLinkTrigger(id: string): void {
   const inv = invocationIndex.byId(id);
   if (!inv) {
@@ -1029,7 +1030,7 @@ function openAgentLinkTrigger(id: string): void {
 }
 
 // Strip the inline `[…](agent://<id>)` link from the active note editor (used by
-// the Trigger popup's Delete). Finds the token in the live doc and replaces it
+// the Run editor's Delete). Finds the token in the live doc and replaces it
 // with its label text (so the sentence reads naturally), then the debounced
 // onChange persists the edit and the component reconcile prunes the orphan.
 function stripAgentLink(id: string): void {
@@ -1044,6 +1045,23 @@ function stripAgentLink(id: string): void {
   const label = doc.slice(open + 1, close); // the `⚡ <agent>` label
   const to = close + token.length;
   editor.replaceRange(open, to, label);
+}
+
+// Best-effort scroll-to-latest-output for a Run chip's `↓` (R1; the formal
+// output callout + block-id backlink is R3). The component appends each run's
+// output as a `> Agent: …` block right after the `](agent://<id>)` link in the
+// host note. We find the chip's link in the active editor, then scroll to the
+// FIRST `> Agent:` block following it (the most recent append lands closest to
+// the link, since `append_invocation_output` inserts at the link end). Falls
+// back to scrolling to the link itself when no output block is found yet.
+function scrollToLatestOutput(id: string): void {
+  const editor = activeEditor?.editor;
+  if (!editor) return;
+  const doc = editor.doc;
+  const link = parseAgentLinks(doc).find((l) => l.id === id);
+  if (!link) return;
+  const after = doc.indexOf("\n> Agent:", link.to);
+  editor.scrollToPos(after === -1 ? link.to : after + 1);
 }
 
 // A single Obsidian-style "Live Preview" CodeMirror 6 editor (issue #11): the
@@ -1170,11 +1188,19 @@ function renderNoteTab(fileId: string) {
     // The note being edited, so it's excluded from its own link autocomplete.
     // Read live from the index in case the note is renamed while open.
     () => filesById.get(fileId)?.path ?? null,
-    // Click an inline `[⚡ <agent>](agent://<id>)` link → open the Trigger popup
-    // for that invocation (read from the live index by id). Save edits the
-    // trigger/prompt; Delete removes the index entry AND strips the inline link;
-    // "Open in Agents" switches to the Agents tab (the table lands later).
+    // Click an inline `[⚡ <agent>](agent://<id>)` chip → open the Run editor
+    // for that Run (read from the live index by id). Save edits the
+    // schedule/prompt; Delete removes the index entry AND strips the inline link;
+    // "Open in Agents" switches to the Agents tab's Runs sub-tab.
     (id) => openAgentLinkTrigger(id),
+    // Live status resolver: read the Run record by id from the live replicated
+    // index so the chip renders Idle / Running / Done / Error and restyles as the
+    // Run progresses (the index is rebuilt on each vault state; the note tab
+    // re-mounts the editor so the chip refreshes).
+    (id) => invocationIndex.byId(id),
+    // The Done chip's `↓` affordance: scroll to the Run's latest appended output
+    // (best-effort in R1 — the formal callout + block-id backlink is R3).
+    (id) => scrollToLatestOutput(id),
   );
   state.editor = editor;
 

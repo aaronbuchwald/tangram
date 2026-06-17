@@ -190,7 +190,7 @@ describe("Agents view sub-tabs", () => {
   it("renders both sub-tabs and defaults to the Agents tab", () => {
     const host = mount();
     expect(subBtn(host, "agents").textContent).toBe("Agents");
-    expect(subBtn(host, "triggers").textContent).toBe("Triggers");
+    expect(subBtn(host, "triggers").textContent).toBe("Runs");
     expect(subBtn(host, "agents").classList.contains("active")).toBe(true);
     expect(subBtn(host, "triggers").classList.contains("active")).toBe(false);
 
@@ -199,22 +199,23 @@ describe("Agents view sub-tabs", () => {
     expect(triggers.hidden).toBe(true);
   });
 
-  it("uses the 'Triggers' label (not 'Invocations') for the section + count", () => {
+  it("uses the 'Runs' label (not 'Invocations'/'Triggers') for the section + count", () => {
     setSubTab("triggers");
     const host = mount();
-    expect(host.querySelector(".invocations-title")?.textContent).toBe("Triggers");
+    expect(host.querySelector(".invocations-title")?.textContent).toBe("Runs");
     expect(host.textContent).not.toContain("Invocations");
-    // Count noun is "triggers".
+    expect(host.textContent).not.toContain("Triggers");
+    // Count noun is "runs".
     expect(host.querySelector(".invocations-view .agents-count")?.textContent).toContain(
-      "triggers",
+      "runs",
     );
   });
 
-  it("shows the renamed empty state when there are no triggers", () => {
+  it("shows the renamed empty state when there are no runs", () => {
     setSubTab("triggers");
     const host = mount([]);
     expect(host.querySelector(".invocations-view .agents-empty")?.textContent).toBe(
-      "No scheduled triggers yet",
+      "No scheduled runs yet",
     );
   });
 

@@ -1,12 +1,15 @@
-// The Trigger popup (the scheduled-invocation redesign): opened by clicking an
-// inline `[⚡ <agent>](agent://<id>)` link in the editor. It stays on the file,
-// loads the invocation from the replicated index by id, and shows its trigger in
-// the same popup-v2 Schedule form (pre-filled) plus its prompt. Buttons:
+// The Run editor (the embedded-runs redesign; user-facing "Run", internally the
+// scheduled invocation): opened by clicking an inline `[⚡ <agent>](agent://<id>)`
+// chip in the editor. It stays on the file, loads the Run from the replicated
+// index by id, and shows its schedule in the same popup-v2 Schedule form
+// (pre-filled) plus its prompt. (R1 is the click-to-edit popup; the full 4-tab
+// Run editor — Config/Runs/History=Executions/Observability — is R2, see
+// docs/design/embedded-runs.md.) Buttons:
 //
 //   - Save           → `update_invocation(id, trigger, prompt)`
-//   - Open in Agents → deep-link into the Agents view's Triggers sub-tab,
+//   - Open in Agents → deep-link into the Agents view's Runs sub-tab,
 //                      switching to it and scrolling to + briefly highlighting
-//                      this trigger's row (I3; `onOpenAgents` → `tabs.openAgents(id)`)
+//                      this Run's row (I3; `onOpenAgents` → `tabs.openAgents(id)`)
 //   - Exit           → close with no change
 //
 // It mirrors modal.ts / agentPopup.ts's overlay language (single-instance
@@ -19,10 +22,10 @@ import type { Invocation } from "./api";
 
 /** Side effects the popup needs from the shell. */
 export interface TriggerPopupCallbacks {
-  /** Persist the edited trigger + prompt (`update_invocation`). */
+  /** Persist the edited schedule + prompt (`update_invocation`). */
   onSave: (trigger: string, prompt: string) => void;
-  /** "Open in Agents" — deep-link into the Agents view's Triggers sub-tab,
-   *  switching to it and scrolling to + highlighting this trigger's row (I3). */
+  /** "Open in Agents" — deep-link into the Agents view's Runs sub-tab,
+   *  switching to it and scrolling to + highlighting this Run's row (I3). */
   onOpenAgents: () => void;
   /** Delete the invocation (and let the caller strip the inline link). */
   onDelete: () => void;
@@ -32,14 +35,14 @@ export interface TriggerPopupCallbacks {
 
 let current: { dismiss: () => void } | null = null;
 
-/** True while the Trigger popup is open (used by the editor's click guard). */
+/** True while the Run editor is open (used by the editor's click guard). */
 export function isTriggerPopupOpen(): boolean {
   return current !== null;
 }
 
 /**
- * Open the Trigger popup for an existing scheduled invocation, pre-filled from
- * its index record. Single-instance: any open popup is dismissed first.
+ * Open the Run editor for an existing scheduled Run, pre-filled from its index
+ * record. Single-instance: any open popup is dismissed first.
  */
 export function openTriggerPopup(
   inv: Invocation,
@@ -84,7 +87,8 @@ export function openTriggerPopup(
 
   const title = document.createElement("div");
   title.className = "modal-title";
-  title.textContent = `Trigger: ${inv.agent}`;
+  title.textContent = `Run: ${inv.agent}`;
+  dialog.setAttribute("aria-label", `Edit run for ${inv.agent}`);
 
   // Prompt editor (the invocation's user prompt).
   const promptInput = document.createElement("textarea");

@@ -109,7 +109,10 @@ symlink to `.agents/skills`.
   saved agent (markdown + frontmatter), `/<name>` invokes it; a *scheduled*
   invocation is a dark-blue `agent://<id>` inline link backed by a replicated
   invocation index (the link is the handle, the index holds the trigger),
-  driven host-side by `src/scheduler.rs` (`docs/design/agents.md`). A
+  driven host-side by `src/scheduler.rs` (`docs/design/agents.md`). The inline
+  surface's staged redesign — the two-layer **Agent / Run / Execution** model
+  (user-facing Trigger→Run), atomic CM6 chip + live status, R1–R4 roadmap —
+  is `docs/design/embedded-runs.md`. A
   right-sidebar **app chat** wires DeepSeek to the active app's MCP tools via
   a browser MCP client + tool-calling loop (`ui/src/{chatPanel,mcpClient,llmChat}.ts`)
 - Two execution paths to serve all apps on one port (README "Run them all in

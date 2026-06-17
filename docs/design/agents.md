@@ -7,6 +7,11 @@ instructions, and the **host** runs the LLM↔tool loop in the declared sandbox.
 Component-backed "larger system" agents are a later escape hatch (§12), **not
 v1**.
 
+**The shell's inline surface** (the in-note Agent/Run chip + Run editor) has its
+own staged redesign — the two-layer **Agent / Run / Execution** model and the
+R1–R4 roadmap — in [`docs/design/embedded-runs.md`](embedded-runs.md). That doc
+owns the inline/UI story; this doc owns the execution model and host runtime.
+
 **The thesis.** Agents and skills are the **application layer that composes
 Tangram's existing pillars** — they introduce essentially no new infrastructure.
 The LLM brain is the `/llm/<provider>` agentgateway proxy (ADR-0012,

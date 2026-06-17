@@ -49,8 +49,10 @@ import {
 } from "./wikiLink";
 import {
   type AgentLinkOpener,
+  type RunStatusResolver,
+  type ScrollToOutput,
+  agentChip,
   agentLinkClick,
-  agentLinkHighlight,
 } from "./agentLink";
 import {
   type WikiCandidateProvider,
@@ -152,10 +154,11 @@ const theme = EditorView.theme(
       textDecorationStyle: "dashed",
       opacity: "0.75",
     },
-    // Inline `[⚡ <agent>](agent://<id>)` agent links (the scheduled-invocation
-    // handle). DARK-BLUE so they read as a distinct affordance from `[[ ]]`
-    // wikilinks (accent blue) — a click opens the Trigger popup. A subtle tinted
-    // chip + bolt glyph marks it as an actionable agent schedule.
+    // Inline `[⚡ <agent>](agent://<id>)` Run chips (the embedded-runs handle,
+    // R1). An ATOMIC widget (the cursor steps over it) rendering the Run's live
+    // status. DARK-BLUE base so it reads as a distinct affordance from `[[ ]]`
+    // wikilinks (accent blue); a click opens the Run editor. Per-state tints
+    // below distinguish Idle / Running / Done / Error at a glance.
     ".cm-agent-link": {
       color: "#1746a2",
       backgroundColor: "rgba(23,70,162,0.14)",
@@ -164,7 +167,25 @@ const theme = EditorView.theme(
       fontWeight: "600",
       textDecoration: "none",
       cursor: "pointer",
+      whiteSpace: "nowrap",
     },
+    // Running: a muted amber while the execution is in flight.
+    ".cm-agent-link-running": {
+      color: "#9a6b00",
+      backgroundColor: "rgba(214,158,46,0.16)",
+    },
+    // Done: an accent-green tint; the trailing `↓` jumps to the latest output.
+    ".cm-agent-link-done": {
+      color: "#1f8f5f",
+      backgroundColor: "rgba(31,210,134,0.14)",
+    },
+    // Error: red, so a failed Run is unmissable.
+    ".cm-agent-link-error": {
+      color: "#c5402f",
+      backgroundColor: "rgba(197,64,47,0.16)",
+    },
+    // The Done chip's `↓` jump-to-output affordance — a slightly louder hit area.
+    ".cm-agent-link-jump": { cursor: "pointer", fontWeight: "700" },
     // Blockquote: a left bar + dim text, drawn on the line so it survives the
     // concealed `>` marker.
     ".cm-lp-quote": {
@@ -256,11 +277,20 @@ export class MdEditor {
     // The path of the note being edited (sans `.md`), used to exclude it from
     // its own `[[ ]]` autocomplete candidates. Defaults to "unknown".
     currentNotePath: () => string | null = () => null,
-    // Inline `[⚡ <agent>](agent://<id>)` agent-link support (the scheduled-
-    // invocation redesign). Clicking a dark-blue agent link opens the Trigger
-    // popup for its invocation id. Defaults to a no-op so non-vault editors are
-    // unchanged (the highlight is harmless and always on).
+    // Inline `[⚡ <agent>](agent://<id>)` chip support (the embedded-runs Run
+    // handle, docs/design/embedded-runs.md R1). Clicking a chip opens the Run
+    // editor for its id. Defaults to a no-op so non-vault editors are unchanged
+    // (the chip render is harmless and always on).
     onOpenAgentLink: AgentLinkOpener = () => {},
+    // Resolves a chip's id to its live Run record so the chip renders status
+    // (Idle/Running/Done/Error). Reads through the live replicated index, so the
+    // chip restyles as a Run progresses. Defaults to "no record" → every chip
+    // reads as Idle, a harmless no-op for non-vault editors.
+    resolveRunStatus: RunStatusResolver = () => null,
+    // The Done chip's `↓` affordance: scroll the note to the Run's latest
+    // appended output (best-effort in R1; the formal callout + block-id backlink
+    // is R3). Defaults to a no-op.
+    onScrollToOutput: ScrollToOutput = () => {},
   ) {
     this.lastWritten = initialDoc;
     // The Enter trigger + click-to-reopen are only wired when a handler is
@@ -299,11 +329,12 @@ export class MdEditor {
         // default resolver every link is a harmless ghost and clicks are inert.
         wikiLinkHighlight(resolveWikiLink),
         wikiLinkClick(resolveWikiLink, onOpenWikiLink),
-        // Inline `agent://<id>` agent-link decoration + click-to-edit (the
-        // scheduled-invocation handle). Dark-blue, distinct from `.cm-wikilink`;
-        // a click opens the Trigger popup. Always on; the click is a no-op with
-        // the default opener.
-        agentLinkHighlight(),
+        // Inline `agent://<id>` chip: an ATOMIC live-status widget replacing the
+        // markdown link (the embedded-runs Run handle, R1). The cursor steps over
+        // it (atomicRanges) so it is never text-edited; a click opens the Run
+        // editor. Always on; with the default resolver every chip reads Idle and
+        // the click is a no-op.
+        agentChip(resolveRunStatus, onScrollToOutput),
         agentLinkClick(onOpenAgentLink),
         // CM6 allows `autocompletion()` exactly ONCE — two configured instances
         // throw "Config merge conflict for field override" and the editor never
@@ -356,6 +387,13 @@ export class MdEditor {
   /** Refocus the editor (e.g. after the agent popup is dismissed). */
   focus(): void {
     this.view.focus();
+  }
+
+  /** Scroll the given document offset into view (best-effort; clamped to the
+   *  doc). Used by a Run chip's `↓` to jump to its latest appended output. */
+  scrollToPos(pos: number): void {
+    const clamped = Math.max(0, Math.min(pos, this.view.state.doc.length));
+    this.view.dispatch({ effects: EditorView.scrollIntoView(clamped, { y: "center" }) });
   }
 
   /** The current editor contents. */
