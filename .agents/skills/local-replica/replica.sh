@@ -234,7 +234,17 @@ PY
   )
   cargo build --release -p tangram-host
   for app in "${WASM_APPS[@]}"; do
-    cargo build -p "tangram-$app" --lib --target wasm32-wasip2 --release
+    # The cargo package name isn't always `tangram-<app>` (the shell is
+    # `tangram-app-tangram`, feedback `tangram-app-feedback`, …). Read the real
+    # package name from the app crate's Cargo.toml; skip apps with no local
+    # crate (they arrive via the federated registry as url+hash artifacts).
+    cargo_toml="$DIR/apps/$app/Cargo.toml"
+    if [ ! -f "$cargo_toml" ]; then
+      echo "  (skipping '$app' — no local crate at apps/$app)" >&2
+      continue
+    fi
+    pkg="$(awk -F'"' '/^name[[:space:]]*=/{print $2; exit}' "$cargo_toml")"
+    cargo build -p "$pkg" --lib --target wasm32-wasip2 --release
   done
 
   for f in "$PID_FILE" "$WASM_PID_FILE"; do
